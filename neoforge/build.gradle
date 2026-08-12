@@ -34,6 +34,12 @@ runs {
     server {
         programArgument '--nogui'
     }
+    client {
+        // 客户端自动化实测辅助：-PquickPlay 时自动加入 localhost 服务器（否则停在主菜单）
+        if (project.hasProperty('quickPlay')) {
+            programArguments '--quickPlayMultiplayer', (project.findProperty('quickPlay') ?: 'localhost:25565')
+        }
+    }
 }
 
 tasks.named('processResources', ProcessResources).configure {

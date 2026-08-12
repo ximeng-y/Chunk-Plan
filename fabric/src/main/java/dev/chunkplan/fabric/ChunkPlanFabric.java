@@ -59,6 +59,11 @@ public final class ChunkPlanFabric implements ModInitializer {
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> onPlayerJoin(handler.getPlayer()));
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> onPlayerDisconnect(handler.getPlayer()));
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> QuotaCommands.register(dispatcher));
+        // 仅开发环境：模拟玩家实体调试命令（客户端不可用时的端到端验证）
+        if (FabricLoader.getInstance().isDevelopmentEnvironment()) {
+            CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
+                    DevCommands.register(dispatcher));
+        }
 
         LOG.info("ChunkPlan Fabric 壳已注册，配置文件: {}", configFile);
     }
@@ -90,18 +95,24 @@ public final class ChunkPlanFabric implements ModInitializer {
             return;
         }
         int tick = server.getTickCount();
-        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-            try {
-                UUID uuid = player.getUUID();
-                boolean exempt = eng.isExempt(uuid, player.hasPermissions(2));
-                QuotaEngine.TickResult result = eng.onPlayerTick(uuid, exempt,
-                        player.level().dimension().location().toString(),
-                        player.getX(), player.getY(), player.getZ());
-                if (result.type() == QuotaEngine.ResultType.BAN) {
-                    applyBan(player, result.message(), result.banUntilMillis());
-                }
-            } catch (Exception e) {
-                LOG.error("玩家 {} tick 计费处理异常", player.getGameProfile().getName(), e);
+        // 真实玩家（PlayerList）+ 模拟玩家（dev 调试注册表，tp 后实体 section 查询不可靠）
+        java.util.Set<ServerPlayer> seen = new java.util.HashSet<>(server.getPlayerList().getPlayers());
+        for (ServerPlayer player : seen) {
+            handlePlayerTick(eng, player);
+        }
+        // 先清理死实体（ban 时 disconnect 移除的实体不会自动出注册表）
+        DevCommands.MOCK_PLAYERS.removeIf(p -> p.isRemoved());
+        // 遍历副本：applyBan 会在遍历中移除玩家，直接遍历原列表会 CME
+        for (ServerPlayer player : new java.util.ArrayList<>(DevCommands.MOCK_PLAYERS)) {
+            if (seen.add(player)) {
+                handlePlayerTick(eng, player);
+            }
+        }
+        for (net.minecraft.server.level.ServerLevel level : server.getAllLevels()) {
+            for (ServerPlayer player : level.getEntities(
+                    net.minecraft.world.level.entity.EntityTypeTest.forClass(ServerPlayer.class),
+                    net.minecraft.world.phys.AABB.ofSize(level.getSharedSpawnPos().getCenter(), 6.0E7, 6.0E7, 6.0E7), e -> seen.add(e))) {
+                handlePlayerTick(eng, player);
             }
         }
         long banScanInterval = eng.getConfig().banScanIntervalSec() * 20;
@@ -111,6 +122,21 @@ public final class ChunkPlanFabric implements ModInitializer {
         }
         if (tick % saveInterval == 0) {
             eng.saveAll();
+        }
+    }
+
+    private void handlePlayerTick(QuotaEngine eng, ServerPlayer player) {
+        try {
+            UUID uuid = player.getUUID();
+            boolean exempt = eng.isExempt(uuid, player.hasPermissions(2));
+            QuotaEngine.TickResult result = eng.onPlayerTick(uuid, exempt,
+                    player.level().dimension().location().toString(),
+                    player.getX(), player.getY(), player.getZ());
+            if (result.type() == QuotaEngine.ResultType.BAN) {
+                applyBan(player, result.message(), result.banUntilMillis());
+            }
+        } catch (Exception e) {
+            LOG.error("玩家 {} tick 计费处理异常", player.getGameProfile().getName(), e);
         }
     }
 
@@ -146,7 +172,16 @@ public final class ChunkPlanFabric implements ModInitializer {
         bans.add(new UserBanListEntry(profile, new Date(), "ChunkPlan",
                 new Date(untilMillis), message));
         engine.getBanStore().add(new ManagedBanStore.Entry(profile.getId(), message, untilMillis));
-        player.connection.disconnect(Component.literal(message));
+        if (DevCommands.MOCK_PLAYERS.contains(player)) {
+            // 模拟玩家（dev 调试，虚拟连接 disconnect 是 no-op）：直接移除实体模拟被踢出
+            player.remove(net.minecraft.world.entity.Entity.RemovalReason.DISCARDED);
+            DevCommands.MOCK_PLAYERS.remove(player);
+        } else if (player.connection != null) {
+            // 真实连接：正常踢出（客户端断开后由 PlayerList 移除实体）
+            player.connection.disconnect(Component.literal(message));
+        } else {
+            player.kill();
+        }
         LOG.info("玩家 {} 探索额度耗尽，临时封禁至 {}（{}）",
                 profile.getName(), new Date(untilMillis), message);
     }
@@ -157,7 +192,7 @@ public final class ChunkPlanFabric implements ModInitializer {
             UserBanList bans = server.getPlayerList().getBans();
             for (ManagedBanStore.Entry entry : engine.getBanStore().all()) {
                 if (!engine.isAllLinesExceeded(entry.uuid())) {
-                    GameProfile profile = new GameProfile(entry.uuid(), null);
+                    GameProfile profile = new GameProfile(entry.uuid(), "");
                     if (bans.isBanned(profile)) {
                         bans.remove(profile);
                         LOG.info("已解除玩家 {} 的 ChunkPlan 临时封禁", entry.uuid());

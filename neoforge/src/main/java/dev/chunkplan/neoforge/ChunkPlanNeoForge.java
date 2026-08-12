@@ -96,6 +96,11 @@ public final class ChunkPlanNeoForge {
             if (engine == null || !(event.getEntity() instanceof ServerPlayer player)) {
                 return;
             }
+            handlePlayerTick(player);
+        }
+
+        /** 计费核心（事件与 mock 遍历共用） */
+        static void handlePlayerTick(ServerPlayer player) {
             try {
                 UUID uuid = player.getUUID();
                 boolean exempt = engine.isExempt(uuid, player.hasPermissions(2));
@@ -149,6 +154,12 @@ public final class ChunkPlanNeoForge {
             }
             MinecraftServer server = event.getServer();
             int tick = server.getTickCount();
+            // mock 玩家未进实体 ticking 列表（PlayerTickEvent.Post 不触发），壳层手动计费；
+            // 遍历副本：applyBan 会在遍历中移除玩家，直接遍历原列表会 CME
+            DevCommands.MOCK_PLAYERS.removeIf(p -> p.isRemoved());
+            for (ServerPlayer player : new java.util.ArrayList<>(DevCommands.MOCK_PLAYERS)) {
+                handlePlayerTick(player);
+            }
             long banScanInterval = eng.getConfig().banScanIntervalSec() * 20;
             long saveInterval = eng.getConfig().saveIntervalSec() * 20;
             if (tick % banScanInterval == 0) {
@@ -164,6 +175,10 @@ public final class ChunkPlanNeoForge {
         @SubscribeEvent
         public static void onRegisterCommands(RegisterCommandsEvent event) {
             QuotaCommands.register(event.getDispatcher());
+            // 仅开发环境：模拟玩家实体调试命令（客户端不可用时的端到端验证）
+            if (net.neoforged.fml.loading.FMLLoader.isProduction() == false) {
+                DevCommands.register(event.getDispatcher());
+            }
         }
 
         // ---------- 内部 ----------
@@ -176,7 +191,16 @@ public final class ChunkPlanNeoForge {
             bans.add(new UserBanListEntry(profile, new Date(), "ChunkPlan",
                     new Date(untilMillis), message));
             engine.getBanStore().add(new ManagedBanStore.Entry(profile.getId(), message, untilMillis));
-            player.connection.disconnect(Component.literal(message));
+            if (DevCommands.MOCK_PLAYERS.contains(player)) {
+                // 模拟玩家（dev 调试，虚拟连接 disconnect 是 no-op）：直接移除实体模拟被踢出
+                player.remove(net.minecraft.world.entity.Entity.RemovalReason.DISCARDED);
+                DevCommands.MOCK_PLAYERS.remove(player);
+            } else if (player.connection != null) {
+                // 真实连接：正常踢出（客户端断开后由 PlayerList 移除实体）
+                player.connection.disconnect(Component.literal(message));
+            } else {
+                player.kill();
+            }
             LOG.info("玩家 {} 探索额度耗尽，临时封禁至 {}（{}）",
                     profile.getName(), new Date(untilMillis), message);
         }
@@ -187,7 +211,7 @@ public final class ChunkPlanNeoForge {
                 UserBanList bans = server.getPlayerList().getBans();
                 for (ManagedBanStore.Entry entry : engine.getBanStore().all()) {
                     if (!engine.isAllLinesExceeded(entry.uuid())) {
-                        GameProfile profile = new GameProfile(entry.uuid(), null);
+                        GameProfile profile = new GameProfile(entry.uuid(), "");
                         if (bans.isBanned(profile)) {
                             bans.remove(profile);
                             LOG.info("已解除玩家 {} 的 ChunkPlan 临时封禁", entry.uuid());

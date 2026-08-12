@@ -40,3 +40,18 @@ processResources {
                 'mod_authors': "${mod_authors}", 'minecraft_version': "${minecraft_version}"
     }
 }
+
+loom {
+    runs {
+        client {
+            // 客户端自动化实测辅助：-PquickPlay 时自动加入 localhost 服务器（否则停在主菜单）
+            if (project.hasProperty('quickPlay')) {
+                programArgs '--quickPlayMultiplayer', (project.findProperty('quickPlay') ?: 'localhost:25565')
+                // 无人值守会话窗口合成异常时用独占全屏绕过（渲染直出 GPU）
+                if (project.hasProperty('fullscreen')) {
+                    programArgs '--fullscreen'
+                }
+            }
+        }
+    }
+}
