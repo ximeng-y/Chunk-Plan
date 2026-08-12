@@ -76,6 +76,12 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
    - `applyBan` 对 mock 玩家（注册表内）直接 `remove(DISCARDED)` 模拟踢出（虚拟连接 `disconnect` 是 no-op）；**遍历注册表时 applyBan 会 remove → 必须遍历副本否则 CME**
    - usercache 会被同名不同 uuid 的 mock 污染 → `resolvePlayer` 顺序：在线实体（PlayerList + 注册表）> UUID 直解 > usercache
 10. **分钟桶粒度**：消费记入 `epochMinute` 桶，窗口按桶滑出 → ban 实际持续 ≈ 消费所在分钟结束 + 窗口长（比精确窗口**短最多 60 秒**，双端实测一致，是设计语义非 bug）
+11. **协议级真实客户端实测**（GUI 渲染被环境阻断后的 6.2 验证方案，比 mock 更接近真实链路）：
+   - node `mineflayer`/`minecraft-protocol`（PrismarineJS）可完整走 1.21.1 登录→加入世界→位置/命令→踢出/ban 拦截链路（dev 服务器 offline-mode）
+   - **原版移动校验**：非鞘翅位移平方 > `100×包数` 即拒（`moved too quickly`，约 10 格/tick 上限）→ 客户端位置包无法大步瞬移；高速 2x 实测用 `/tp` 命令（OP 权限）驱动
+   - mineflayer 物理引擎在目标区块未加载时**不发位置包**（`blockAt()==null` 提前 return）→ 手动 `_client.write('position')` 也不可靠（与物理发包冲突）；真实移动验证以 `/tp` 命令为准
+   - 登录拦截的客户端证据：原版 `multiplayer.disconnect.banned.reason` 踢出消息（含恢复时间）
+12. **NeoForge /quota reload 必须读文件**：`ModConfigSpec` 值只在启动时加载，运行中改 toml 不感知 → `NeoForgeConfig.toQuotaConfigFromFile()`（NightConfig FileConfig 直接解析，失败回退 spec 并告警）；Fabric 的 reload 本来就是文件驱动。另注意 NightConfig 读 TOML 整数返回 `Integer`（非 Long），需 `Number.longValue()` 转换
 
 ## 约定
 

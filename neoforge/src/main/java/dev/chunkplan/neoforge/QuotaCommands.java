@@ -113,7 +113,10 @@ public final class QuotaCommands {
             return 0;
         }
         List<String> warnings = new ArrayList<>();
-        QuotaConfig config = NeoForgeConfig.toQuotaConfig(warnings);
+        // 直接从 TOML 文件解析（运行中改配置热生效，与 Fabric 行为一致）
+        java.nio.file.Path configFile = ctx.getSource().getServer().getServerDirectory()
+                .resolve("config").resolve("chunkplan-server.toml");
+        QuotaConfig config = NeoForgeConfig.toQuotaConfigFromFile(configFile, warnings);
         for (String w : warnings) {
             org.slf4j.LoggerFactory.getLogger("ChunkPlan").warn("配置告警: {}", w);
         }

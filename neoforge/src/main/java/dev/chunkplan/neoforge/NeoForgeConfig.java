@@ -1,5 +1,6 @@
 package dev.chunkplan.neoforge;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -103,5 +104,60 @@ public final class NeoForgeConfig {
                 .banScanIntervalSec(BAN_SCAN_INTERVAL_SEC.get())
                 .logFeeEvents(LOG_FEE_EVENTS.get())
                 .build(warnings);
+    }
+
+    /**
+     * /quota reload 用：直接从 TOML 文件解析（运行中修改文件后热生效）。
+     * spec 内存值只在启动时加载，不感知运行中文件修改；解析失败回退 spec 内存值并告警。
+     */
+    public static QuotaConfig toQuotaConfigFromFile(Path file, List<String> warnings) {
+        try (com.electronwill.nightconfig.core.file.FileConfig cfg =
+                     com.electronwill.nightconfig.core.file.FileConfig.of(file)) {
+            cfg.load();
+            List<String> windows = cfg.getOrElse("lines", List.of());
+            List<? extends Number> limits = cfg.getOrElse("lineLimits", List.of());
+            List<QuotaConfig.Line> lines = new ArrayList<>();
+            int n = Math.min(windows.size(), limits.size());
+            if (windows.size() != limits.size()) {
+                warnings.add("lines 与 lineLimits 数量不一致（" + windows.size() + " vs " + limits.size()
+                        + "），多余项已丢弃");
+            }
+            for (int i = 0; i < n; i++) {
+                try {
+                    lines.add(new QuotaConfig.Line(
+                            DurationParser.parseSeconds(windows.get(i)), limits.get(i).doubleValue()));
+                } catch (IllegalArgumentException e) {
+                    warnings.add("额度线 " + i + " 非法（window=" + windows.get(i) + ", limit=" + limits.get(i) + "）：" + e.getMessage());
+                }
+            }
+            List<UUID> exempt = new ArrayList<>();
+            Object exemptRaw = cfg.get("exemptPlayers");
+            if (exemptRaw instanceof List<?> exemptList) {
+                for (Object s : exemptList) {
+                    try {
+                        exempt.add(UUID.fromString(String.valueOf(s)));
+                    } catch (IllegalArgumentException e) {
+                        warnings.add("exemptPlayers 含非法 UUID: " + s);
+                    }
+                }
+            }
+            Object saveRaw = cfg.get("saveIntervalSec");
+            Object scanRaw = cfg.get("banScanIntervalSec");
+            return QuotaConfig.builder()
+                    .lines(lines)
+                    .firstEntryFee(cfg.getOrElse("firstEntryFee", FIRST_ENTRY_FEE.get()))
+                    .familiarEntryFee(cfg.getOrElse("familiarEntryFee", FAMILIAR_ENTRY_FEE.get()))
+                    .highSpeedThreshold(cfg.getOrElse("highSpeedThreshold", HIGH_SPEED_THRESHOLD.get()))
+                    .highSpeedMultiplier(cfg.getOrElse("highSpeedMultiplier", HIGH_SPEED_MULTIPLIER.get()))
+                    .exemptByDefault(cfg.getOrElse("exemptByDefault", EXEMPT_BY_DEFAULT.get()))
+                    .exemptPlayers(exempt)
+                    .saveIntervalSec(saveRaw instanceof Number sv ? sv.longValue() : SAVE_INTERVAL_SEC.get())
+                    .banScanIntervalSec(scanRaw instanceof Number sc ? sc.longValue() : BAN_SCAN_INTERVAL_SEC.get())
+                    .logFeeEvents(cfg.getOrElse("logFeeEvents", LOG_FEE_EVENTS.get()))
+                    .build(warnings);
+        } catch (Exception e) {
+            warnings.add("配置文件解析失败（" + e.getMessage() + "），回退为已加载配置");
+            return toQuotaConfig(warnings);
+        }
     }
 }
