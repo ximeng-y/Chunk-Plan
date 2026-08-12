@@ -1,0 +1,15 @@
+// ChunkPlan 根构建脚本：仅提供各子模块的公共约定
+// 三个子模块：common（纯 Java 记账引擎）、neoforge（薄壳）、fabric（薄壳）
+
+allprojects {
+    group = 'dev.chunkplan'
+    version = '0.1.0'
+}
+
+subprojects {
+    repositories {
+        mavenCentral()
+        maven { url = 'https://maven.neoforged.net/releases' }
+        maven { url = 'https://maven.fabricmc.net' }
+    }
+}

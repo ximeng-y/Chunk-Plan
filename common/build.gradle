@@ -1,0 +1,28 @@
+// common：纯 Java 记账引擎，零 Minecraft/加载器依赖
+// 依赖仅 Gson（compileOnly，双端 MC 运行时内置）与 slf4j-api（compileOnly，双端内置）
+
+plugins {
+    id 'java-library'
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of("${java_version}" as int)
+}
+
+dependencies {
+    compileOnly "com.google.code.gson:gson:${gson_version}"
+    compileOnly "org.slf4j:slf4j-api:${slf4j_version}"
+
+    testImplementation platform("org.junit:junit-bom:${junit_version}")
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testImplementation "com.google.code.gson:gson:${gson_version}"
+    testRuntimeOnly 'org.slf4j:slf4j-nop:2.0.13'
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'failed', 'skipped'
+        exceptionFormat 'full'
+    }
+}
