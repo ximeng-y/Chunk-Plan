@@ -25,3 +25,6 @@ run/
 # 系统文件
 Thumbs.db
 .DS_Store
+
+# NeoGradle 7 默认运行目录（runs/server 等）
+runs/
