@@ -20,7 +20,13 @@ dependencies {
     modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
 
     implementation project(':common')
-    include project(':common')
+}
+
+// common 引擎源码并入本模块编译（与 neoforge 一致）：发布 jar 直接包含 common 类
+sourceSets {
+    main {
+        java.srcDir project(':common').sourceSets.main.java.srcDirs
+    }
 }
 
 processResources {
