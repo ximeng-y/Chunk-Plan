@@ -2,7 +2,6 @@ package dev.chunkplan.neoforge;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 import dev.chunkplan.common.DurationParser;
@@ -12,12 +11,18 @@ import net.neoforged.neoforge.common.ModConfigSpec;
 /**
  * NeoForge SERVER 配置（TOML，位于 world/serverconfig/chunkplan-server.toml）。
  * 全部数值可配；额度线 1~4 条，非法值由 common 校验回退默认并告警。
+ *
+ * <p>额度线用两个平行数组（lines 窗口 + lineLimits 上限）表示：
+ * NightConfig 的 TOML 写入器不支持 Map 作为列表元素（array-of-tables）。
  */
 public final class NeoForgeConfig {
 
     public static final ModConfigSpec SPEC;
 
-    public static final ModConfigSpec.ConfigValue<List<? extends Map<String, ?>>> LINES;
+    /** 各额度线窗口（"5h"/"24h"/"30m"/"7d" 或纯秒数），与 LINE_LIMITS 一一对应 */
+    public static final ModConfigSpec.ConfigValue<List<? extends String>> LINES;
+    /** 各额度线点数上限 */
+    public static final ModConfigSpec.ConfigValue<List<? extends Double>> LINE_LIMITS;
     public static final ModConfigSpec.DoubleValue FIRST_ENTRY_FEE;
     public static final ModConfigSpec.DoubleValue FAMILIAR_ENTRY_FEE;
     public static final ModConfigSpec.DoubleValue HIGH_SPEED_THRESHOLD;
@@ -31,13 +36,10 @@ public final class NeoForgeConfig {
     static {
         ModConfigSpec.Builder b = new ModConfigSpec.Builder();
 
-        LINES = b.comment("额度线：1~4 条滚动窗口线（窗口时长 + 点数上限），全部满才拒绝。"
-                        + "window 支持 5h/24h/30m/7d 或纯秒数；limit 为点数上限")
-                .defineList("lines",
-                        List.of(
-                                Map.of("window", "5h", "limit", 500.0),
-                                Map.of("window", "24h", "limit", 2000.0)),
-                        obj -> obj instanceof Map);
+        LINES = b.comment("额度线窗口（1~4 条，与 lineLimits 一一对应），全部满才拒绝。支持 5h/24h/30m/7d 或纯秒数")
+                .defineList("lines", List.of("5h", "24h"), obj -> obj instanceof String);
+        LINE_LIMITS = b.comment("各额度线点数上限（与 lines 一一对应）")
+                .defineList("lineLimits", List.of(500.0, 2000.0), obj -> obj instanceof Number);
         FIRST_ENTRY_FEE = b.comment("踏入未探索区块（集合外）的费用")
                 .defineInRange("firstEntryFee", 1.0, 0.0, Double.MAX_VALUE);
         FAMILIAR_ENTRY_FEE = b.comment("踏入已探索区块（集合内）的费用")
@@ -65,19 +67,21 @@ public final class NeoForgeConfig {
 
     /** 构建 common 配置；返回告警列表（非法配置回退默认时产生） */
     public static QuotaConfig toQuotaConfig(List<String> warnings) {
+        List<? extends String> windows = LINES.get();
+        List<? extends Double> limits = LINE_LIMITS.get();
         List<QuotaConfig.Line> lines = new ArrayList<>();
-        for (Map<String, ?> m : LINES.get()) {
-            Object window = m.get("window");
-            Object limit = m.get("limit");
-            if (window instanceof String ws && limit instanceof Number ln) {
-                try {
-                    lines.add(new QuotaConfig.Line(DurationParser.parseSeconds(ws), ln.doubleValue()));
-                    continue;
-                } catch (IllegalArgumentException e) {
-                    warnings.add("额度线窗口非法（" + ws + "）：" + e.getMessage());
-                }
+        int n = Math.min(windows.size(), limits.size());
+        if (windows.size() != limits.size()) {
+            warnings.add("lines 与 lineLimits 数量不一致（" + windows.size() + " vs " + limits.size()
+                    + "），多余项已丢弃");
+        }
+        for (int i = 0; i < n; i++) {
+            try {
+                lines.add(new QuotaConfig.Line(
+                        DurationParser.parseSeconds(windows.get(i)), limits.get(i)));
+            } catch (IllegalArgumentException e) {
+                warnings.add("额度线 " + i + " 非法（window=" + windows.get(i) + ", limit=" + limits.get(i) + "）：" + e.getMessage());
             }
-            warnings.add("额度线缺少 window/limit 字段，已丢弃该线");
         }
         List<UUID> exempt = new ArrayList<>();
         for (String s : EXEMPT_PLAYERS.get()) {

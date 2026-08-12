@@ -15,10 +15,13 @@ java {
 
 dependencies {
     implementation "net.neoforged:neoforge:${neoforge_version}"
-    implementation project(':common')
-    // 发布时把 common 打进 jar 内（jar-in-jar）
-    implementation jarJar(project(':common')) {
-        jarJar.ranged(it, '[0,1)')
+}
+
+// NeoForge 21.1 dev 运行时 mod 类在独立模块层（classpath 库不可见，JPMS 隔离）。
+// common 引擎源码直接并入本模块编译：dev 与发布 jar 均包含 common 类（无需 jarJar）。
+sourceSets {
+    main {
+        java.srcDir project(':common').sourceSets.main.java.srcDirs
     }
 }
 

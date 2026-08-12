@@ -6,7 +6,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 import dev.chunkplan.common.DurationParser;
@@ -19,10 +18,11 @@ import dev.chunkplan.common.QuotaConfig;
  */
 public final class FabricConfig {
 
-    /** 默认配置（与计划默认一致：5h≤500 + 24h≤2000） */
+    /** 默认配置（与计划默认一致：5h≤500 + 24h≤2000；与 NeoForge TOML 平行数组格式一致） */
     private static final String DEFAULT_JSON = """
             {
-              "lines": [ { "window": "5h", "limit": 500.0 }, { "window": "24h", "limit": 2000.0 } ],
+              "lines": [ "5h", "24h" ],
+              "lineLimits": [ 500.0, 2000.0 ],
               "firstEntryFee": 1.0,
               "familiarEntryFee": 0.05,
               "highSpeedThreshold": 1.0,
@@ -36,7 +36,8 @@ public final class FabricConfig {
             """;
 
     private static final class Dto {
-        List<Map<String, Object>> lines;
+        List<String> lines;
+        List<Double> lineLimits;
         Double firstEntryFee;
         Double familiarEntryFee;
         Double highSpeedThreshold;
@@ -76,19 +77,21 @@ public final class FabricConfig {
         }
 
         List<QuotaConfig.Line> lines = new ArrayList<>();
-        if (dto.lines != null) {
-            for (Map<String, Object> m : dto.lines) {
-                Object window = m.get("window");
-                Object limit = m.get("limit");
-                if (window instanceof String ws && limit instanceof Number ln) {
-                    try {
-                        lines.add(new QuotaConfig.Line(DurationParser.parseSeconds(ws), ln.doubleValue()));
-                        continue;
-                    } catch (IllegalArgumentException e) {
-                        warnings.add("额度线窗口非法（" + ws + "）：" + e.getMessage());
-                    }
+        if (dto.lines != null || dto.lineLimits != null) {
+            List<String> windows = dto.lines == null ? List.of() : dto.lines;
+            List<Double> limits = dto.lineLimits == null ? List.of() : dto.lineLimits;
+            int n = Math.min(windows.size(), limits.size());
+            if (windows.size() != limits.size()) {
+                warnings.add("lines 与 lineLimits 数量不一致（" + windows.size() + " vs " + limits.size()
+                        + "），多余项已丢弃");
+            }
+            for (int i = 0; i < n; i++) {
+                try {
+                    lines.add(new QuotaConfig.Line(
+                            DurationParser.parseSeconds(windows.get(i)), limits.get(i)));
+                } catch (IllegalArgumentException e) {
+                    warnings.add("额度线 " + i + " 非法（window=" + windows.get(i) + ", limit=" + limits.get(i) + "）：" + e.getMessage());
                 }
-                warnings.add("额度线缺少 window/limit 字段，已丢弃该线");
             }
         }
 

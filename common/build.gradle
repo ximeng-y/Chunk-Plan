@@ -3,10 +3,20 @@
 
 plugins {
     id 'java-library'
+    id 'maven-publish'
 }
 
 java {
     toolchain.languageVersion = JavaLanguageVersion.of("${java_version}" as int)
+}
+
+// 发布到 mavenLocal：neoforge/fabric 壳以坐标依赖引用（NeoGradle userdev 仅把 external 库放入 dev classpath）
+publishing {
+    publications {
+        maven(MavenPublication) {
+            from components.java
+        }
+    }
 }
 
 dependencies {
