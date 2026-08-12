@@ -69,6 +69,13 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
 6. **映射类名**：mojmap 中是 `UserBanList`/`UserBanListEntry`（不是 GameProfileBanList）
 7. **NeoForge 21.1 API**：`PlayerTickEvent` 在 `net.neoforged.neoforge.event.tick` 包；配置注册用 `ModContainer#registerConfig`（构造器注入 ModContainer）
 8. **Loom 版本**：1.14+ 要求 Gradle 9.2+，与 NeoGradle 7（Gradle 8.x）冲突 → 固定 Loom 1.13.6
+9. **模拟玩家（DevCommands，客户端不可用时的 6.2 验证方案）**：
+   - `getEntities(AABB)` 依赖实体 section 可见性，mock 玩家 tp 后 section 状态不可靠会查不到 → 壳层遍历用 `DevCommands.MOCK_PLAYERS` 注册表（dev-only，生产玩家仍走 PlayerList/事件）
+   - mock 玩家**不在实体 ticking 列表**（无重力下落）→ NeoForge 的 `PlayerTickEvent.Post` 不触发 → 壳层 `onServerTick` 手动遍历注册表计费（Fabric 本来就是壳层遍历）
+   - mock 玩家不进 PlayerList：内置 `/tp <名字>` 解析不到，需用 uuid；`list` 不显示
+   - `applyBan` 对 mock 玩家（注册表内）直接 `remove(DISCARDED)` 模拟踢出（虚拟连接 `disconnect` 是 no-op）；**遍历注册表时 applyBan 会 remove → 必须遍历副本否则 CME**
+   - usercache 会被同名不同 uuid 的 mock 污染 → `resolvePlayer` 顺序：在线实体（PlayerList + 注册表）> UUID 直解 > usercache
+10. **分钟桶粒度**：消费记入 `epochMinute` 桶，窗口按桶滑出 → ban 实际持续 ≈ 消费所在分钟结束 + 窗口长（比精确窗口**短最多 60 秒**，双端实测一致，是设计语义非 bug）
 
 ## 约定
 
