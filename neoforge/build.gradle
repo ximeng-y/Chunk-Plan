@@ -1,0 +1,48 @@
+// neoforge：NeoForge 1.21.1 薄壳（版本与 MDK archive/1.21 官方 pin 对齐）
+
+plugins {
+    id 'java-library'
+    id 'net.neoforged.gradle.userdev' version "${neo_gradle_version}"
+}
+
+base {
+    archivesName = 'chunkplan-neoforge'
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of("${java_version}" as int)
+}
+
+dependencies {
+    implementation "net.neoforged:neoforge:${neoforge_version}"
+    implementation project(':common')
+    // 发布时把 common 打进 jar 内（jar-in-jar）
+    implementation jarJar(project(':common')) {
+        jarJar.ranged(it, '[0,1)')
+    }
+}
+
+runs {
+    configureEach {
+        systemProperty 'forge.logging.markers', 'REGISTRIES'
+        systemProperty 'forge.logging.console.level', 'info'
+        modSource project.sourceSets.main
+    }
+    server {
+        programArgument '--nogui'
+    }
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    def replaceProperties = [
+            mod_id          : "${mod_id}",
+            mod_name        : "${mod_name}",
+            mod_version     : "${mod_version}",
+            mod_authors     : "${mod_authors}",
+            minecraft_version_range: "${minecraft_version_range}",
+    ]
+    inputs.properties replaceProperties
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand replaceProperties
+    }
+}

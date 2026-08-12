@@ -1,0 +1,36 @@
+// fabric：Fabric 1.21.1 薄壳（Loom + 官方 mojmap，与 neoforge 代码对齐）
+
+plugins {
+    id 'java'
+    id 'fabric-loom' version "${loom_version}"
+}
+
+base {
+    archivesName = 'chunkplan-fabric'
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of("${java_version}" as int)
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraft_version}"
+    mappings loom.officialMojangMappings()
+    modImplementation "net.fabricmc:fabric-loader:${fabric_loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
+
+    implementation project(':common')
+    include project(':common')
+}
+
+processResources {
+    inputs.property 'mod_id', "${mod_id}"
+    inputs.property 'mod_name', "${mod_name}"
+    inputs.property 'mod_version', "${mod_version}"
+    inputs.property 'mod_authors', "${mod_authors}"
+    inputs.property 'minecraft_version', "${minecraft_version}"
+    filesMatching('fabric.mod.json') {
+        expand 'mod_id': "${mod_id}", 'mod_name': "${mod_name}", 'mod_version': "${mod_version}",
+                'mod_authors': "${mod_authors}", 'minecraft_version': "${minecraft_version}"
+    }
+}
