@@ -5,6 +5,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 import com.mojang.authlib.GameProfile;
@@ -15,8 +16,9 @@ import dev.chunkplan.common.QuotaConfig;
 import dev.chunkplan.common.QuotaEngine;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
-import net.minecraft.commands.arguments.GameProfileArgument;
+import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 
 /**
@@ -34,12 +36,12 @@ public final class QuotaCommands {
         dispatcher.register(Commands.literal("quota")
                 .then(Commands.literal("check")
                         .executes(ctx -> checkSelf(ctx))
-                        .then(Commands.argument("player", GameProfileArgument.gameProfile())
+                        .then(Commands.argument("player", StringArgumentType.word())
                                 .requires(s -> s.hasPermission(2))
                                 .executes(ctx -> checkOther(ctx))))
                 .then(Commands.literal("reset")
                         .requires(s -> s.hasPermission(2))
-                        .then(Commands.argument("player", GameProfileArgument.gameProfile())
+                        .then(Commands.argument("player", StringArgumentType.word())
                                 .executes(ctx -> reset(ctx))))
                 .then(Commands.literal("reload")
                         .requires(s -> s.hasPermission(2))
@@ -57,12 +59,12 @@ public final class QuotaCommands {
     }
 
     private static int checkOther(CommandContext<CommandSourceStack> ctx) {
-        GameProfile profile = firstProfile(ctx);
+        GameProfile profile = resolvePlayer(ctx);
         if (profile == null) {
             ctx.getSource().sendFailure(Component.literal("未找到该玩家"));
             return 0;
         }
-        sendStatus(ctx, profile.getId(), profile.getName());
+        sendStatus(ctx, profile.getId(), profileName(profile));
         return 1;
     }
 
@@ -94,13 +96,13 @@ public final class QuotaCommands {
             ctx.getSource().sendFailure(Component.literal("ChunkPlan 未初始化"));
             return 0;
         }
-        GameProfile profile = firstProfile(ctx);
+        GameProfile profile = resolvePlayer(ctx);
         if (profile == null) {
             ctx.getSource().sendFailure(Component.literal("未找到该玩家"));
             return 0;
         }
         eng.resetSpend(profile.getId());
-        ctx.getSource().sendSuccess(() -> Component.literal("§a已重置 " + profile.getName() + " 的探索额度消费（已探索集合保留）"), true);
+        ctx.getSource().sendSuccess(() -> Component.literal("§a已重置 " + profileName(profile) + " 的探索额度消费（已探索集合保留）"), true);
         return 1;
     }
 
@@ -121,12 +123,32 @@ public final class QuotaCommands {
         return 1;
     }
 
-    private static GameProfile firstProfile(CommandContext<CommandSourceStack> ctx) {
+    /**
+     * 解析玩家参数：UUID 直接解析 / profile cache 名字（离线玩家）/ 在线玩家名。
+     * 不用原版 GameProfileArgument：1.21.1 原版把 UUID 当玩家名查缓存（Fabric 端不可用）。
+     */
+    private static GameProfile resolvePlayer(CommandContext<CommandSourceStack> ctx) {
+        String arg = StringArgumentType.getString(ctx, "player");
         try {
-            return GameProfileArgument.getGameProfiles(ctx, "player").iterator().next();
-        } catch (Exception e) {
-            return null;
+            return new GameProfile(UUID.fromString(arg), "");
+        } catch (IllegalArgumentException ignored) {
+            // 不是 UUID：按名字解析
         }
+        MinecraftServer server = ctx.getSource().getServer();
+        Optional<GameProfile> cached = server.getProfileCache().get(arg);
+        if (cached.isPresent()) {
+            return cached.get();
+        }
+        ServerPlayer online = server.getPlayerList().getPlayerByName(arg);
+        if (online != null) {
+            return online.getGameProfile();
+        }
+        return null;
+    }
+
+    private static String profileName(GameProfile profile) {
+        String name = profile.getName();
+        return name != null && !name.isEmpty() ? name : profile.getId().toString();
     }
 
     private static String formatWindow(long windowSeconds) {
