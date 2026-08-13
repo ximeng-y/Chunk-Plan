@@ -4,7 +4,7 @@
 
 ChunkPlan（modid=`chunkplan`，中文名「探索额度」）是**纯服务端** Minecraft mod：按**玩家实体踏入区块**计费，通过多条滚动窗口额度线限制玩家的探索消耗，额度耗尽后临时封禁（窗口滑出自动恢复）。用于控制服务器区块加载成本。
 
-- 双加载器：**NeoForge 1.21.1** + **Fabric 1.21.1**（独立 mod，不依赖任何上游 mod）
+- 双加载器：**NeoForge 1.21.1** + **Fabric 1.21.1**（独立 mod，不依赖任何功能型上游 mod；Fabric 端依赖 `fabric-api` 生态基础设施——生命周期事件/命令注册/连接事件，`fabric.mod.json` 的 `depends` 已声明，NeoForge 端无额外依赖）
 - 一期纯服务端；客户端 HUD / 配置 GUI 为二期
 - 零 mixin，纯事件；Java 21（`D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x64`）
 
