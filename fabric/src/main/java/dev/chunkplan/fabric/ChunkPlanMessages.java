@@ -37,11 +37,6 @@ public final class ChunkPlanMessages {
                 fullName = windowName(line.windowSeconds(), zh);
             }
         }
-        // 标签列对齐：最长标签（窗口名+冒号）的显示宽度
-        int maxLabel = 0;
-        for (QuotaEngine.LineStatus line : status.lines()) {
-            maxLabel = Math.max(maxLabel, displayWidth(windowName(line.windowSeconds(), zh) + (zh ? "：" : ": ")));
-        }
         StringBuilder sb = new StringBuilder();
         if (zh) {
             sb.append("§c[ChunkPlan] 由于服务器管理员对于区块探索额度的限制，您已被限制进入服务器！\n");
@@ -56,10 +51,9 @@ public final class ChunkPlanMessages {
         sb.append("§7").append(DIVIDER).append("\n");
         sb.append(zh ? "§6您的探索额度情况：\n" : "§6Your exploration quota status:\n");
         for (QuotaEngine.LineStatus line : status.lines()) {
-            // 子条目配色：时间窗口名黄 §e、数值白 §f
+            // 子条目配色：时间窗口名浅蓝 §b（与原因行一致）、数值白 §f
             String label = windowName(line.windowSeconds(), zh) + (zh ? "：" : ": ");
-            sb.append("§e").append(label).append(" ".repeat(Math.max(0, maxLabel - displayWidth(label))))
-                    .append("§f").append(String.format("%.1f/%.1f", line.spent(), line.limit()));
+            sb.append("§b").append(label).append("§f").append(String.format("%.1f/%.1f", line.spent(), line.limit()));
             if (line.spent() > line.limit()) {
                 sb.append(zh ? " §c（已满，下次重置时间：" : " §c(exhausted, next reset: ")
                         .append(formatTime(line.nextResetMillis())).append(zh ? "）" : ")");
@@ -75,14 +69,14 @@ public final class ChunkPlanMessages {
             if (status.recoveryMillis() > 0) {
                 sb.append("§a您最早可于：").append(formatTime(status.recoveryMillis())).append(" 再次进入服务器\n");
             }
-            sb.append("§7额度限制是为了节约服务器的CPU、网络流量等资源，感谢您的配合！\n");
-            sb.append("§7如有疑问/需要重置或提高额度，请咨询您的服务器管理员");
+            sb.append("§f额度限制是为了节约服务器的CPU、网络流量等资源，感谢您的配合！\n");
+            sb.append("§f如有疑问/需要重置或提高额度，请咨询您的服务器管理员");
         } else {
             if (status.recoveryMillis() > 0) {
                 sb.append("§aYou may rejoin at: ").append(formatTime(status.recoveryMillis())).append("\n");
             }
-            sb.append("§7The quota limit saves server CPU, network traffic and other resources. Thank you for your cooperation!\n");
-            sb.append("§7For quota reset/increase or questions, please contact your server administrator");
+            sb.append("§fThe quota limit saves server CPU, network traffic and other resources. Thank you for your cooperation!\n");
+            sb.append("§fFor quota reset/increase or questions, please contact your server administrator");
         }
         return sb.toString();
     }
@@ -111,15 +105,6 @@ public final class ChunkPlanMessages {
             return "Within " + h + " hour" + (h > 1 ? "s" : "");
         }
         return "Within " + m + " minute" + (m > 1 ? "s" : "");
-    }
-
-    /** 显示宽度：CJK/全角标点 2 格、ASCII 1 格（Minecraft 默认字体下用于标签对齐） */
-    private static int displayWidth(String s) {
-        int w = 0;
-        for (int i = 0; i < s.length(); i++) {
-            w += s.charAt(i) > 0xFF ? 2 : 1;
-        }
-        return w;
     }
 
     /** 窗口时长简写：1m / 2h / 7d */
