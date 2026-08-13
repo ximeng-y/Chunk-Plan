@@ -69,14 +69,15 @@ public final class ChunkPlanMessages {
             if (status.recoveryMillis() > 0) {
                 sb.append("§a您最早可于：").append(formatTime(status.recoveryMillis())).append(" 再次进入服务器\n");
             }
-            sb.append("§e额度限制是为了节约服务器的CPU、网络流量等资源，感谢您的配合！\n");
-            sb.append("§e如有疑问/需要重置或提高额度，请咨询您的服务器管理员");
+            // 尾部说明：仅特定短语黄 §e（节约资源 / 咨询管理员），句子其余部分白 §f
+            sb.append("§f额度限制是§e为了节约服务器的CPU、网络流量等资源§f，感谢您的配合！\n");
+            sb.append("§f如有疑问/需要重置或提高额度，请§e咨询您的服务器管理员");
         } else {
             if (status.recoveryMillis() > 0) {
                 sb.append("§aYou may rejoin at: ").append(formatTime(status.recoveryMillis())).append("\n");
             }
-            sb.append("§eThe quota limit saves server CPU, network traffic and other resources. Thank you for your cooperation!\n");
-            sb.append("§eFor quota reset/increase or questions, please contact your server administrator");
+            sb.append("§fThe quota limit §esaves server CPU, network traffic and other resources§f. Thank you for your cooperation!\n");
+            sb.append("§fFor quota reset/increase or questions, please §econtact your server administrator");
         }
         return sb.toString();
     }
