@@ -12,7 +12,7 @@ import dev.chunkplan.common.QuotaEngine;
  */
 public final class ChunkPlanMessages {
 
-    private static final DateTimeFormatter RECOVER_FMT = DateTimeFormatter.ofPattern("MM-dd HH:mm");
+    private static final DateTimeFormatter RECOVER_FMT = DateTimeFormatter.ofPattern("yyyy-M-d HH:mm");
 
     private ChunkPlanMessages() {
     }
@@ -120,7 +120,7 @@ public final class ChunkPlanMessages {
         return m + "m";
     }
 
-    /** 恢复时间显示 MM-dd HH:mm（系统时区） */
+    /** 恢复时间显示 yyyy-M-d HH:mm（系统时区） */
     public static String formatTime(long epochMillis) {
         return RECOVER_FMT.format(Instant.ofEpochMilli(epochMillis).atZone(ZoneId.systemDefault()));
     }
