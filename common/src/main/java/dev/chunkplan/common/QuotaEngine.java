@@ -54,7 +54,8 @@ public final class QuotaEngine {
         }
     }
 
-    public record LineStatus(long windowSeconds, double limit, double spent) {
+    /** 单线状态：窗口/上限/已消费/下次重置时间（该线窗口内最早消费桶滑出的时刻，各线独立；无消费为 -1） */
+    public record LineStatus(long windowSeconds, double limit, double spent, long nextResetMillis) {
     }
 
     public record QuotaStatus(List<LineStatus> lines, long recoveryMillis, boolean allExceeded) {
@@ -215,7 +216,15 @@ public final class QuotaEngine {
         boolean any = false;
         for (QuotaConfig.Line line : config.lines()) {
             double spent = data.spendInWindow(now, line.windowSeconds());
-            lines.add(new LineStatus(line.windowSeconds(), line.limit(), spent));
+            // 各线独立的下次重置时间：该线窗口内最早消费桶 + 窗口长（无消费为 -1）。
+            // 与满线恢复时间同一公式；未满线也展示，便于玩家看到"该线何时滑出"（坑 #26）
+            long nextReset = -1;
+            long firstKey = (now - line.windowSeconds() * 1000) / 60000 + 1;
+            Long earliest = data.firstBucketAtOrAfter(firstKey);
+            if (earliest != null) {
+                nextReset = earliest * 60000L + line.windowSeconds() * 1000L;
+            }
+            lines.add(new LineStatus(line.windowSeconds(), line.limit(), spent, nextReset));
             if (spent > line.limit()) {
                 any = true;
             }

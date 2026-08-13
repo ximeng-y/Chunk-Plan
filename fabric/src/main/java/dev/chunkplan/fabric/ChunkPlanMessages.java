@@ -23,24 +23,101 @@ public final class ChunkPlanMessages {
     }
 
     /**
-     * ban 消息：探索额度已耗尽 + 各线状态 + 恢复时间。
-     * 传入 quotaStatus（ban / 登录拦截时所有线均满）。
+     * ban 消息（坑 #26）：标题 + 原因（满线中窗口最长者）+ 各线状态（含各线独立的下次重置时间）
+     * + 最早可进入时间 + 结尾说明。排版参照用户模板：分割线分隔、标签列按显示宽度对齐。
+     * 传入 quotaStatus（ban / 登录拦截时至少一条线满）。
      */
     public static String banMessage(QuotaEngine.QuotaStatus status, boolean zh) {
-        StringBuilder sb = new StringBuilder(zh ? "探索额度已耗尽：" : "Exploration quota exhausted:");
-        var lines = status.lines();
-        for (int i = 0; i < lines.size(); i++) {
-            if (i > 0) {
-                sb.append(zh ? "；" : ", ");
+        // 原因行：满线中窗口最长者（5h 与 1d 同时满 -> 显示 1d）
+        String fullName = null;
+        long maxFull = -1;
+        for (QuotaEngine.LineStatus line : status.lines()) {
+            if (line.spent() > line.limit() && line.windowSeconds() > maxFull) {
+                maxFull = line.windowSeconds();
+                fullName = windowName(line.windowSeconds(), zh);
             }
-            QuotaEngine.LineStatus line = lines.get(i);
-            sb.append(formatWindow(line.windowSeconds()))
-                    .append(zh ? " 窗口 " : " window ")
-                    .append(String.format("%.1f/%.1f", line.spent(), line.limit()));
         }
-        String recover = formatTime(status.recoveryMillis());
-        sb.append(zh ? "。预计 " : ". Recovers at ").append(recover).append(zh ? " 恢复" : "");
+        // 标签列对齐：最长标签（窗口名+冒号）的显示宽度
+        int maxLabel = 0;
+        for (QuotaEngine.LineStatus line : status.lines()) {
+            maxLabel = Math.max(maxLabel, displayWidth(windowName(line.windowSeconds(), zh) + (zh ? "：" : ": ")));
+        }
+        StringBuilder sb = new StringBuilder();
+        if (zh) {
+            sb.append("§c[ChunkPlan] 由于服务器管理员对于区块探索额度的限制，您已被限制进入服务器！\n");
+            sb.append("§c原因：您的 §f").append(fullName == null ? "探索额度" : fullName)
+                    .append(" §c探索额度上限 已耗尽\n");
+        } else {
+            sb.append("§c[ChunkPlan] You have been restricted from joining the server due to the admin's chunk exploration quota limit!\n");
+            sb.append("§cReason: Your exploration quota limit (").append(fullName == null ? "quota" : fullName.toLowerCase())
+                    .append(") is exhausted\n");
+        }
+        sb.append("§7").append(DIVIDER).append("\n");
+        sb.append(zh ? "§e您的探索额度情况：\n" : "§eYour exploration quota status:\n");
+        for (QuotaEngine.LineStatus line : status.lines()) {
+            String label = windowName(line.windowSeconds(), zh) + (zh ? "：" : ": ");
+            sb.append("§f").append(label).append(" ".repeat(Math.max(0, maxLabel - displayWidth(label))))
+                    .append(String.format("%.1f/%.1f", line.spent(), line.limit()));
+            if (line.spent() > line.limit()) {
+                sb.append(zh ? " §c（已满，下次重置时间：" : " §c(exhausted, next reset: ")
+                        .append(formatTime(line.nextResetMillis())).append(zh ? "）" : ")");
+            } else if (line.nextResetMillis() > 0) {
+                // 各线独立的重置时间（未满线也可能跨天，与满线不同步）
+                sb.append(zh ? "§7（下次重置时间：" : " §7(next reset: ")
+                        .append(formatTime(line.nextResetMillis())).append(zh ? "）" : ")");
+            }
+            sb.append("\n");
+        }
+        sb.append("§7").append(DIVIDER).append("\n");
+        if (zh) {
+            if (status.recoveryMillis() > 0) {
+                sb.append("§a您最早可于：").append(formatTime(status.recoveryMillis())).append(" 再次进入服务器\n");
+            }
+            sb.append("§7额度限制是为了节约服务器的CPU、网络流量等资源，感谢您的配合！\n");
+            sb.append("§7如有疑问/需要重置或提高额度，请咨询您的服务器管理员");
+        } else {
+            if (status.recoveryMillis() > 0) {
+                sb.append("§aYou may rejoin at: ").append(formatTime(status.recoveryMillis())).append("\n");
+            }
+            sb.append("§7The quota limit saves server CPU, network traffic and other resources. Thank you for your cooperation!\n");
+            sb.append("§7For quota reset/increase or questions, please contact your server administrator");
+        }
         return sb.toString();
+    }
+
+    /** 公告分割线（长度取适中值，避免聊天自动换行打断） */
+    private static final String DIVIDER = "-".repeat(44);
+
+    /** 窗口显示名："5小时内"/"1天内"/"30分钟内" 或 "Within 5 hours"/"Within 1 day"（公告/每线展示用） */
+    private static String windowName(long windowSeconds, boolean zh) {
+        long m = windowSeconds / 60;
+        if (zh) {
+            if (m >= 1440) {
+                return (m / 1440) + "天内";
+            }
+            if (m >= 60) {
+                return (m / 60) + "小时内";
+            }
+            return m + "分钟内";
+        }
+        if (m >= 1440) {
+            long d = m / 1440;
+            return "Within " + d + " day" + (d > 1 ? "s" : "");
+        }
+        if (m >= 60) {
+            long h = m / 60;
+            return "Within " + h + " hour" + (h > 1 ? "s" : "");
+        }
+        return "Within " + m + " minute" + (m > 1 ? "s" : "");
+    }
+
+    /** 显示宽度：CJK/全角标点 2 格、ASCII 1 格（Minecraft 默认字体下用于标签对齐） */
+    private static int displayWidth(String s) {
+        int w = 0;
+        for (int i = 0; i < s.length(); i++) {
+            w += s.charAt(i) > 0xFF ? 2 : 1;
+        }
+        return w;
     }
 
     /** 窗口时长简写：1m / 2h / 7d */

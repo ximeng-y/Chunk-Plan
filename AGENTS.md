@@ -104,6 +104,7 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **聊天框禁止显示配置文件路径**：reload 与 config 命令反馈均不含路径（路径只进服务端日志），`loadAndApplyConfig` 返回 `List<String>` 告警列表
     - 旧配置迁移：四档改造后旧 `lines`/`lineLimits` 键成为孤儿键（NeoForge 文件里残留但不生效），`highSpeedThreshold` 旧值（如 1.0）持久化覆盖新默认 → 升级需删除旧配置文件（`config/chunkplan-server.toml` / `config/chunkplan.json`）重新生成，否则新默认不生效
 25. **任一窗口满即拒（规格变更）**：原设计"全部额度线同时超限才拒"（AND 语义），用户实测发现单线超限（如 5h 500.9/500.0）仍显示"未满，可正常探索"，确认是设计失误 → 改为**任一窗口满即拒**（OR 语义，`isAllLinesExceeded` 与 `quotaStatus.allExceeded` 的循环条件由"存在未满线→false"反转为"存在满线→true"）。`recoveryMillis` 不变（只遍历满线取最早桶+窗口的最晚者，恢复时刻保证满线滑出；未满线不参与）。字段名 `allExceeded` 保留（壳层双端引用，注释注明"任一满"语义）。恢复时间只保证"满的那条线滑出"，玩家恢复后再次探索可能再次触发该线 → 属正常行为。check/ban 文案不变，各线状态全部列出可看出哪条满
+26. **ban 公告排版（坑 #26）**：踢出消息按用户模板排版——标题（§c 红，禁止警示）+ 原因行（§c，满线中**窗口最长者**，如 5h 与 1d 同时满显示"1天内 探索额度上限 已耗尽"）+ §7 分割线（44 个 '-'，适中防自动换行）+ "您的探索额度情况："（§e 黄小标题）+ 各线状态（§f 白；满线"（§c已满，下次重置时间：X）"、未满线"（§7下次重置时间：X）"）+ 分割线 + "您最早可于：X 再次进入服务器"（§a 绿）+ 结尾感谢/咨询（§7 灰）。**每线显示各自独立的下次重置时间**（= 该线窗口内最早消费桶 + 窗口长，未满线也有——额度线互相独立、可能跨天不同步，如 5h 满 08-13 21:24 而 1d 未满次日才重置）：引擎 `QuotaStatus.LineStatus` 增加 `nextResetMillis` 字段（`quotaStatus` 逐线计算，无消费为 -1），`recoveryMillis` 保持只算满线。标签列按显示宽度对齐（CJK/全角 2 格、ASCII 1 格，`displayWidth`）；窗口显示名用"5小时内/1天内/30天内"（`windowName`，区别于 check 的 `formatWindow` "5h/1d" 简写）。双端 `ChunkPlanMessages.banMessage` 重写，改文案必须双端同步
 
 ## 约定
 
