@@ -71,9 +71,15 @@ public final class FabricConfig {
             }
         } catch (IOException e) {
             throw new IllegalStateException("读取配置文件失败: " + configFile, e);
+        } catch (RuntimeException e) {
+            // 畸形 JSON（JsonSyntaxException/NPE 等）解析失败：回退默认配置并告警，
+            // 与 NeoForge reload 回退行为对齐，避免配置文件损坏导致整服启动失败
+            warnings.add("配置文件解析失败（" + e.getMessage() + "），已回退默认配置: " + configFile);
+            dto = GsonHolder.GSON.fromJson(DEFAULT_JSON, Dto.class);
         }
         if (dto == null) {
-            throw new IllegalStateException("配置文件为空: " + configFile);
+            warnings.add("配置文件为空，已回退默认配置: " + configFile);
+            dto = GsonHolder.GSON.fromJson(DEFAULT_JSON, Dto.class);
         }
 
         List<QuotaConfig.Line> lines = new ArrayList<>();
@@ -89,7 +95,8 @@ public final class FabricConfig {
                 try {
                     lines.add(new QuotaConfig.Line(
                             DurationParser.parseSeconds(windows.get(i)), limits.get(i)));
-                } catch (IllegalArgumentException e) {
+                } catch (RuntimeException e) {
+                    // 含 NPE（lineLimits 元素为 null）等解析异常，统一按非法额度线告警丢弃
                     warnings.add("额度线 " + i + " 非法（window=" + windows.get(i) + ", limit=" + limits.get(i) + "）：" + e.getMessage());
                 }
             }

@@ -44,6 +44,9 @@ public final class ChunkPlanFabric implements ModInitializer {
     /** 配置文件路径（初始化时确定，命令 reload 复用） */
     static Path configFile;
 
+    /** 扣费日志文件路径（初始化时确定，reload 时 logFeeEvents 热切换复用） */
+    static Path logFile;
+
     @Override
     public void onInitialize() {
         this.configFile = FabricLoader.getInstance().getConfigDir().resolve("chunkplan.json");
@@ -71,7 +74,7 @@ public final class ChunkPlanFabric implements ModInitializer {
     private void onServerStarted(MinecraftServer server) {
         Path dataDir = server.getWorldPath(LevelResource.ROOT).resolve("chunkplan");
         try {
-            Path logFile = FabricLoader.getInstance().getGameDir().resolve("logs").resolve("chunkplan.log");
+            logFile = FabricLoader.getInstance().getGameDir().resolve("logs").resolve("chunkplan.log");
             List<String> warnings = new ArrayList<>();
             QuotaConfig config = FabricConfig.load(configFile, warnings);
             for (String w : warnings) {
@@ -108,11 +111,14 @@ public final class ChunkPlanFabric implements ModInitializer {
                 handlePlayerTick(eng, player);
             }
         }
-        for (net.minecraft.server.level.ServerLevel level : server.getAllLevels()) {
-            for (ServerPlayer player : level.getEntities(
-                    net.minecraft.world.level.entity.EntityTypeTest.forClass(ServerPlayer.class),
-                    net.minecraft.world.phys.AABB.ofSize(level.getSharedSpawnPos().getCenter(), 6.0E7, 6.0E7, 6.0E7), e -> seen.add(e))) {
-                handlePlayerTick(eng, player);
+        // dev 环境兜底：注册表漏网的模拟玩家实体（生产环境无 mock，PlayerList 已全覆盖，不做全图扫描）
+        if (FabricLoader.getInstance().isDevelopmentEnvironment()) {
+            for (net.minecraft.server.level.ServerLevel level : server.getAllLevels()) {
+                for (ServerPlayer player : level.getEntities(
+                        net.minecraft.world.level.entity.EntityTypeTest.forClass(ServerPlayer.class),
+                        net.minecraft.world.phys.AABB.ofSize(level.getSharedSpawnPos().getCenter(), 6.0E7, 6.0E7, 6.0E7), e -> seen.add(e))) {
+                    handlePlayerTick(eng, player);
+                }
             }
         }
         long banScanInterval = eng.getConfig().banScanIntervalSec() * 20;
@@ -169,11 +175,17 @@ public final class ChunkPlanFabric implements ModInitializer {
         MinecraftServer server = player.server;
         GameProfile profile = player.getGameProfile();
         UserBanList bans = server.getPlayerList().getBans();
-        bans.add(new UserBanListEntry(profile, new Date(), "ChunkPlan",
-                new Date(untilMillis), message));
+        // 服主已手动封禁的玩家：不覆盖原 ban（避免手动永久 ban 被临时 ban 替换后随额度恢复被误解除）
+        UserBanListEntry existing = bans.get(profile);
+        if (existing == null || "ChunkPlan".equals(existing.getSource())) {
+            bans.add(new UserBanListEntry(profile, new Date(), "ChunkPlan",
+                    new Date(untilMillis), message));
+        }
         engine.getBanStore().add(new ManagedBanStore.Entry(profile.getId(), message, untilMillis));
         if (DevCommands.MOCK_PLAYERS.contains(player)) {
-            // 模拟玩家（dev 调试，虚拟连接 disconnect 是 no-op）：直接移除实体模拟被踢出
+            // 模拟玩家（dev 调试，虚拟连接 disconnect 是 no-op）：移除实体模拟被踢出，
+            // 并清理引擎内存状态（mock 无登出事件，不清理会导致 tracking 残留、重 spawn 首 tick 误计费）
+            engine.onPlayerDisconnect(profile.getId());
             player.remove(net.minecraft.world.entity.Entity.RemovalReason.DISCARDED);
             DevCommands.MOCK_PLAYERS.remove(player);
         } else if (player.connection != null) {
@@ -193,7 +205,9 @@ public final class ChunkPlanFabric implements ModInitializer {
             for (ManagedBanStore.Entry entry : engine.getBanStore().all()) {
                 if (!engine.isAllLinesExceeded(entry.uuid())) {
                     GameProfile profile = new GameProfile(entry.uuid(), "");
-                    if (bans.isBanned(profile)) {
+                    // 仅解除 ChunkPlan 自己加的 ban；服主手动 ban 的条目（来源非 ChunkPlan）保留
+                    UserBanListEntry ban = bans.get(profile);
+                    if (ban != null && "ChunkPlan".equals(ban.getSource())) {
                         bans.remove(profile);
                         LOG.info("已解除玩家 {} 的 ChunkPlan 临时封禁", entry.uuid());
                     }

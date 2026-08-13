@@ -194,7 +194,8 @@ public final class QuotaConfig {
         }
 
         private static double validateNonNegative(String name, double v, double def, List<String> w) {
-            if (Double.isNaN(v) || v < 0) {
+            // isFinite 同时拦截 NaN 与 ±Infinity（Infinity 会静默禁用计费/额度线，须回退默认）
+            if (!Double.isFinite(v) || v < 0) {
                 w.add("配置 " + name + " 非法（" + v + "），已回退默认 " + def);
                 return def;
             }

@@ -12,6 +12,7 @@ import com.mojang.authlib.GameProfile;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.context.CommandContext;
 
+import dev.chunkplan.common.FeeLogFile;
 import dev.chunkplan.common.QuotaConfig;
 import dev.chunkplan.common.QuotaEngine;
 import net.minecraft.commands.CommandSourceStack;
@@ -118,6 +119,16 @@ public final class QuotaCommands {
             org.slf4j.LoggerFactory.getLogger("ChunkPlan").warn("配置告警: {}", w);
         }
         eng.setConfig(config);
+        // logFeeEvents 开关热切换：按新配置重建/清空扣费日志
+        if (config.logFeeEvents()) {
+            try {
+                eng.setFeeLogger(new FeeLogFile(ChunkPlanFabric.logFile));
+            } catch (java.io.IOException e) {
+                org.slf4j.LoggerFactory.getLogger("ChunkPlan").warn("重建扣费日志失败: {}", e.getMessage());
+            }
+        } else {
+            eng.setFeeLogger(null);
+        }
         ctx.getSource().sendSuccess(() -> Component.literal("§aChunkPlan 配置已重载"
                 + (warnings.isEmpty() ? "" : "§c（含告警，详见服务端日志）")), true);
         return 1;

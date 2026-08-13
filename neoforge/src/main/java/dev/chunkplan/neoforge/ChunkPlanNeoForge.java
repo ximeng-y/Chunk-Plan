@@ -51,7 +51,7 @@ public final class ChunkPlanNeoForge {
     static volatile QuotaEngine engine;
 
     public ChunkPlanNeoForge(ModContainer modContainer) {
-        // SERVER 类型 TOML 配置，位于 world/serverconfig/chunkplan-server.toml
+        // SERVER 类型 TOML 配置：主位置 <serverDir>/config/，world/serverconfig/ 为可选存档级覆盖层
         modContainer.registerConfig(ModConfig.Type.SERVER, NeoForgeConfig.SPEC);
     }
 
@@ -188,11 +188,17 @@ public final class ChunkPlanNeoForge {
             MinecraftServer server = player.server;
             GameProfile profile = player.getGameProfile();
             UserBanList bans = server.getPlayerList().getBans();
-            bans.add(new UserBanListEntry(profile, new Date(), "ChunkPlan",
-                    new Date(untilMillis), message));
+            // 服主已手动封禁的玩家：不覆盖原 ban（避免手动永久 ban 被临时 ban 替换后随额度恢复被误解除）
+            UserBanListEntry existing = bans.get(profile);
+            if (existing == null || "ChunkPlan".equals(existing.getSource())) {
+                bans.add(new UserBanListEntry(profile, new Date(), "ChunkPlan",
+                        new Date(untilMillis), message));
+            }
             engine.getBanStore().add(new ManagedBanStore.Entry(profile.getId(), message, untilMillis));
             if (DevCommands.MOCK_PLAYERS.contains(player)) {
-                // 模拟玩家（dev 调试，虚拟连接 disconnect 是 no-op）：直接移除实体模拟被踢出
+                // 模拟玩家（dev 调试，虚拟连接 disconnect 是 no-op）：移除实体模拟被踢出，
+                // 并清理引擎内存状态（mock 无登出事件，不清理会导致 tracking 残留、重 spawn 首 tick 误计费）
+                engine.onPlayerDisconnect(profile.getId());
                 player.remove(net.minecraft.world.entity.Entity.RemovalReason.DISCARDED);
                 DevCommands.MOCK_PLAYERS.remove(player);
             } else if (player.connection != null) {
@@ -212,7 +218,9 @@ public final class ChunkPlanNeoForge {
                 for (ManagedBanStore.Entry entry : engine.getBanStore().all()) {
                     if (!engine.isAllLinesExceeded(entry.uuid())) {
                         GameProfile profile = new GameProfile(entry.uuid(), "");
-                        if (bans.isBanned(profile)) {
+                        // 仅解除 ChunkPlan 自己加的 ban；服主手动 ban 的条目（来源非 ChunkPlan）保留
+                        UserBanListEntry ban = bans.get(profile);
+                        if (ban != null && "ChunkPlan".equals(ban.getSource())) {
                             bans.remove(profile);
                             LOG.info("已解除玩家 {} 的 ChunkPlan 临时封禁", entry.uuid());
                         }

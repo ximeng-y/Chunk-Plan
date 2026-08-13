@@ -10,7 +10,8 @@ import dev.chunkplan.common.QuotaConfig;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 /**
- * NeoForge SERVER 配置（TOML，位于 world/serverconfig/chunkplan-server.toml）。
+ * NeoForge SERVER 配置（TOML，主位置 <serverDir>/config/chunkplan-server.toml；
+ * world/serverconfig/ 为可选存档级覆盖层，存在时整体覆盖）。
  * 全部数值可配；额度线 1~4 条，非法值由 common 校验回退默认并告警。
  *
  * <p>额度线用两个平行数组（lines 窗口 + lineLimits 上限）表示：
@@ -143,12 +144,18 @@ public final class NeoForgeConfig {
             }
             Object saveRaw = cfg.get("saveIntervalSec");
             Object scanRaw = cfg.get("banScanIntervalSec");
+            // TOML 整数解析为 Integer（非 Double/Long），全部按 Number 统一转换，避免 ClassCastException
+            // 导致整次 reload 回退（原 bug：只有 Long 字段做了转换，Double 字段写整数即整次失败）
+            Object firstRaw = cfg.get("firstEntryFee");
+            Object familiarRaw = cfg.get("familiarEntryFee");
+            Object speedRaw = cfg.get("highSpeedThreshold");
+            Object multRaw = cfg.get("highSpeedMultiplier");
             return QuotaConfig.builder()
                     .lines(lines)
-                    .firstEntryFee(cfg.getOrElse("firstEntryFee", FIRST_ENTRY_FEE.get()))
-                    .familiarEntryFee(cfg.getOrElse("familiarEntryFee", FAMILIAR_ENTRY_FEE.get()))
-                    .highSpeedThreshold(cfg.getOrElse("highSpeedThreshold", HIGH_SPEED_THRESHOLD.get()))
-                    .highSpeedMultiplier(cfg.getOrElse("highSpeedMultiplier", HIGH_SPEED_MULTIPLIER.get()))
+                    .firstEntryFee(firstRaw instanceof Number fe ? fe.doubleValue() : FIRST_ENTRY_FEE.get())
+                    .familiarEntryFee(familiarRaw instanceof Number fm ? fm.doubleValue() : FAMILIAR_ENTRY_FEE.get())
+                    .highSpeedThreshold(speedRaw instanceof Number sp ? sp.doubleValue() : HIGH_SPEED_THRESHOLD.get())
+                    .highSpeedMultiplier(multRaw instanceof Number mu ? mu.doubleValue() : HIGH_SPEED_MULTIPLIER.get())
                     .exemptByDefault(cfg.getOrElse("exemptByDefault", EXEMPT_BY_DEFAULT.get()))
                     .exemptPlayers(exempt)
                     .saveIntervalSec(saveRaw instanceof Number sv ? sv.longValue() : SAVE_INTERVAL_SEC.get())

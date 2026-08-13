@@ -1,5 +1,8 @@
 package dev.chunkplan.neoforge;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -12,6 +15,7 @@ import com.mojang.authlib.GameProfile;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.context.CommandContext;
 
+import dev.chunkplan.common.FeeLogFile;
 import dev.chunkplan.common.QuotaConfig;
 import dev.chunkplan.common.QuotaEngine;
 import net.minecraft.commands.CommandSourceStack;
@@ -20,6 +24,7 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.storage.LevelResource;
 
 /**
  * /quota 命令族：check（自检 + 恢复倒计时）、reset <player>（清消费桶，集合保留）、reload。
@@ -112,16 +117,31 @@ public final class QuotaCommands {
             ctx.getSource().sendFailure(Component.literal("ChunkPlan 未初始化"));
             return 0;
         }
+        MinecraftServer server = ctx.getSource().getServer();
+        // 直接从 TOML 文件解析（运行中改配置热生效，与 Fabric 行为一致）。
+        // NeoForge SERVER 配置主位置在 <serverDir>/config/；world/serverconfig/ 是可选存档级覆盖层，
+        // 存在时整体覆盖（与 NeoForge 启动加载语义一致），reload 同样优先读覆盖层。
+        Path baseFile = server.getServerDirectory().resolve("config").resolve("chunkplan-server.toml");
+        Path overrideFile = server.getWorldPath(LevelResource.ROOT).resolve("serverconfig")
+                .resolve("chunkplan-server.toml");
+        Path configFile = Files.exists(overrideFile) ? overrideFile : baseFile;
         List<String> warnings = new ArrayList<>();
-        // 直接从 TOML 文件解析（运行中改配置热生效，与 Fabric 行为一致）
-        java.nio.file.Path configFile = ctx.getSource().getServer().getServerDirectory()
-                .resolve("config").resolve("chunkplan-server.toml");
         QuotaConfig config = NeoForgeConfig.toQuotaConfigFromFile(configFile, warnings);
         for (String w : warnings) {
             org.slf4j.LoggerFactory.getLogger("ChunkPlan").warn("配置告警: {}", w);
         }
         eng.setConfig(config);
-        ctx.getSource().sendSuccess(() -> Component.literal("§aChunkPlan 配置已重载"
+        // logFeeEvents 开关热切换：按新配置重建/清空扣费日志
+        if (config.logFeeEvents()) {
+            try {
+                eng.setFeeLogger(new FeeLogFile(server.getServerDirectory().resolve("logs").resolve("chunkplan.log")));
+            } catch (IOException e) {
+                org.slf4j.LoggerFactory.getLogger("ChunkPlan").warn("重建扣费日志失败: {}", e.getMessage());
+            }
+        } else {
+            eng.setFeeLogger(null);
+        }
+        ctx.getSource().sendSuccess(() -> Component.literal("§aChunkPlan 配置已重载（读取: " + configFile + "）"
                 + (warnings.isEmpty() ? "" : "§c（含告警，详见服务端日志）")), true);
         return 1;
     }

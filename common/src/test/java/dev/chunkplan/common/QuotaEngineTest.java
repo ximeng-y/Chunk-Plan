@@ -242,6 +242,18 @@ class QuotaEngineTest {
     }
 
     @Test
+    void exemptThenUnexemptFirstTickNotCharged() {
+        // 回归 QA P1：豁免期间位移不记基准；解除豁免后首个 tick 只记基准不扣费。
+        // 旧实现不清除 tracking，解除豁免首 tick 会把豁免期间累积位移当区块变化计费。
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);    // 基准（区块 0）
+        engine.onPlayerTick(player, true, OVERWORLD, 16, 64, 0);    // 开始豁免
+        engine.onPlayerTick(player, true, OVERWORLD, 160, 64, 0);   // 豁免期间大位移（不参与记账）
+        engine.onPlayerTick(player, false, OVERWORLD, 160, 64, 0);  // 解除豁免首个 tick：只记基准
+        engine.onPlayerTick(player, false, OVERWORLD, 176, 64, 0);  // 正常计费：新区块 1.0
+        assertEquals(1.0, engine.quotaStatus(player).lines().get(0).spent(), 1e-9);
+    }
+
+    @Test
     void checkShowsAllLines() {
         engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
         engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);

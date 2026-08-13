@@ -97,4 +97,17 @@ class QuotaConfigTest {
         assertEquals(30, cfg.banScanIntervalSec());
         assertFalse(warnings.isEmpty());
     }
+
+    @Test
+    void infinityFallback() {
+        // ±Infinity 会静默禁用计费/额度线（如 TOML inf / JSON 1e400），必须回退默认
+        List<String> warnings = new ArrayList<>();
+        QuotaConfig cfg = QuotaConfig.builder()
+                .firstEntryFee(Double.POSITIVE_INFINITY)
+                .familiarEntryFee(Double.NEGATIVE_INFINITY)
+                .build(warnings);
+        assertEquals(1.0, cfg.firstEntryFee());
+        assertEquals(0.05, cfg.familiarEntryFee());
+        assertFalse(warnings.isEmpty());
+    }
 }

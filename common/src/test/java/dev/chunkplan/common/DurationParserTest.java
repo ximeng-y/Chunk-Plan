@@ -32,4 +32,12 @@ class DurationParserTest {
         assertThrows(IllegalArgumentException.class, () -> DurationParser.parseSeconds("0h"));
         assertThrows(IllegalArgumentException.class, () -> DurationParser.parseSeconds("-5h"));
     }
+
+    @Test
+    void overflowRejected() {
+        // multiplyExact 溢出：统一转 IllegalArgumentException（调用方只捕该类，防启动崩溃）
+        assertThrows(IllegalArgumentException.class, () -> DurationParser.parseSeconds("9223372036854775807h"));
+        // 超大合法窗口：超过 100 年上限，防止消费桶窗口计算中 windowSeconds*1000 溢出为负
+        assertThrows(IllegalArgumentException.class, () -> DurationParser.parseSeconds("40000d"));
+    }
 }

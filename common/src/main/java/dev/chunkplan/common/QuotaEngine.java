@@ -73,7 +73,7 @@ public final class QuotaEngine {
 
     private final Path dataDir;
     private final Path playerDataDir;
-    private final FeeLogger feeLogger;
+    private volatile FeeLogger feeLogger;
     private final ManagedBanStore banStore;
     private final LongSupplier clock;
 
@@ -122,6 +122,11 @@ public final class QuotaEngine {
         this.config = config;
     }
 
+    /** 运行期更换扣费日志实现（/quota reload 时 logFeeEvents 开关热切换；false 传 null） */
+    public void setFeeLogger(FeeLogger feeLogger) {
+        this.feeLogger = feeLogger;
+    }
+
     /** 豁免判定：默认 OP + 配置名单豁免；exemptByDefault=false 时全员受限 */
     public boolean isExempt(UUID uuid, boolean isOp) {
         QuotaConfig cfg = config;
@@ -131,7 +136,9 @@ public final class QuotaEngine {
     /** 每玩家每 tick 调用（须在服务端主线程串行） */
     public TickResult onPlayerTick(UUID uuid, boolean exempt, String dimKey, double x, double y, double z) {
         if (exempt) {
-            // 豁免玩家不参与记账；豁免期间不记录基准，移除豁免后首个 tick 按首 tick 处理（只记基准不扣费）
+            // 豁免玩家不参与记账；同时清除位移基准，使移除豁免后首个 tick 按首 tick 处理（只记基准不扣费）。
+            // 若不清除，豁免期间累积位移会在解除豁免后的首个 tick 被当作区块变化计费（QA 实测 P1）
+            tracking.remove(uuid);
             return TickResult.none();
         }
         PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);

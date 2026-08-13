@@ -81,11 +81,21 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
    - **原版移动校验**：非鞘翅位移平方 > `100×包数` 即拒（`moved too quickly`，约 10 格/tick 上限）→ 客户端位置包无法大步瞬移；高速 2x 实测用 `/tp` 命令（OP 权限）驱动
    - mineflayer 物理引擎在目标区块未加载时**不发位置包**（`blockAt()==null` 提前 return）→ 手动 `_client.write('position')` 也不可靠（与物理发包冲突）；真实移动验证以 `/tp` 命令为准
    - 登录拦截的客户端证据：原版 `multiplayer.disconnect.banned.reason` 踢出消息（含恢复时间）
-12. **NeoForge /quota reload 必须读文件**：`ModConfigSpec` 值只在启动时加载，运行中改 toml 不感知 → `NeoForgeConfig.toQuotaConfigFromFile()`（NightConfig FileConfig 直接解析，失败回退 spec 并告警）；Fabric 的 reload 本来就是文件驱动。另注意 NightConfig 读 TOML 整数返回 `Integer`（非 Long），需 `Number.longValue()` 转换
+12. **NeoForge /quota reload 必须读文件**：NeoForge 21.1 虽有运行时 watcher（改文件自动重载 spec 内存值），但**引擎持有的 QuotaConfig 副本不会随之更新** → `NeoForgeConfig.toQuotaConfigFromFile()`（NightConfig FileConfig 直接解析，失败回退 spec 并告警）。另两个陷阱：
+    - NightConfig 读 TOML 整数返回 `Integer`（非 Double/Long）→ **全部数值字段**（含 firstEntryFee 等 Double 字段）都需 `Number` 转换，否则单字段写整数即 ClassCastException 整次回退
+    - 运行中用编辑器**非原子保存** TOML 会触发 NeoForge watcher 解析失败 → 文件被改名 `.bak` 并**静默用默认值重新生成**（用户编辑丢失）→ 改配置应原子写入或停服修改
+13. **豁免期间必须清除 tracking**（QA 实测 P1）：exempt 分支若不清除位移基准，解除豁免后首个 tick 会把豁免期间累积位移当区块变化计费（OP 被取消后第一次移动多扣一次）→ `tracking.remove(uuid)` 已修，单测 `exemptThenUnexemptFirstTickNotCharged` 回归
+14. **ban 来源区分**：`applyBan` 不覆盖已存在的非 ChunkPlan 手动 ban（避免手动永久 ban 被临时 ban 替换后随额度恢复被误解除）；`scanBans` 只解除来源为 `"ChunkPlan"` 的条目（`UserBanListEntry.getSource()`），管理员手动 ban 保留。mock 玩家 ban 时无登出事件 → `applyBan` 内显式 `engine.onPlayerDisconnect(uuid)` 清理 tracking，否则重 spawn 首 tick 误计费
+15. **reload 的存档级覆盖层语义**：`world/serverconfig/chunkplan-server.toml` 存在时整体覆盖 `config/` 下同名配置（NeoForge 启动语义），reload 同样优先读覆盖层并在命令反馈中显示实际读取路径
+16. **ChunkPosPacker 位序与 vanilla `ChunkPos.asLong` 一致**（x 低 32 位、z 高 32 位）：explored 持久化数据绑定此位序，**不得再改**（曾为反序且注释谎称与 MC 一致，已修；未来也不要用其他编码"优化"）
+17. **模拟玩家与性能**：mock 只在 dev 环境注册；Fabric 壳每 tick 的全图实体兜底扫描仅 dev 执行（生产 PlayerList 全覆盖，避免每 tick 全实体开销）；`logFeeEvents` 热切换（false→true）需 `engine.setFeeLogger()` 重建日志（启动时 flag 决定，reload 只改配置不生效）
+18. **离线模式固有弱点**：offline 服务器 UUID 由名字派生，攻击者可用豁免名单中的名字冒名获得同 UUID（绕过计费/封禁），与原版 OP/白名单同源；在线模式不受影响。提示服主：离线模式建议配合其他防护（如登录插件）
 
 ## 约定
 
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
 - 双端配置结构保持一致（TOML 与 JSON 字段一一对应）
+- 双端 `DevCommands`/`QuotaCommands`/`applyBan`/`scanBans` 逐字重复（架构决定无法下沉 common）→ **改一处必须同步另一端**
+- MC 版本范围已收紧为仅 1.21.1（双端元数据），不得放宽到未测试版本
 - 不做：mixin、客户端内容、指令式配置、多 MC 版本；26.x 迁移只适配壳层

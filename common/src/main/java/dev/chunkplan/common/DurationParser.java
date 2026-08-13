@@ -5,6 +5,9 @@ package dev.chunkplan.common;
  */
 public final class DurationParser {
 
+    /** 时长上限（100 年，秒）：防止消费桶窗口计算中 windowSeconds*1000 溢出为负导致额度线静默失效 */
+    private static final long MAX_SECONDS = 100L * 365 * 24 * 3600;
+
     private DurationParser() {
     }
 
@@ -41,9 +44,16 @@ public final class DurationParser {
             if (value <= 0) {
                 throw new IllegalArgumentException("时长必须为正数: " + text);
             }
-            return Math.multiplyExact(value, multiplier);
+            long seconds = Math.multiplyExact(value, multiplier);
+            if (seconds > MAX_SECONDS) {
+                throw new IllegalArgumentException("时长过大: " + text);
+            }
+            return seconds;
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException("无法解析时长: " + text, e);
+        } catch (ArithmeticException e) {
+            // multiplyExact 溢出：统一转 IllegalArgumentException（调用方只捕该类）
+            throw new IllegalArgumentException("时长过大: " + text, e);
         }
     }
 }
