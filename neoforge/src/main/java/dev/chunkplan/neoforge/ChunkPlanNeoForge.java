@@ -116,6 +116,12 @@ public final class ChunkPlanNeoForge {
                         player.getX(), player.getY(), player.getZ());
                 if (result.type() == QuotaEngine.ResultType.BAN) {
                     applyBan(player, result.banUntilMillis());
+                } else {
+                    // 额度百分比阈值提示（坑 #28）：逐条发送；tick 时 client_information 已到达，语言正确
+                    for (QuotaEngine.WindowAlert alert : result.alerts()) {
+                        player.sendSystemMessage(ChunkPlanMessages.quotaAlertMessage(alert,
+                                ChunkPlanMessages.isChinese(player.clientInformation().language())));
+                    }
                 }
             } catch (Exception e) {
                 LOG.error("玩家 {} tick 计费处理异常", player.getGameProfile().getName(), e);

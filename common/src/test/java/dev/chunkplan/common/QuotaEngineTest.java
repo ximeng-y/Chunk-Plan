@@ -8,7 +8,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -398,5 +400,170 @@ class QuotaEngineTest {
         engine.setConfig(strict);
         var r = engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);
         assertEquals(QuotaEngine.ResultType.BAN, r.type());
+    }
+
+    // ---------- 坑 #28：额度百分比阈值提示 ----------
+
+    /** 单窗口 limit=10 的提示测试配置（每进一个新区块 +1.0 = +10%，逐档可控） */
+    private void setAlertConfig() {
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(new QuotaConfig.Line(60, 10.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+    }
+
+    /** 提取 tick 结果中触发的档位列表（按触发顺序） */
+    private static List<Integer> percents(QuotaEngine.TickResult r) {
+        return r.alerts().stream().map(QuotaEngine.WindowAlert::percent).toList();
+    }
+
+    @Test
+    void alertsFirePerThresholdOnce() {
+        setAlertConfig();
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);   // 基准
+        var r = engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);  // 10%：无
+        assertTrue(r.alerts().isEmpty());
+        r = engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);  // 20%：15
+        assertEquals(List.of(15), percents(r));
+        r = engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0);  // 30%：30（15 不重复）
+        assertEquals(List.of(30), percents(r));
+        r = engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0);  // 40%：无
+        assertTrue(r.alerts().isEmpty());
+        r = engine.onPlayerTick(player, false, OVERWORLD, 80, 64, 0);  // 50%：50
+        assertEquals(List.of(50), percents(r));
+        r = engine.onPlayerTick(player, false, OVERWORLD, 96, 64, 0);  // 60%：无
+        assertTrue(r.alerts().isEmpty());
+        r = engine.onPlayerTick(player, false, OVERWORLD, 112, 64, 0); // 70%：65
+        assertEquals(List.of(65), percents(r));
+        r = engine.onPlayerTick(player, false, OVERWORLD, 128, 64, 0); // 80%：75、80 一次跨两档
+        assertEquals(List.of(75, 80), percents(r));
+        r = engine.onPlayerTick(player, false, OVERWORLD, 144, 64, 0); // 90%：85、90
+        assertEquals(List.of(85, 90), percents(r));
+        r = engine.onPlayerTick(player, false, OVERWORLD, 160, 64, 0); // 100%：95、98
+        assertEquals(List.of(95, 98), percents(r));
+    }
+
+    @Test
+    void alertSeverityMapping() {
+        setAlertConfig();
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        // 收集全部档位对应的严重度（用户规定：15~30 低、50~75 中、80~98 高）
+        Map<Integer, QuotaEngine.Severity> got = new HashMap<>();
+        for (int i = 1; i <= 10; i++) {
+            QuotaEngine.TickResult r = engine.onPlayerTick(player, false, OVERWORLD, i * 16.0, 64, 0);
+            for (QuotaEngine.WindowAlert a : r.alerts()) {
+                got.put(a.percent(), a.severity());
+            }
+        }
+        assertEquals(QuotaEngine.Severity.LOW, got.get(15));
+        assertEquals(QuotaEngine.Severity.LOW, got.get(30));
+        assertEquals(QuotaEngine.Severity.MEDIUM, got.get(50));
+        assertEquals(QuotaEngine.Severity.MEDIUM, got.get(65));
+        assertEquals(QuotaEngine.Severity.MEDIUM, got.get(75));
+        assertEquals(QuotaEngine.Severity.HIGH, got.get(80));
+        assertEquals(QuotaEngine.Severity.HIGH, got.get(85));
+        assertEquals(QuotaEngine.Severity.HIGH, got.get(90));
+        assertEquals(QuotaEngine.Severity.HIGH, got.get(95));
+        assertEquals(QuotaEngine.Severity.HIGH, got.get(98));
+    }
+
+    @Test
+    void alertsPerWindowIndependent() {
+        // 双窗口：1min/10.0（+10%/区块）+ 2min/100.0（+1%/区块），各自独立触发
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(new QuotaConfig.Line(60, 10.0), new QuotaConfig.Line(120, 100.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        List<QuotaEngine.WindowAlert> all = new ArrayList<>();
+        for (int i = 1; i <= 5; i++) {
+            all.addAll(engine.onPlayerTick(player, false, OVERWORLD, i * 16.0, 64, 0).alerts());
+        }
+        // 1min 线 50%（15/30/50）；2min 线仅 5%，无任何提示
+        assertEquals(List.of(15, 30, 50), all.stream().map(QuotaEngine.WindowAlert::percent).toList());
+        for (QuotaEngine.WindowAlert a : all) {
+            assertEquals(60, a.windowSeconds());
+        }
+    }
+
+    @Test
+    void alertFirstTickInitializesWithoutSpam() {
+        setAlertConfig();
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        for (int i = 1; i <= 6; i++) {
+            engine.onPlayerTick(player, false, OVERWORLD, i * 16.0, 64, 0); // 消费到 60%
+        }
+        // 模拟重连：瞬态状态清空（数据落盘保留）
+        engine.onPlayerDisconnect(player);
+        // 重进首 tick 只初始化当前档位（60% -> 50），不补发历史档位
+        var r = engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        assertTrue(r.alerts().isEmpty());
+        // 向未探索方向走（+1.0 首费）：70.5% 只发 65，不发 15/30/50
+        r = engine.onPlayerTick(player, false, OVERWORLD, -16, 64, 0);
+        assertEquals(List.of(65), percents(r));
+    }
+
+    @Test
+    void alertsReTriggerAfterResetSpend() {
+        setAlertConfig();
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);  // 10%
+        engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);  // 20%：15
+        engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0);  // 30%：30
+        // 管理员重置：档位回落（0.5%），重新消费后再次触发
+        engine.resetSpend(player);
+        var r = engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0);  // 0.05 熟悉费，无触发
+        assertTrue(r.alerts().isEmpty());
+        r = engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0);  // 10.5%：无
+        assertTrue(r.alerts().isEmpty());
+        r = engine.onPlayerTick(player, false, OVERWORLD, 80, 64, 0);  // 20.5%：15 重新触发
+        assertEquals(List.of(15), percents(r));
+    }
+
+    @Test
+    void alertsCrossingMultipleThresholds() {
+        // limit=3.0：单次进区块 +1.0 = +33.3%，一次跨 15、30 两档，逐条都发
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(new QuotaConfig.Line(60, 3.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        var r = engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);
+        assertEquals(List.of(15, 30), percents(r));
+    }
+
+    @Test
+    void exemptPlayerNoAlertAndStateCleared() {
+        setAlertConfig();
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);  // 10%
+        engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);  // 20%：15
+        engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0);  // 30%：30
+        // 豁免：不提示且清除状态（避免旧档位残留）
+        var r = engine.onPlayerTick(player, true, OVERWORLD, 48, 64, 0);
+        assertTrue(r.alerts().isEmpty());
+        // 解除豁免：首 tick 重新初始化（30% -> 档位 30，不触发）
+        r = engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0);
+        assertTrue(r.alerts().isEmpty());
+        r = engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0);  // 40%：无
+        assertTrue(r.alerts().isEmpty());
+        r = engine.onPlayerTick(player, false, OVERWORLD, 80, 64, 0);  // 50%：50
+        assertEquals(List.of(50), percents(r));
+    }
+
+    @Test
+    void banTickHasNoAlerts() {
+        // limit=3.0：第 4 次踏入 4.0 > 3.0 -> BAN；BAN tick 不发提示（ban 消息已充分说明）
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(new QuotaConfig.Line(60, 3.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);  // 1.0
+        engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);  // 2.0
+        engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0);  // 3.0（恰等于上限，未满）
+        var r = engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0); // 4.0 -> BAN
+        assertEquals(QuotaEngine.ResultType.BAN, r.type());
+        assertTrue(r.alerts().isEmpty());
     }
 }

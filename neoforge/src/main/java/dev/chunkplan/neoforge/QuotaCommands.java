@@ -56,6 +56,8 @@ public final class QuotaCommands {
                                 .requires(s -> s.hasPermission(2))
                                 .suggests(QuotaCommands::suggestPlayerNames)
                                 .executes(ctx -> checkOther(ctx))))
+                .then(Commands.literal("rules")
+                        .executes(ctx -> rules(ctx)))
                 .then(Commands.literal("reset")
                         .requires(s -> s.hasPermission(2))
                         .then(Commands.argument("player", StringArgumentType.word())
@@ -111,6 +113,18 @@ public final class QuotaCommands {
         String text = ChunkPlanMessages.checkStatusText(name, eng.quotaStatus(uuid), self, zh,
                 eng.isExempt(uuid, isOp), inList);
         ctx.getSource().sendSuccess(() -> Component.literal(text), false);
+    }
+
+    /** /chunkplan rules：详细计费规则（提示消息超链接点击触发；无权限要求，所有玩家可查看） */
+    private static int rules(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanNeoForge.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        ctx.getSource().sendSuccess(() -> Component.literal(
+                ChunkPlanMessages.rulesMessage(eng.getConfig(), isZh(ctx))), false);
+        return 1;
     }
 
     private static int reset(CommandContext<CommandSourceStack> ctx) {

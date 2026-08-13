@@ -4,7 +4,10 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 
+import dev.chunkplan.common.QuotaConfig;
 import dev.chunkplan.common.QuotaEngine;
+import net.minecraft.network.chat.ClickEvent;
+import net.minecraft.network.chat.Component;
 
 /**
  * 玩家可见消息渲染（按玩家客户端语言逐玩家选择中/英文文案，坑 #22）。
@@ -174,5 +177,68 @@ public final class ChunkPlanMessages {
         return checkStatusText(name, status, true, zh, isExempt, inExemptList)
                 + "\n" + (zh ? "§7查询额度请使用 /chunkplan check 命令"
                               : "§7Check your quota with /chunkplan check");
+    }
+
+    /**
+     * 额度百分比阈值提示（坑 #28）：差异消息内容整体按严重度着色
+     * （低 §a 浅绿 / 中 §e 黄 / 高 §c 红），窗口名与百分比字段浅蓝 §b 覆盖；
+     * 固定尾部白色 §f，含 /chunkplan check 提示与规则超链接（点击执行 /chunkplan rules）。
+     * 返回 Component：超链接带 ClickEvent，是本项目第一个富文本交互用法。
+     */
+    public static Component quotaAlertMessage(QuotaEngine.WindowAlert alert, boolean zh) {
+        String color = switch (alert.severity()) {
+            case LOW -> "§a";
+            case MEDIUM -> "§e";
+            case HIGH -> "§c";
+        };
+        String window = windowName(alert.windowSeconds(), zh);
+        StringBuilder sb = new StringBuilder(color).append("[ChunkPlan] ");
+        if (zh) {
+            sb.append("您当前已达到 §b").append(window).append(color).append(" 探索额度上限的 §b")
+                    .append(alert.percent()).append("%").append(color);
+            switch (alert.severity()) {
+                case LOW -> sb.append("，请合理规划您的探索。");
+                case MEDIUM -> sb.append("，请合理规划您的探索，若达到任意一个额度上限，您将被暂时移出服务器，直到额度重置！");
+                case HIGH -> sb.append("，您的探索额度严重不足！为防止因强制踢出而带来的损失，请及时寻找安全的下线地点，过程中确保尽可能在已踏足过的区块行走，避免鞘翅等形式的快速移动！");
+            }
+        } else {
+            sb.append("You have reached §b").append(alert.percent()).append("%").append(color)
+                    .append(" of the exploration quota limit for §b").append(window).append(color);
+            switch (alert.severity()) {
+                case LOW -> sb.append(". Please plan your exploration wisely.");
+                case MEDIUM -> sb.append(". Please plan your exploration wisely. If any quota limit is reached, you will be temporarily removed from the server until the quota resets!");
+                case HIGH -> sb.append("! Your exploration quota is critically low! To avoid losses from a forced kick, please find a safe place to log off, stay on explored chunks, and avoid fast travel such as elytra!");
+            }
+        }
+        sb.append("\n§f您可以使用 §a/chunkplan check §f命令来查阅您的详细额度，");
+        String link = zh ? "点击此处查看详细计费规则" : "Click here to view detailed billing rules";
+        return Component.literal(sb.toString()).append(Component.literal(link)
+                .withStyle(s -> s.withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/chunkplan rules"))));
+    }
+
+    /**
+     * 详细计费规则文本（/chunkplan rules 命令与提示超链接共用）：5 条规则 + 结尾注意。
+     * 数值取管理员配置（String.valueOf 保留 1.0 / 0.05 / 2.0 原样显示），第 4 条内 /chunkplan check 浅绿。
+     */
+    public static String rulesMessage(QuotaConfig config, boolean zh) {
+        String first = String.valueOf(config.firstEntryFee());
+        String familiar = String.valueOf(config.familiarEntryFee());
+        String mult = String.valueOf(config.highSpeedMultiplier()) + "x";
+        if (zh) {
+            return "§fChunkPlan计费规则：\n"
+                    + "1.踏入从未踏入过的区块，消耗" + first + "探索额度\n"
+                    + "2.踏入曾经踏入过的区块，消耗" + familiar + "探索额度\n"
+                    + "3.使用鞘翅、创造模式飞行等方式（原版无药水效果疾跑不属于此类）快速移动时，消耗的探索额度倍率提升至" + mult + "\n"
+                    + "4.计费额度分为多个计时窗口，任意一个计时窗口达到上限都会导致您被服务器暂时封禁。您可以使用§a/chunkplan check§f命令来查阅您的详细额度\n"
+                    + "5.服务器管理员有权重置某个玩家的探索额度\n"
+                    + "请注意：您的所有探索额度限制都来自服务器管理员的配置，有任何问题请咨询您的服务器管理员";
+        }
+        return "§fChunkPlan billing rules:\n"
+                + "1. Entering a chunk never explored before costs " + first + " exploration quota\n"
+                + "2. Entering a previously explored chunk costs " + familiar + " exploration quota\n"
+                + "3. Fast movement (elytra, creative flight, etc.; vanilla sprint without potion effects is NOT included) multiplies the cost to " + mult + "\n"
+                + "4. Quota is tracked in multiple timed windows; exceeding the limit of ANY window results in a temporary ban. Use §a/chunkplan check§f to view your detailed quota\n"
+                + "5. Server admins can reset a player's exploration quota\n"
+                + "Note: all exploration quota limits come from the server admin's configuration; contact your server admin with any questions.";
     }
 }

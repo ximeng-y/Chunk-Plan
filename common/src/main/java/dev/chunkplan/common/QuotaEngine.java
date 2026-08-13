@@ -39,17 +39,31 @@ public final class QuotaEngine {
         NONE, KICK, BAN
     }
 
+    /** 提示严重度：低（浅绿）/ 中（黄）/ 高（红），壳层按此着色（坑 #28） */
+    public enum Severity {
+        LOW, MEDIUM, HIGH
+    }
+
+    /** 额度百分比阈值提示（坑 #28）：窗口秒数 + 触发档位 + 严重度，文案由壳层渲染 */
+    public record WindowAlert(long windowSeconds, int percent, Severity severity) {
+    }
+
     /**
      * 计费结果。用户可见文案（ban 消息等）属表现层，由壳层按玩家语言渲染，
-     * 引擎只返回结构化数据（坑 #22）。
+     * 引擎只返回结构化数据（坑 #22）。alerts 为本 tick 触发的额度百分比提示
+     * （跨档逐条；BAN 当 tick 不发提示，ban 消息已充分说明）。
      */
-    public record TickResult(ResultType type, long banUntilMillis) {
+    public record TickResult(ResultType type, long banUntilMillis, List<WindowAlert> alerts) {
         public static TickResult none() {
-            return new TickResult(ResultType.NONE, -1);
+            return new TickResult(ResultType.NONE, -1, List.of());
+        }
+
+        public static TickResult none(List<WindowAlert> alerts) {
+            return new TickResult(ResultType.NONE, -1, alerts);
         }
 
         public static TickResult ban(long untilMillis) {
-            return new TickResult(ResultType.BAN, untilMillis);
+            return new TickResult(ResultType.BAN, untilMillis, List.of());
         }
     }
 
@@ -69,6 +83,15 @@ public final class QuotaEngine {
         String prevDim;
     }
 
+    /** 每玩家额度提示状态（坑 #28，瞬态不落盘）：每窗口已触发的最高档位 */
+    private static final class AlertState {
+        boolean initialized;
+        int[] lastLevels; // 与 config.lines() 下标对齐
+    }
+
+    /** 触发档位表（严格按用户要求）：达到即触发；15~30 低、50~75 中、80~98 高 */
+    private static final int[] ALERT_PERCENTS = {15, 30, 50, 65, 75, 80, 85, 90, 95, 98};
+
     private final Path dataDir;
     private final Path playerDataDir;
     private volatile FeeLogger feeLogger;
@@ -78,6 +101,7 @@ public final class QuotaEngine {
     private volatile QuotaConfig config;
     private final ConcurrentMap<UUID, PlayerQuotaData> dataByPlayer = new ConcurrentHashMap<>();
     private final ConcurrentMap<UUID, Tracking> tracking = new ConcurrentHashMap<>();
+    private final ConcurrentMap<UUID, AlertState> alertStates = new ConcurrentHashMap<>();
 
     /**
      * @param dataDir   存档内数据根目录（如 {@code <world>/chunkplan}），壳层传
@@ -137,6 +161,8 @@ public final class QuotaEngine {
             // 豁免玩家不参与记账；同时清除位移基准，使移除豁免后首个 tick 按首 tick 处理（只记基准不扣费）。
             // 若不清除，豁免期间累积位移会在解除豁免后的首个 tick 被当作区块变化计费（QA 实测 P1）
             tracking.remove(uuid);
+            // 豁免玩家不提示；清状态避免解除豁免后旧档位残留导致不再提示
+            alertStates.remove(uuid);
             return TickResult.none();
         }
         PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
@@ -154,7 +180,7 @@ public final class QuotaEngine {
             tr.prevZ = z;
             tr.prevChunk = curChunk;
             tr.prevDim = dimKey;
-            return TickResult.none();
+            return TickResult.none(checkAlerts(uuid, data, now));
         }
 
         double dx = x - tr.prevX;
@@ -171,7 +197,7 @@ public final class QuotaEngine {
 
         if (!enteredNewChunk) {
             // 同一区块内（挂机/踱步/移动）：不重复计费
-            return TickResult.none();
+            return TickResult.none(checkAlerts(uuid, data, now));
         }
 
         // 基础费判定：先查集合，不在则先加入集合（"踏入的要么是来过的，要么是没来过的"）
@@ -195,7 +221,7 @@ public final class QuotaEngine {
             long until = recoveryMillis(data, now);
             return TickResult.ban(until);
         }
-        return TickResult.none();
+        return TickResult.none(checkAlerts(uuid, data, now));
     }
 
     /**
@@ -244,6 +270,7 @@ public final class QuotaEngine {
         savePlayer(uuid);
         tracking.remove(uuid);
         dataByPlayer.remove(uuid);
+        alertStates.remove(uuid);
     }
 
     /** 定时/关服保存（先清理过期桶再写盘） */
@@ -279,6 +306,63 @@ public final class QuotaEngine {
     }
 
     // ---------- 内部 ----------
+
+    /**
+     * 额度百分比阈值提示（坑 #28）：每窗口独立计算，达到档位表（15/30/50/65/75/80/85/90/95/98）即触发。
+     * 首见（登录/重连/服务器重启后首个 tick）只初始化当前档位不触发，避免补发历史档位刷屏；
+     * 档位上升跨过新档时逐档生成提示；额度重置/滑出后档位回落，重新涨回时再次触发。
+     */
+    private List<WindowAlert> checkAlerts(UUID uuid, PlayerQuotaData data, long now) {
+        List<QuotaConfig.Line> lines = config.lines();
+        AlertState state = alertStates.computeIfAbsent(uuid, k -> new AlertState());
+        if (!state.initialized) {
+            state.lastLevels = new int[lines.size()];
+            for (int i = 0; i < lines.size(); i++) {
+                state.lastLevels[i] = currentLevel(data, lines.get(i), now);
+            }
+            state.initialized = true;
+            return List.of();
+        }
+        List<WindowAlert> alerts = new ArrayList<>();
+        for (int i = 0; i < lines.size(); i++) {
+            QuotaConfig.Line line = lines.get(i);
+            int level = currentLevel(data, line, now);
+            if (level > state.lastLevels[i]) {
+                // 跨档：从旧档下一档到新档逐档触发（严格按档位表每条都提示）
+                for (int t : ALERT_PERCENTS) {
+                    if (t > state.lastLevels[i] && t <= level) {
+                        alerts.add(new WindowAlert(line.windowSeconds(), t, severityOf(t)));
+                    }
+                }
+            }
+            // 回落（额度重置/滑出）仅同步档位，重新涨回时再次触发
+            state.lastLevels[i] = level;
+        }
+        return alerts;
+    }
+
+    /** 当前最高已过档位（低于 15% 为 -1） */
+    private static int currentLevel(PlayerQuotaData data, QuotaConfig.Line line, long now) {
+        double pct = data.spendInWindow(now, line.windowSeconds()) / line.limit() * 100;
+        int level = -1;
+        for (int t : ALERT_PERCENTS) {
+            if (pct >= t) {
+                level = t;
+            }
+        }
+        return level;
+    }
+
+    /** 严重度映射：15~30 低、50~75 中、80~98 高（用户规定） */
+    private static Severity severityOf(int percent) {
+        if (percent <= 30) {
+            return Severity.LOW;
+        }
+        if (percent <= 75) {
+            return Severity.MEDIUM;
+        }
+        return Severity.HIGH;
+    }
 
     private boolean isAllLinesExceeded(PlayerQuotaData data, long nowMillis) {
         // 坑 #25：任一额度线满即视为超限（原"全部满才拒"改为单线满即拒）
