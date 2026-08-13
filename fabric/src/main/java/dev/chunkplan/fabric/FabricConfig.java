@@ -8,9 +8,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
-import dev.chunkplan.common.DurationParser;
 import dev.chunkplan.common.GsonHolder;
 import dev.chunkplan.common.QuotaConfig;
+import dev.chunkplan.common.QuotaTiers;
 
 /**
  * Fabric JSON 配置（config/chunkplan.json）。
@@ -18,14 +18,24 @@ import dev.chunkplan.common.QuotaConfig;
  */
 public final class FabricConfig {
 
-    /** 默认配置（与计划默认一致：5h≤500 + 24h≤2000；与 NeoForge TOML 平行数组格式一致） */
+    /** 默认配置（与 NeoForge TOML 一致：第一二档开、第三四档关；阈值 0.5 即创造飞行） */
     private static final String DEFAULT_JSON = """
             {
-              "lines": [ "5h", "24h" ],
-              "lineLimits": [ 500.0, 2000.0 ],
+              "tier1Enabled": true,
+              "tier1Window": "5h",
+              "tier1Limit": 500.0,
+              "tier2Enabled": true,
+              "tier2Window": "24h",
+              "tier2Limit": 2000.0,
+              "tier3Enabled": false,
+              "tier3Window": "7d",
+              "tier3Limit": 10000.0,
+              "tier4Enabled": false,
+              "tier4Window": "30d",
+              "tier4Limit": 40000.0,
               "firstEntryFee": 1.0,
               "familiarEntryFee": 0.05,
-              "highSpeedThreshold": 1.0,
+              "highSpeedThreshold": 0.5,
               "highSpeedMultiplier": 2.0,
               "exemptByDefault": true,
               "exemptPlayers": [],
@@ -36,8 +46,18 @@ public final class FabricConfig {
             """;
 
     private static final class Dto {
-        List<String> lines;
-        List<Double> lineLimits;
+        Boolean tier1Enabled;
+        String tier1Window;
+        Double tier1Limit;
+        Boolean tier2Enabled;
+        String tier2Window;
+        Double tier2Limit;
+        Boolean tier3Enabled;
+        String tier3Window;
+        Double tier3Limit;
+        Boolean tier4Enabled;
+        String tier4Window;
+        Double tier4Limit;
         Double firstEntryFee;
         Double familiarEntryFee;
         Double highSpeedThreshold;
@@ -82,25 +102,19 @@ public final class FabricConfig {
             dto = GsonHolder.GSON.fromJson(DEFAULT_JSON, Dto.class);
         }
 
-        List<QuotaConfig.Line> lines = new ArrayList<>();
-        if (dto.lines != null || dto.lineLimits != null) {
-            List<String> windows = dto.lines == null ? List.of() : dto.lines;
-            List<Double> limits = dto.lineLimits == null ? List.of() : dto.lineLimits;
-            int n = Math.min(windows.size(), limits.size());
-            if (windows.size() != limits.size()) {
-                warnings.add("lines 与 lineLimits 数量不一致（" + windows.size() + " vs " + limits.size()
-                        + "），多余项已丢弃");
-            }
-            for (int i = 0; i < n; i++) {
-                try {
-                    lines.add(new QuotaConfig.Line(
-                            DurationParser.parseSeconds(windows.get(i)), limits.get(i)));
-                } catch (RuntimeException e) {
-                    // 含 NPE（lineLimits 元素为 null）等解析异常，统一按非法额度线告警丢弃
-                    warnings.add("额度线 " + i + " 非法（window=" + windows.get(i) + ", limit=" + limits.get(i) + "）：" + e.getMessage());
-                }
-            }
-        }
+        List<QuotaTiers.Tier> tiers = List.of(
+                new QuotaTiers.Tier(dto.tier1Enabled == null ? true : dto.tier1Enabled,
+                        dto.tier1Window == null ? "5h" : dto.tier1Window,
+                        dto.tier1Limit == null ? 500.0 : dto.tier1Limit),
+                new QuotaTiers.Tier(dto.tier2Enabled == null ? true : dto.tier2Enabled,
+                        dto.tier2Window == null ? "24h" : dto.tier2Window,
+                        dto.tier2Limit == null ? 2000.0 : dto.tier2Limit),
+                new QuotaTiers.Tier(dto.tier3Enabled == null ? false : dto.tier3Enabled,
+                        dto.tier3Window == null ? "7d" : dto.tier3Window,
+                        dto.tier3Limit == null ? 10000.0 : dto.tier3Limit),
+                new QuotaTiers.Tier(dto.tier4Enabled == null ? false : dto.tier4Enabled,
+                        dto.tier4Window == null ? "30d" : dto.tier4Window,
+                        dto.tier4Limit == null ? 40000.0 : dto.tier4Limit));
 
         List<UUID> exempt = new ArrayList<>();
         if (dto.exemptPlayers != null) {
@@ -114,10 +128,10 @@ public final class FabricConfig {
         }
 
         return QuotaConfig.builder()
-                .lines(lines)
+                .lines(QuotaTiers.toLines(tiers, warnings))
                 .firstEntryFee(dto.firstEntryFee == null ? 1.0 : dto.firstEntryFee)
                 .familiarEntryFee(dto.familiarEntryFee == null ? 0.05 : dto.familiarEntryFee)
-                .highSpeedThreshold(dto.highSpeedThreshold == null ? 1.0 : dto.highSpeedThreshold)
+                .highSpeedThreshold(dto.highSpeedThreshold == null ? 0.5 : dto.highSpeedThreshold)
                 .highSpeedMultiplier(dto.highSpeedMultiplier == null ? 2.0 : dto.highSpeedMultiplier)
                 .exemptByDefault(dto.exemptByDefault == null ? true : dto.exemptByDefault)
                 .exemptPlayers(exempt)

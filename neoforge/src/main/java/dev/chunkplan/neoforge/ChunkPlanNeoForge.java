@@ -60,6 +60,9 @@ public final class ChunkPlanNeoForge {
     @EventBusSubscriber(modid = MODID, bus = EventBusSubscriber.Bus.GAME)
     public static final class GameEvents {
 
+        /** 待发登录欢迎的玩家（client_information 包晚于登录事件到达，须等首个 tick 语言才正确，坑 #24） */
+        private static final java.util.Set<UUID> WELCOME_PENDING = new java.util.HashSet<>();
+
         @SubscribeEvent
         public static void onServerStarting(ServerStartingEvent event) {
             MinecraftServer server = event.getServer();
@@ -102,6 +105,10 @@ public final class ChunkPlanNeoForge {
         /** 计费核心（事件与 mock 遍历共用） */
         static void handlePlayerTick(ServerPlayer player) {
             try {
+                // 登录欢迎延迟到首个 tick：此时 client_information 已到达，语言渲染正确（坑 #24）
+                if (WELCOME_PENDING.remove(player.getUUID())) {
+                    sendLoginWelcome(player);
+                }
                 UUID uuid = player.getUUID();
                 boolean exempt = engine.isExempt(uuid, player.hasPermissions(2));
                 QuotaEngine.TickResult result = engine.onPlayerTick(uuid, exempt,
@@ -128,10 +135,26 @@ public final class ChunkPlanNeoForge {
                 if (eng.isAllLinesExceeded(player.getUUID())) {
                     QuotaEngine.QuotaStatus status = eng.quotaStatus(player.getUUID());
                     applyBan(player, status.recoveryMillis());
+                } else {
+                    // 登录欢迎（坑 #24）：自动 check 状态 + 提示语；语言延迟到首个 tick 渲染
+                    WELCOME_PENDING.add(player.getUUID());
                 }
             } catch (Exception e) {
                 LOG.error("玩家 {} 登录检查异常", player.getGameProfile().getName(), e);
             }
+        }
+
+        /** 登录欢迎：自动 check 状态 + 提示语（坑 #24），按玩家客户端语言渲染 */
+        private static void sendLoginWelcome(ServerPlayer player) {
+            QuotaEngine eng = engine;
+            if (eng == null) {
+                return;
+            }
+            boolean zh = ChunkPlanMessages.isChinese(player.clientInformation().language());
+            boolean inList = eng.getConfig().exemptPlayers().contains(player.getUUID());
+            player.sendSystemMessage(Component.literal(ChunkPlanMessages.welcomeMessage(
+                    player.getGameProfile().getName(), eng.quotaStatus(player.getUUID()),
+                    eng.isExempt(player.getUUID(), player.hasPermissions(2)), inList, zh)));
         }
 
         @SubscribeEvent
@@ -140,6 +163,7 @@ public final class ChunkPlanNeoForge {
             if (eng == null || !(event.getEntity() instanceof ServerPlayer player)) {
                 return;
             }
+            WELCOME_PENDING.remove(player.getUUID());
             eng.onPlayerDisconnect(player.getUUID());
         }
 

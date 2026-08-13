@@ -26,14 +26,15 @@ fabric/     Fabric 1.21.1 薄壳（官方 mojmap，与 neoforge 代码对齐）
 | 项 | 决策 |
 | --- | --- |
 | 计费事件 | 玩家实体踏入区块（chunkPos 变化）即计费，与区块加载状态无关 |
-| 费率 | 集合外 `1.0` / 集合内 `0.05`；高速（>1.0 格/tick，严格大于）再 ×2 |
+| 费率 | 集合外 `1.0` / 集合内 `0.05`；高速（>0.5 格/tick，严格大于 = 创造模式飞行速度 ~0.54，地面疾跑 ~0.28 不触发）再 ×2 |
 | 挂机 | 零计费；登录首 tick 只记基准不扣费；边界踱步重复计费**接受，不加防抖** |
-| 额度线 | 可配置 1~4 条滚动窗口线，**全部满才拒**；默认 `5h≤500` + `24h≤2000` |
+| 额度线 | 四档滚动窗口线（每档独立开关 + 窗口预设校验，坑 #24），**全部满才拒**；默认仅开第一档 `5h≤500` + 第二档 `24h≤2000` |
 | 耗尽处理 | 临时 ban：游玩中当场踢出；纯窗口滑出自动恢复，不设最短 ban 时长 |
 | 豁免 | 默认 OP + 配置名单豁免，`exemptByDefault=false` 时全员受限 |
 | 集合 | 个人已探索集合**终身保留**、按维度分区；传送/瞬移只计落点 |
 | 持久化 | `world/chunkplan/players/<uuid>.json` 每玩家一文件，定期（5min）+ 离线 + 关服落盘，原子写 |
-| 配置 | 数值全部可配；**不做指令配置**（唯一例外：`/chunkplan config exemptByDefault [true|false]`，gamerule 风格，无参查询/带参设置并原子写回配置文件）；`/chunkplan check|reset <player>|confirm|reload`（reset/confirm/reload 权限 2；reset 需 confirm 二次确认） |
+| 配置 | 数值全部可配；**不做指令配置**（唯一例外：`/chunkplan config exemptByDefault [true|false]`，gamerule 风格，无参查询/带参设置并原子写回配置文件，反馈不显示文件路径）；`/chunkplan check|reset <player>|confirm|reload`（reset/confirm/reload 权限 2；reset 需 confirm 二次确认） |
+| 登录欢迎 | 进服（未被额度拦截）自动发送一次 check 状态 + `查询额度请使用 /chunkplan check 命令` 提示，按玩家客户端语言；客户端可视化入口行二期再加 |
 | 日志 | 扣费事件写独立 `logs/chunkplan.log`，不污染默认日志 |
 
 ## 计费与额度线算法（common/QuotaEngine，防实现偏差）
@@ -49,7 +50,7 @@ fabric/     Fabric 1.21.1 薄壳（官方 mojmap，与 neoforge 代码对齐）
 
 ```bash
 export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x64"
-.XMTEMP/gradle-8.14.2/bin/gradle :common:test        # 引擎单测（48 个，全绿为验收前提）
+.XMTEMP/gradle-8.14.2/bin/gradle :common:test        # 引擎单测（54 个，全绿为验收前提）
 .XMTEMP/gradle-8.14.2/bin/gradle build               # 三模块编译 + 打包
 .XMTEMP/gradle-8.14.2/bin/gradle :neoforge:runServer # dev 服务器（工作目录 neoforge/runs/server/）
 .XMTEMP/gradle-8.14.2/bin/gradle :fabric:runServer   # dev 服务器（工作目录 fabric/run/）
@@ -62,7 +63,7 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
 ## 已知坑（已踩过，勿重蹈）
 
 1. **NeoGradle userdev dev 运行时**：mod 类在独立模块层（JPMS），classpath 上的普通 jar（含 mavenLocal 坐标依赖）对 mod **不可见**（`NoClassDefFoundError`）；`modSource` 会把 common 当 mod 扫描（报"not a valid mod file"）。解法：common 源码并入 neoforge 的 sourceSet 编译
-2. **NightConfig TOML 写入器不支持 Map 作为列表元素**（`Unsupported value type`）→ 额度线配置用平行数组 `lines`/`lineLimits`
+2. **NightConfig TOML 写入器不支持 Map 作为列表元素**（`Unsupported value type`）→ 额度线配置曾用平行数组 `lines`/`lineLimits`（四期起已废弃，改为四档标量字段 `tierNEnabled/tierNWindow/tierNLimit`，坑 #24）
 3. **原版 GameProfileArgument 把 UUID 当玩家名查缓存**（1.21.1 原版；NeoForge patch 过支持 UUID，Fabric 没有）→ 自定义 `resolvePlayer`（UUID 直解 / profile cache 离线名 / 在线名），双端共用
 4. **`new GameProfile(uuid, null)` 抛 NPE**（authlib 6.0.54 要求 name 非空）→ 用空字符串
 5. **NeoForge 21.1 SERVER 配置默认生成在 `config/`**，`world/serverconfig/` 是可选存档级覆盖层（不是 bug）
@@ -95,6 +96,13 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
 21. **豁免是设计语义，不是故障**：`exemptByDefault=true`（默认）+ 玩家是 OP → 完全豁免，从不计费、`chunkplan.log` 惰性创建（有扣费事件才建文件）所以豁免环境下文件可能永远不出现、玩家数据目录也不创建（实测排查结论）。**单人模式主机恒为权限 4**：原版 `MinecraftServer.getProfilePermissions` 对 `isSingleplayerOwner`（世界创建者）直接返回 4，**与开不开作弊/有无 OP 记录无关**（1.21.1 字节码实证）→ 单人测试想看到计费只能把 `exemptByDefault` 改 false 再 reload；专用服务器才看 ops.json。`/chunkplan check` 已显示豁免状态提示（"当前是管理员/在豁免名单中，不受额度限制"）；离线玩家 OP 状态不可查，仅判豁免名单。豁免不清空已计额度，旧分钟桶随窗口自然滑出（与未豁免玩家一致），只是不再增长
 22. **玩家可见文案渲染在壳层，按玩家客户端语言逐玩家选择中/英文**（`player.getLanguage()` 登录时上报，`zh_` 前缀判中文；控制台/rcon 默认英文；玩家改语言需重登录生效）。引擎（common）只返回结构化数据，不拼用户可见文案（ban 消息等一律经壳层 `ChunkPlanMessages` 渲染）；双端各有一份 `ChunkPlanMessages`，改文案必须双端同步
 23. **`/chunkplan config exemptByDefault` 用原子写配置文件**（NeoForge 文本替换 + Fabric Gson JsonObject 改字段，均经 `AtomicFile` .tmp+rename）：不用 NightConfig 写器（其非原子保存可能被 NeoForge watcher 半读 → `.bak` + 静默重置，坑 #12）；写文件后走与 reload 相同的"读文件 → setConfig → feeLogger 热切换"链路（`loadAndApplyConfig` 双端共用），命令设置持久化到配置文件（重启保留）；豁免提示行金色 `§6` 为强调色
+24. **四档额度线 + 登录欢迎 + 阈值默认 0.5**（四期改造）：
+    - 额度线以四档呈现（每档 `enabled`/`window`/`limit` 三个标量字段，TOML 与 JSON 各 12 键），窗口受预设约束（第一档 30m~12h、第二档 12h~7d、第三档 7d~30d、第四档 30d~365d；预设外/非法窗口、limit≤0 → 回退该档默认并告警；全部档禁用或非法 → 回退默认两条 5h/500 + 24h/2000）。档位→额度线组装唯一实现于 common `QuotaTiers.toLines`（壳层只做格式转换，避免双端漂移）；引擎仍只消费 `List<Line>`
+    - 高速阈值默认 **0.5 格/tick**（=10 格/秒，略低于创造模式飞行 ~10.8 格/秒 ≈0.54 格/tick，达到创造飞行即触发 ×2；地面疾跑 ~0.28 不触发）。注意引擎速度是**三维欧氏距离（含 Y 分量）**，高处坠落跨区块也计高速
+    - 登录欢迎：未被额度拦截的玩家进服自动收到一次 check 状态 + `查询额度请使用 /chunkplan check 命令` 提示（按玩家语言）；渲染复用 `ChunkPlanMessages.checkStatusText`（与 `/chunkplan check` 同一实现，`/chunkplan check` 输出格式不可漂移）；客户端可视化入口行留待二期。**欢迎须延迟到玩家首个 tick 发送**：原版客户端在配置阶段上报 client_information（含 locale），服务端 `ServerConfigurationPacketListenerImpl.handleClientInformation` 在 `getPlayerForLogin`/JOIN 前已更新（1.21.1 源码实证）——JOIN 时语言本就正确，但延迟到首 tick 对"配置阶段未上报、进 play 立即上报"的客户端也更稳健；壳层用 `WELCOME_PENDING`（登录时登记、首个 tick 移除并发送、登出清理）
+    - mineflayer 库缺陷：其 `settings` 包在进 play 后才发（晚于服务端 JOIN），不在配置阶段上报语言 → 用它验证登录欢迎**必须**在 `state=configuration` 时手动 `write('settings', {locale})` 模拟原版（`.XMTEMP/real-client/verify-welcome.js` 已固化）；原生 `minecraft-protocol` createClient 在 NeoForge 1.21.1 配置阶段会卡住（不做额外处理时服务端不发 finish_configuration），勿用
+    - **聊天框禁止显示配置文件路径**：reload 与 config 命令反馈均不含路径（路径只进服务端日志），`loadAndApplyConfig` 返回 `List<String>` 告警列表
+    - 旧配置迁移：四档改造后旧 `lines`/`lineLimits` 键成为孤儿键（NeoForge 文件里残留但不生效），`highSpeedThreshold` 旧值（如 1.0）持久化覆盖新默认 → 升级需删除旧配置文件（`config/chunkplan-server.toml` / `config/chunkplan.json`）重新生成，否则新默认不生效
 
 ## 约定
 

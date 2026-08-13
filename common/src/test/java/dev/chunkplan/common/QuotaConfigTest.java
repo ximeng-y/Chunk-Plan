@@ -21,7 +21,7 @@ class QuotaConfigTest {
         assertEquals(2000, cfg.lines().get(1).limit());
         assertEquals(1.0, cfg.firstEntryFee());
         assertEquals(0.05, cfg.familiarEntryFee());
-        assertEquals(1.0, cfg.highSpeedThreshold());
+        assertEquals(0.5, cfg.highSpeedThreshold());
         assertEquals(2.0, cfg.highSpeedMultiplier());
         assertTrue(cfg.exemptByDefault());
         assertTrue(cfg.exemptPlayers().isEmpty());
@@ -91,7 +91,7 @@ class QuotaConfigTest {
                 .build(warnings);
         assertEquals(1.0, cfg.firstEntryFee());
         assertEquals(0.05, cfg.familiarEntryFee());
-        assertEquals(1.0, cfg.highSpeedThreshold());
+        assertEquals(0.5, cfg.highSpeedThreshold());
         assertEquals(0.0, cfg.highSpeedMultiplier());
         assertEquals(300, cfg.saveIntervalSec());
         assertEquals(30, cfg.banScanIntervalSec());

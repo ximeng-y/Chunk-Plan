@@ -95,7 +95,9 @@ public final class QuotaConfig {
         private List<Line> lines = defaultLines();
         private double firstEntryFee = 1.0;
         private double familiarEntryFee = 0.05;
-        private double highSpeedThreshold = 1.0;
+        // 默认 0.5 格/tick（=10 格/秒）：略低于创造模式飞行速度（~10.8 格/秒 ≈ 0.54 格/tick），
+        // 达到创造飞行即视为高速；地面疾跑（~5.6 格/秒 ≈ 0.28 格/tick）不触发
+        private double highSpeedThreshold = 0.5;
         private double highSpeedMultiplier = 2.0;
         private boolean exemptByDefault = true;
         private Set<UUID> exemptPlayers = new HashSet<>();
@@ -164,7 +166,7 @@ public final class QuotaConfig {
                     .lines(normalized)
                     .firstEntryFee(validateNonNegative("firstEntryFee", firstEntryFee, 1.0, w))
                     .familiarEntryFee(validateNonNegative("familiarEntryFee", familiarEntryFee, 0.05, w))
-                    .highSpeedThreshold(validateNonNegative("highSpeedThreshold", highSpeedThreshold, 1.0, w))
+                    .highSpeedThreshold(validateNonNegative("highSpeedThreshold", highSpeedThreshold, 0.5, w))
                     .highSpeedMultiplier(validateNonNegative("highSpeedMultiplier", highSpeedMultiplier, 2.0, w))
                     .exemptByDefault(exemptByDefault)
                     .exemptPlayers(exemptPlayers)

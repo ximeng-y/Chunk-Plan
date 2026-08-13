@@ -8,26 +8,33 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
-import dev.chunkplan.common.DurationParser;
 import dev.chunkplan.common.QuotaConfig;
+import dev.chunkplan.common.QuotaTiers;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 /**
  * NeoForge SERVER 配置（TOML，主位置 <serverDir>/config/chunkplan-server.toml；
  * world/serverconfig/ 为可选存档级覆盖层，存在时整体覆盖）。
- * 全部数值可配；额度线 1~4 条，非法值由 common 校验回退默认并告警。
- *
- * <p>额度线用两个平行数组（lines 窗口 + lineLimits 上限）表示：
- * NightConfig 的 TOML 写入器不支持 Map 作为列表元素（array-of-tables）。
+ * 全部数值可配；额度线以四档呈现（每档独立开关 + 窗口预设校验，坑 #24），
+ * 非法值由 common 校验回退默认并告警。
  */
 public final class NeoForgeConfig {
 
     public static final ModConfigSpec SPEC;
 
-    /** 各额度线窗口（"5h"/"24h"/"30m"/"7d" 或纯秒数），与 LINE_LIMITS 一一对应 */
-    public static final ModConfigSpec.ConfigValue<List<? extends String>> LINES;
-    /** 各额度线点数上限 */
-    public static final ModConfigSpec.ConfigValue<List<? extends Double>> LINE_LIMITS;
+    /** 第一~四档额度线：独立开关 + 窗口（预设约束）+ 点数上限 */
+    public static final ModConfigSpec.BooleanValue TIER1_ENABLED;
+    public static final ModConfigSpec.ConfigValue<String> TIER1_WINDOW;
+    public static final ModConfigSpec.DoubleValue TIER1_LIMIT;
+    public static final ModConfigSpec.BooleanValue TIER2_ENABLED;
+    public static final ModConfigSpec.ConfigValue<String> TIER2_WINDOW;
+    public static final ModConfigSpec.DoubleValue TIER2_LIMIT;
+    public static final ModConfigSpec.BooleanValue TIER3_ENABLED;
+    public static final ModConfigSpec.ConfigValue<String> TIER3_WINDOW;
+    public static final ModConfigSpec.DoubleValue TIER3_LIMIT;
+    public static final ModConfigSpec.BooleanValue TIER4_ENABLED;
+    public static final ModConfigSpec.ConfigValue<String> TIER4_WINDOW;
+    public static final ModConfigSpec.DoubleValue TIER4_LIMIT;
     public static final ModConfigSpec.DoubleValue FIRST_ENTRY_FEE;
     public static final ModConfigSpec.DoubleValue FAMILIAR_ENTRY_FEE;
     public static final ModConfigSpec.DoubleValue HIGH_SPEED_THRESHOLD;
@@ -41,16 +48,36 @@ public final class NeoForgeConfig {
     static {
         ModConfigSpec.Builder b = new ModConfigSpec.Builder();
 
-        LINES = b.comment("额度线窗口（1~4 条，与 lineLimits 一一对应），全部满才拒绝。支持 5h/24h/30m/7d 或纯秒数")
-                .defineList("lines", List.of("5h", "24h"), obj -> obj instanceof String);
-        LINE_LIMITS = b.comment("各额度线点数上限（与 lines 一一对应）")
-                .defineList("lineLimits", List.of(500.0, 2000.0), obj -> obj instanceof Number);
+        TIER1_ENABLED = b.comment("第一档额度线开关（默认开）")
+                .define("tier1Enabled", true);
+        TIER1_WINDOW = b.comment("第一档窗口（可选: 30m/1h/2h/3h/5h/6h/8h/12h；s/m/h/d 后缀或纯秒，7d 即 7 天）")
+                .define("tier1Window", "5h");
+        TIER1_LIMIT = b.comment("第一档点数上限")
+                .defineInRange("tier1Limit", 500.0, 0.0, Double.MAX_VALUE);
+        TIER2_ENABLED = b.comment("第二档额度线开关（默认开）")
+                .define("tier2Enabled", true);
+        TIER2_WINDOW = b.comment("第二档窗口（可选: 12h/24h/48h/72h/7d）")
+                .define("tier2Window", "24h");
+        TIER2_LIMIT = b.comment("第二档点数上限")
+                .defineInRange("tier2Limit", 2000.0, 0.0, Double.MAX_VALUE);
+        TIER3_ENABLED = b.comment("第三档额度线开关（默认关）")
+                .define("tier3Enabled", false);
+        TIER3_WINDOW = b.comment("第三档窗口（可选: 7d/14d/28d/30d）")
+                .define("tier3Window", "7d");
+        TIER3_LIMIT = b.comment("第三档点数上限")
+                .defineInRange("tier3Limit", 10000.0, 0.0, Double.MAX_VALUE);
+        TIER4_ENABLED = b.comment("第四档额度线开关（默认关）")
+                .define("tier4Enabled", false);
+        TIER4_WINDOW = b.comment("第四档窗口（可选: 30d/45d/60d/75d/90d/180d/365d）")
+                .define("tier4Window", "30d");
+        TIER4_LIMIT = b.comment("第四档点数上限")
+                .defineInRange("tier4Limit", 40000.0, 0.0, Double.MAX_VALUE);
         FIRST_ENTRY_FEE = b.comment("踏入未探索区块（集合外）的费用")
                 .defineInRange("firstEntryFee", 1.0, 0.0, Double.MAX_VALUE);
         FAMILIAR_ENTRY_FEE = b.comment("踏入已探索区块（集合内）的费用")
                 .defineInRange("familiarEntryFee", 0.05, 0.0, Double.MAX_VALUE);
-        HIGH_SPEED_THRESHOLD = b.comment("高速移动判定阈值（格/tick），超过则费用加倍")
-                .defineInRange("highSpeedThreshold", 1.0, 0.0, Double.MAX_VALUE);
+        HIGH_SPEED_THRESHOLD = b.comment("高速移动判定阈值（格/tick，超过则费用加倍）；默认 0.5 即创造模式飞行速度（~0.54），地面疾跑（~0.28）不触发")
+                .defineInRange("highSpeedThreshold", 0.5, 0.0, Double.MAX_VALUE);
         HIGH_SPEED_MULTIPLIER = b.comment("高速移动费用倍率（0 = 高速不额外计费）")
                 .defineInRange("highSpeedMultiplier", 2.0, 0.0, Double.MAX_VALUE);
         EXEMPT_BY_DEFAULT = b.comment("默认豁免 OP；false 时仅名单豁免（exemptByDefault=false 时全员受限即此值控制 OP）")
@@ -72,22 +99,11 @@ public final class NeoForgeConfig {
 
     /** 构建 common 配置；返回告警列表（非法配置回退默认时产生） */
     public static QuotaConfig toQuotaConfig(List<String> warnings) {
-        List<? extends String> windows = LINES.get();
-        List<? extends Double> limits = LINE_LIMITS.get();
-        List<QuotaConfig.Line> lines = new ArrayList<>();
-        int n = Math.min(windows.size(), limits.size());
-        if (windows.size() != limits.size()) {
-            warnings.add("lines 与 lineLimits 数量不一致（" + windows.size() + " vs " + limits.size()
-                    + "），多余项已丢弃");
-        }
-        for (int i = 0; i < n; i++) {
-            try {
-                lines.add(new QuotaConfig.Line(
-                        DurationParser.parseSeconds(windows.get(i)), limits.get(i)));
-            } catch (IllegalArgumentException e) {
-                warnings.add("额度线 " + i + " 非法（window=" + windows.get(i) + ", limit=" + limits.get(i) + "）：" + e.getMessage());
-            }
-        }
+        List<QuotaTiers.Tier> tiers = List.of(
+                new QuotaTiers.Tier(TIER1_ENABLED.get(), TIER1_WINDOW.get(), TIER1_LIMIT.get()),
+                new QuotaTiers.Tier(TIER2_ENABLED.get(), TIER2_WINDOW.get(), TIER2_LIMIT.get()),
+                new QuotaTiers.Tier(TIER3_ENABLED.get(), TIER3_WINDOW.get(), TIER3_LIMIT.get()),
+                new QuotaTiers.Tier(TIER4_ENABLED.get(), TIER4_WINDOW.get(), TIER4_LIMIT.get()));
         List<UUID> exempt = new ArrayList<>();
         for (String s : EXEMPT_PLAYERS.get()) {
             try {
@@ -97,7 +113,7 @@ public final class NeoForgeConfig {
             }
         }
         return QuotaConfig.builder()
-                .lines(lines)
+                .lines(QuotaTiers.toLines(tiers, warnings))
                 .firstEntryFee(FIRST_ENTRY_FEE.get())
                 .familiarEntryFee(FAMILIAR_ENTRY_FEE.get())
                 .highSpeedThreshold(HIGH_SPEED_THRESHOLD.get())
@@ -118,22 +134,19 @@ public final class NeoForgeConfig {
         try (com.electronwill.nightconfig.core.file.FileConfig cfg =
                      com.electronwill.nightconfig.core.file.FileConfig.of(file)) {
             cfg.load();
-            List<String> windows = cfg.getOrElse("lines", List.of());
-            List<? extends Number> limits = cfg.getOrElse("lineLimits", List.of());
-            List<QuotaConfig.Line> lines = new ArrayList<>();
-            int n = Math.min(windows.size(), limits.size());
-            if (windows.size() != limits.size()) {
-                warnings.add("lines 与 lineLimits 数量不一致（" + windows.size() + " vs " + limits.size()
-                        + "），多余项已丢弃");
-            }
-            for (int i = 0; i < n; i++) {
-                try {
-                    lines.add(new QuotaConfig.Line(
-                            DurationParser.parseSeconds(windows.get(i)), limits.get(i).doubleValue()));
-                } catch (IllegalArgumentException e) {
-                    warnings.add("额度线 " + i + " 非法（window=" + windows.get(i) + ", limit=" + limits.get(i) + "）：" + e.getMessage());
-                }
-            }
+            List<QuotaTiers.Tier> tiers = List.of(
+                    new QuotaTiers.Tier(readBool(cfg.get("tier1Enabled"), TIER1_ENABLED.get()),
+                            String.valueOf(cfg.getOrElse("tier1Window", TIER1_WINDOW.get())),
+                            readLimit(cfg.get("tier1Limit"), TIER1_LIMIT.get())),
+                    new QuotaTiers.Tier(readBool(cfg.get("tier2Enabled"), TIER2_ENABLED.get()),
+                            String.valueOf(cfg.getOrElse("tier2Window", TIER2_WINDOW.get())),
+                            readLimit(cfg.get("tier2Limit"), TIER2_LIMIT.get())),
+                    new QuotaTiers.Tier(readBool(cfg.get("tier3Enabled"), TIER3_ENABLED.get()),
+                            String.valueOf(cfg.getOrElse("tier3Window", TIER3_WINDOW.get())),
+                            readLimit(cfg.get("tier3Limit"), TIER3_LIMIT.get())),
+                    new QuotaTiers.Tier(readBool(cfg.get("tier4Enabled"), TIER4_ENABLED.get()),
+                            String.valueOf(cfg.getOrElse("tier4Window", TIER4_WINDOW.get())),
+                            readLimit(cfg.get("tier4Limit"), TIER4_LIMIT.get())));
             List<UUID> exempt = new ArrayList<>();
             Object exemptRaw = cfg.get("exemptPlayers");
             if (exemptRaw instanceof List<?> exemptList) {
@@ -154,7 +167,7 @@ public final class NeoForgeConfig {
             Object speedRaw = cfg.get("highSpeedThreshold");
             Object multRaw = cfg.get("highSpeedMultiplier");
             return QuotaConfig.builder()
-                    .lines(lines)
+                    .lines(QuotaTiers.toLines(tiers, warnings))
                     .firstEntryFee(firstRaw instanceof Number fe ? fe.doubleValue() : FIRST_ENTRY_FEE.get())
                     .familiarEntryFee(familiarRaw instanceof Number fm ? fm.doubleValue() : FAMILIAR_ENTRY_FEE.get())
                     .highSpeedThreshold(speedRaw instanceof Number sp ? sp.doubleValue() : HIGH_SPEED_THRESHOLD.get())
@@ -169,6 +182,16 @@ public final class NeoForgeConfig {
             warnings.add("配置文件解析失败（" + e.getMessage() + "），回退为已加载配置");
             return toQuotaConfig(warnings);
         }
+    }
+
+    /** TOML 布尔读取（类型不符回退默认；键缺失时 cfg.get 返回 null） */
+    private static boolean readBool(Object raw, boolean def) {
+        return raw instanceof Boolean b ? b : def;
+    }
+
+    /** TOML 数值读取（整数解析为 Integer，统一按 Number 转换；类型不符回退默认） */
+    private static double readLimit(Object raw, double def) {
+        return raw instanceof Number n ? n.doubleValue() : def;
     }
 
     /**

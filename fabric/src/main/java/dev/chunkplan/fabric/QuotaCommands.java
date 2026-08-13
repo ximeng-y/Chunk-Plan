@@ -102,35 +102,11 @@ public final class QuotaCommands {
             return;
         }
         boolean zh = isZh(ctx);
-        QuotaEngine.QuotaStatus status = eng.quotaStatus(uuid);
-        StringBuilder sb = new StringBuilder();
-        sb.append(zh ? "§a[ChunkPlan] §f" + name + " §7探索额度状态："
-                     : "§a[ChunkPlan] §f" + name + " §7exploration status:");
-        for (QuotaEngine.LineStatus line : status.lines()) {
-            sb.append("\n§7  ").append(ChunkPlanMessages.formatWindow(line.windowSeconds()))
-                    .append(zh ? " 窗口: §f" : " window: §f")
-                    .append(String.format("%.1f§7/%.1f", line.spent(), line.limit()));
-        }
-        if (status.allExceeded()) {
-            String recover = ChunkPlanMessages.formatTime(status.recoveryMillis());
-            sb.append(zh ? "\n§c  已耗尽，预计 " : "\n§c  Exhausted, recovers at ").append(recover).append(zh ? " 恢复" : "");
-        } else {
-            sb.append(zh ? "\n§a  未满，可正常探索" : "\n§a  Under limit, exploration allowed");
-        }
-        // 豁免状态提示（坑 #21：OP 默认豁免是设计语义，显式告知避免误判为故障；金色强调）
-        if (eng.isExempt(uuid, isOp)) {
-            boolean inList = eng.getConfig().exemptPlayers().contains(uuid);
-            if (zh) {
-                sb.append(inList
-                        ? "\n§6  [豁免] " + (self ? "你在豁免名单中" : "该玩家在豁免名单中") + "，不受额度限制"
-                        : "\n§6  [豁免] " + (self ? "你当前是管理员" : "该玩家当前是管理员") + "，不受额度限制");
-            } else {
-                sb.append(inList
-                        ? "\n§6  [exempt] " + (self ? "You are in the exempt list" : "This player is in the exempt list") + "; quota limits do not apply"
-                        : "\n§6  [exempt] " + (self ? "You are an operator" : "This player is an operator") + "; quota limits do not apply");
-            }
-        }
-        ctx.getSource().sendSuccess(() -> Component.literal(sb.toString()), false);
+        // 豁免判定在命令侧：查他人时离线玩家权限不可查，仅判豁免名单（坑 #21 语义）
+        boolean inList = eng.getConfig().exemptPlayers().contains(uuid);
+        String text = ChunkPlanMessages.checkStatusText(name, eng.quotaStatus(uuid), self, zh,
+                eng.isExempt(uuid, isOp), inList);
+        ctx.getSource().sendSuccess(() -> Component.literal(text), false);
     }
 
     private static int reset(CommandContext<CommandSourceStack> ctx) {
@@ -195,16 +171,16 @@ public final class QuotaCommands {
             ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
             return 0;
         }
-        ConfigApplyResult result = loadAndApplyConfig(ctx);
-        String warning = result.warnings().isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
+        List<String> warnings = loadAndApplyConfig(ctx);
+        String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
         ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
                 "§aChunkPlan 配置已重载",
                 "§aChunkPlan configuration reloaded") + warning), true);
         return 1;
     }
 
-    /** 读文件并应用到引擎（reload 与 config 设置共用）；返回实际读取路径与告警 */
-    private static ConfigApplyResult loadAndApplyConfig(CommandContext<CommandSourceStack> ctx) {
+    /** 读文件并应用到引擎（reload 与 config 设置共用）；返回配置告警（路径不对外展示） */
+    private static List<String> loadAndApplyConfig(CommandContext<CommandSourceStack> ctx) {
         QuotaEngine eng = ChunkPlanFabric.engine;
         List<String> warnings = new ArrayList<>();
         QuotaConfig config = FabricConfig.load(ChunkPlanFabric.configFile, warnings);
@@ -222,10 +198,7 @@ public final class QuotaCommands {
         } else {
             eng.setFeeLogger(null);
         }
-        return new ConfigApplyResult(ChunkPlanFabric.configFile.toString(), warnings);
-    }
-
-    private record ConfigApplyResult(String path, List<String> warnings) {
+        return warnings;
     }
 
     /** /chunkplan config exemptByDefault：查询当前值（gamerule 风格，无权限要求） */
@@ -252,11 +225,11 @@ public final class QuotaCommands {
         boolean value = BoolArgumentType.getBool(ctx, "value");
         try {
             FabricConfig.writeExemptByDefault(ChunkPlanFabric.configFile, value);
-            ConfigApplyResult result = loadAndApplyConfig(ctx);
-            String warning = result.warnings().isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
+            List<String> warnings = loadAndApplyConfig(ctx);
+            String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
             ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
-                    "§a已设置 exemptByDefault = " + value + "（已写入配置文件并生效，读取: " + result.path() + "）",
-                    "§aSet exemptByDefault to " + value + " (written to config and applied, from: " + result.path() + ")") + warning), true);
+                    "§a已设置 exemptByDefault = " + value + "（已写入配置文件并生效）",
+                    "§aSet exemptByDefault to " + value + " (written to config and applied)") + warning), true);
             return 1;
         } catch (java.io.IOException e) {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
