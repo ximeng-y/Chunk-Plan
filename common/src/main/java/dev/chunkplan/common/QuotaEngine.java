@@ -8,9 +8,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -177,8 +175,7 @@ public final class QuotaEngine {
         }
 
         // 基础费判定：先查集合，不在则先加入集合（"踏入的要么是来过的，要么是没来过的"）
-        Set<Long> explored = data.explored(dimKey);
-        boolean familiar = explored.contains(curChunk);
+        boolean familiar = data.isExplored(dimKey, curChunk);
         double base = familiar ? config.familiarEntryFee() : config.firstEntryFee();
         if (!familiar) {
             data.markExplored(dimKey, curChunk);

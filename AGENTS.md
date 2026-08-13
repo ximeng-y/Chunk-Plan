@@ -90,6 +90,8 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
 16. **ChunkPosPacker 位序与 vanilla `ChunkPos.asLong` 一致**（x 低 32 位、z 高 32 位）：explored 持久化数据绑定此位序，**不得再改**（曾为反序且注释谎称与 MC 一致，已修；未来也不要用其他编码"优化"）
 17. **模拟玩家与性能**：mock 只在 dev 环境注册；Fabric 壳每 tick 的全图实体兜底扫描仅 dev 执行（生产 PlayerList 全覆盖，避免每 tick 全实体开销）；`logFeeEvents` 热切换（false→true）需 `engine.setFeeLogger()` 重建日志（启动时 flag 决定，reload 只改配置不生效）
 18. **离线模式固有弱点**：offline 服务器 UUID 由名字派生，攻击者可用豁免名单中的名字冒名获得同 UUID（绕过计费/封禁），与原版 OP/白名单同源；在线模式不受影响。提示服主：离线模式建议配合其他防护（如登录插件）
+19. **扣费日志轮转严格仿原版**（已从 1.21.1 官方 server.jar 内 log4j2.xml 核实）：触发仅两类——启动时文件非空（OnStartupTriggeringPolicy）+ 跨天（TimeBasedTriggeringPolicy）；旧文件 gzip 为 `chunkplan-YYYY-MM-dd-N.log.gz`（同日多次启动轮转序号递增）；**无大小阈值、不限份数、不删除旧 gz**（原版行为，旧 gz 无限累积是设计语义非 bug）
+20. **explored 按行区间压缩**（v1 格式即区间，无历史格式包袱不做迁移）：内部 `维度 -> z 行号 -> [startX,endX] 区间列表`，增量合并（踏入时与左/右邻相邻即扩展、接住两侧三合一，填平凹口自动合拢，无事后重排）；查询行内二分；序列化 `{"10":[[5,8],[12,15]],...}` 行号排序保证确定性；**不再暴露 Set 视图**（`isExplored(dim, chunkKey)` 替代）；位序依赖 `ChunkPosPacker`（坑 #16 冻结）。改结构须同步 `Dto.explored` 类型与 `markExplored` 不变量
 
 ## 约定
 

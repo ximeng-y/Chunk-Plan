@@ -10,12 +10,17 @@ import org.junit.jupiter.api.Test;
 
 class PlayerQuotaDataTest {
 
+    /** 便捷：区块坐标打包 */
+    private static long chunk(int x, int z) {
+        return ChunkPosPacker.pack(x, z);
+    }
+
     @Test
     void jsonRoundTrip() {
         PlayerQuotaData p = new PlayerQuotaData();
-        p.markExplored("minecraft:overworld", ChunkPosPacker.pack(1, 2));
-        p.markExplored("minecraft:overworld", ChunkPosPacker.pack(3, -4));
-        p.markExplored("minecraft:the_nether", ChunkPosPacker.pack(-5, 6));
+        p.markExplored("minecraft:overworld", chunk(1, 2));
+        p.markExplored("minecraft:overworld", chunk(3, -4));
+        p.markExplored("minecraft:the_nether", chunk(-5, 6));
         p.addSpend(1000L, 1.0);
         p.addSpend(1000L, 0.5);
         p.addSpend(1001L, 0.05);
@@ -24,10 +29,11 @@ class PlayerQuotaDataTest {
         PlayerQuotaData back = PlayerQuotaData.fromDto(
                 GsonHolder.GSON.fromJson(json, PlayerQuotaData.Dto.class));
 
-        assertEquals(2, back.explored("minecraft:overworld").size());
-        assertTrue(back.explored("minecraft:overworld").contains(ChunkPosPacker.pack(1, 2)));
-        assertTrue(back.explored("minecraft:overworld").contains(ChunkPosPacker.pack(3, -4)));
-        assertEquals(1, back.explored("minecraft:the_nether").size());
+        assertTrue(back.isExplored("minecraft:overworld", chunk(1, 2)));
+        assertTrue(back.isExplored("minecraft:overworld", chunk(3, -4)));
+        assertFalse(back.isExplored("minecraft:overworld", chunk(1, 3)));
+        assertTrue(back.isExplored("minecraft:the_nether", chunk(-5, 6)));
+        assertFalse(back.isExplored("minecraft:the_nether", chunk(0, 0)));
 
         long now = 1001L * 60000 + 30000;
         assertEquals(1.55, back.spendInWindow(now, 3600), 1e-9);
@@ -59,19 +65,116 @@ class PlayerQuotaDataTest {
     @Test
     void fromDtoToleratesNulls() {
         PlayerQuotaData p = PlayerQuotaData.fromDto(new PlayerQuotaData.Dto());
-        assertTrue(p.explored("x").isEmpty());
+        assertFalse(p.isExplored("x", chunk(0, 0)));
         assertEquals(0.0, p.spendInWindow(System.currentTimeMillis(), 60), 1e-9);
     }
 
     @Test
     void toJsonStructure() {
         PlayerQuotaData p = new PlayerQuotaData();
-        p.markExplored("minecraft:overworld", ChunkPosPacker.pack(1, 2));
+        p.markExplored("minecraft:overworld", chunk(1, 2));
         p.addSpend(1000, 3.5);
         String json = GsonHolder.GSON.toJson(p.toDto());
         Map<?, ?> parsed = GsonHolder.GSON.fromJson(json, Map.class);
         assertEquals(1, ((Number) parsed.get("version")).intValue());
         assertTrue(parsed.containsKey("explored"));
         assertTrue(parsed.containsKey("minuteBuckets"));
+        // explored 为按行对象结构：{"minecraft:overworld":{"2":[[1,1]]}}
+        Map<?, ?> explored = (Map<?, ?>) parsed.get("explored");
+        Map<?, ?> rows = (Map<?, ?>) explored.get("minecraft:overworld");
+        assertTrue(rows.containsKey("2"));
+    }
+
+    @Test
+    void adjacentBlocksMergeIntoOneRange() {
+        // 同行连续踏入 1、2、3 -> 一个区间 [1,3]
+        PlayerQuotaData p = new PlayerQuotaData();
+        assertTrue(p.markExplored("d", chunk(1, 10)));
+        assertTrue(p.markExplored("d", chunk(2, 10)));
+        assertTrue(p.markExplored("d", chunk(3, 10)));
+        assertEquals("[[1, 3]]", java.util.Arrays.deepToString(
+                p.toDto().explored.get("d").get("10")));
+        // 边界与内部均命中，间隔点不命中
+        assertTrue(p.isExplored("d", chunk(1, 10)));
+        assertTrue(p.isExplored("d", chunk(3, 10)));
+        assertFalse(p.isExplored("d", chunk(0, 10)));
+        assertFalse(p.isExplored("d", chunk(4, 10)));
+        assertFalse(p.isExplored("d", chunk(2, 11)));
+    }
+
+    @Test
+    void fillingGapMergesThreeRanges() {
+        // 先走两端 [5,8] 与 [10,12]，再踏入 9 填平凹口 -> 三合一 [5,12]
+        PlayerQuotaData p = new PlayerQuotaData();
+        for (int x = 5; x <= 8; x++) {
+            p.markExplored("d", chunk(x, 10));
+        }
+        for (int x = 10; x <= 12; x++) {
+            p.markExplored("d", chunk(x, 10));
+        }
+        assertEquals("[[5, 8], [10, 12]]", java.util.Arrays.deepToString(
+                p.toDto().explored.get("d").get("10")));
+        assertTrue(p.markExplored("d", chunk(9, 10)));
+        assertEquals("[[5, 12]]", java.util.Arrays.deepToString(
+                p.toDto().explored.get("d").get("10")));
+        assertTrue(p.isExplored("d", chunk(9, 10)));
+    }
+
+    @Test
+    void differentRowsDoNotMerge() {
+        PlayerQuotaData p = new PlayerQuotaData();
+        p.markExplored("d", chunk(5, 10));
+        p.markExplored("d", chunk(5, 11)); // 同 x 不同 z：独立区间
+        assertEquals(2, p.toDto().explored.get("d").size());
+        assertTrue(p.isExplored("d", chunk(5, 10)));
+        assertTrue(p.isExplored("d", chunk(5, 11)));
+        assertFalse(p.isExplored("d", chunk(5, 12)));
+    }
+
+    @Test
+    void negativeCoordinatesWork() {
+        PlayerQuotaData p = new PlayerQuotaData();
+        p.markExplored("d", chunk(-3, -4));
+        p.markExplored("d", chunk(-2, -4));
+        p.markExplored("d", chunk(-1, -4)); // z=-4 行 [-3,-1] 连续
+        assertEquals("[[-3, -1]]", java.util.Arrays.deepToString(
+                p.toDto().explored.get("d").get("-4")));
+        assertTrue(p.isExplored("d", chunk(-3, -4)));
+        assertTrue(p.isExplored("d", chunk(-1, -4)));
+        assertFalse(p.isExplored("d", chunk(-4, -4)));
+    }
+
+    @Test
+    void duplicateMarkNotDirty() {
+        PlayerQuotaData p = new PlayerQuotaData();
+        assertTrue(p.markExplored("d", chunk(5, 10)));
+        p.clearDirty();
+        assertFalse(p.markExplored("d", chunk(5, 10))); // 已存在
+        assertFalse(p.isDirty());                        // 重复标记不置脏
+        // 区间内部重复同样不置脏
+        p.markExplored("d", chunk(6, 10));
+        p.markExplored("d", chunk(7, 10));
+        p.clearDirty();
+        assertFalse(p.markExplored("d", chunk(6, 10)));
+        assertFalse(p.isDirty());
+    }
+
+    @Test
+    void fromDtoSkipsInvalidRanges() {
+        PlayerQuotaData.Dto dto = new PlayerQuotaData.Dto();
+        dto.explored = Map.of(
+                "d", Map.of(
+                        "10", new int[][]{{1, 3}, {5, 4}, {7, 8}, null, {9}}, // 合法 / 起点>终点 / 合法 / null / 长度不足
+                        "abc", new int[][]{{0, 1}},                          // 非法行号
+                        "-2", new int[][]{{-3, -1}}));                       // 合法负行
+        PlayerQuotaData p = PlayerQuotaData.fromDto(dto);
+        assertTrue(p.isExplored("d", chunk(2, 10)));
+        assertTrue(p.isExplored("d", chunk(8, 10)));
+        assertFalse(p.isExplored("d", chunk(5, 10))); // 起点>终点被跳过
+        assertFalse(p.isExplored("d", chunk(0, 1)));  // 非法行号被跳过
+        assertTrue(p.isExplored("d", chunk(-2, -2)));
+        // 相邻区间在加载时顺带规范化合并（[1,3] 与 [7,8] 不相邻，保持两条）
+        assertEquals("[[1, 3], [7, 8]]", java.util.Arrays.deepToString(
+                p.toDto().explored.get("d").get("10")));
     }
 }
