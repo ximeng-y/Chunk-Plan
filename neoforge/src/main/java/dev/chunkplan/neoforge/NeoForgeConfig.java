@@ -108,7 +108,7 @@ public final class NeoForgeConfig {
     }
 
     /**
-     * /quota reload 用：直接从 TOML 文件解析（运行中修改文件后热生效）。
+     * /chunkplan reload 用：直接从 TOML 文件解析（运行中修改文件后热生效）。
      * spec 内存值只在启动时加载，不感知运行中文件修改；解析失败回退 spec 内存值并告警。
      */
     public static QuotaConfig toQuotaConfigFromFile(Path file, List<String> warnings) {

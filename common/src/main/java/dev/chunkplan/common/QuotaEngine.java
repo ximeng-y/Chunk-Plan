@@ -4,9 +4,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -29,7 +26,7 @@ import org.slf4j.LoggerFactory;
  *       <li>基础费 = 集合内含 curChunk ? familiarEntryFee : firstEntryFee；不在集合则先加入集合</li>
  *       <li>总费 = 基础费 × (speed > 阈值 ? 倍率 : 1)</li>
  *       <li>累加进分钟桶，写独立扣费日志</li>
- *       <li>先记账后判踢：所有额度线均满 -> 返回 BAN（消息含各满线状态与恢复时间）</li>
+ *       <li>先记账后判踢：所有额度线均满 -> 返回 BAN（含恢复时间；文案由壳层按玩家语言渲染）</li>
  *     </ul>
  *   </li>
  *   <li>更新 prevPos/prevChunk/prevDim</li>
@@ -38,19 +35,22 @@ import org.slf4j.LoggerFactory;
 public final class QuotaEngine {
 
     private static final Logger LOG = LoggerFactory.getLogger(QuotaEngine.class);
-    private static final DateTimeFormatter RECOVER_FMT = DateTimeFormatter.ofPattern("MM-dd HH:mm");
 
     public enum ResultType {
         NONE, KICK, BAN
     }
 
-    public record TickResult(ResultType type, String message, long banUntilMillis) {
+    /**
+     * 计费结果。用户可见文案（ban 消息等）属表现层，由壳层按玩家语言渲染，
+     * 引擎只返回结构化数据（坑 #22）。
+     */
+    public record TickResult(ResultType type, long banUntilMillis) {
         public static TickResult none() {
-            return new TickResult(ResultType.NONE, null, -1);
+            return new TickResult(ResultType.NONE, -1);
         }
 
-        public static TickResult ban(String message, long untilMillis) {
-            return new TickResult(ResultType.BAN, message, untilMillis);
+        public static TickResult ban(long untilMillis) {
+            return new TickResult(ResultType.BAN, untilMillis);
         }
     }
 
@@ -115,12 +115,12 @@ public final class QuotaEngine {
         return config;
     }
 
-    /** 配置热更新（/quota reload 时调用，先由壳层校验并构建 QuotaConfig） */
+    /** 配置热更新（/chunkplan reload 时调用，先由壳层校验并构建 QuotaConfig） */
     public void setConfig(QuotaConfig config) {
         this.config = config;
     }
 
-    /** 运行期更换扣费日志实现（/quota reload 时 logFeeEvents 开关热切换；false 传 null） */
+    /** 运行期更换扣费日志实现（/chunkplan reload 时 logFeeEvents 开关热切换；false 传 null） */
     public void setFeeLogger(FeeLogger feeLogger) {
         this.feeLogger = feeLogger;
     }
@@ -193,29 +193,21 @@ public final class QuotaEngine {
         // 先记账后判踢：所有额度线均满 -> BAN
         if (isAllLinesExceeded(data, now)) {
             long until = recoveryMillis(data, now);
-            return TickResult.ban(buildBanMessage(data, now, until), until);
+            return TickResult.ban(until);
         }
         return TickResult.none();
     }
 
-    /** 登录兜底检查：全满 -> 返回含恢复时间的 ban 消息；否则 null */
-    public String loginBlockMessage(UUID uuid) {
-        PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
-        long now = clock.getAsLong();
-        if (!isAllLinesExceeded(data, now)) {
-            return null;
-        }
-        long until = recoveryMillis(data, now);
-        return buildBanMessage(data, now, until);
-    }
-
-    /** 解 ban 扫描 / 状态判断用：该玩家当前是否所有额度线均满（自动懒加载数据） */
+    /**
+     * 登录兜底检查：该玩家当前是否所有额度线均满（自动懒加载数据）。
+     * 壳层据此拒绝登录并自行渲染 ban 文案（文案渲染在壳层，坑 #22）。
+     */
     public boolean isAllLinesExceeded(UUID uuid) {
         PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
         return isAllLinesExceeded(data, clock.getAsLong());
     }
 
-    /** /quota check 状态：各线已消费/上限、全满标志、恢复时间（未满为 -1） */
+    /** /chunkplan check 状态：各线已消费/上限、全满标志、恢复时间（未满为 -1） */
     public QuotaStatus quotaStatus(UUID uuid) {
         PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
         long now = clock.getAsLong();
@@ -232,7 +224,7 @@ public final class QuotaEngine {
         return new QuotaStatus(lines, recovery, all);
     }
 
-    /** /quota reset：只清消费桶，已探索集合终身保留 */
+    /** /chunkplan reset：只清消费桶，已探索集合终身保留 */
     public void resetSpend(UUID uuid) {
         PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
         data.clearSpend();
@@ -314,33 +306,6 @@ public final class QuotaEngine {
     private double totalSpent(PlayerQuotaData data, long nowMillis) {
         long maxWindow = config.lines().stream().mapToLong(l -> l.windowSeconds()).max().orElse(0);
         return data.spendInWindow(nowMillis, maxWindow);
-    }
-
-    private String buildBanMessage(PlayerQuotaData data, long nowMillis, long untilMillis) {
-        StringBuilder sb = new StringBuilder("探索额度已耗尽：");
-        List<QuotaConfig.Line> lines = config.lines();
-        for (int i = 0; i < lines.size(); i++) {
-            QuotaConfig.Line line = lines.get(i);
-            if (i > 0) {
-                sb.append("；");
-            }
-            sb.append(String.format("%s 窗口 %.1f/%.1f", formatWindow(line.windowSeconds()),
-                    data.spendInWindow(nowMillis, line.windowSeconds()), line.limit()));
-        }
-        String recover = RECOVER_FMT.format(Instant.ofEpochMilli(untilMillis).atZone(ZoneId.systemDefault()));
-        sb.append("。预计 ").append(recover).append(" 恢复");
-        return sb.toString();
-    }
-
-    private static String formatWindow(long windowSeconds) {
-        long m = windowSeconds / 60;
-        if (m >= 1440) {
-            return (m / 1440) + "d";
-        }
-        if (m >= 60) {
-            return (m / 60) + "h";
-        }
-        return m + "m";
     }
 
     private PlayerQuotaData loadOrCreate(UUID uuid) {

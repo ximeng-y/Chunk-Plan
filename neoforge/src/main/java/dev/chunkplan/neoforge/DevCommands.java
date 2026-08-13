@@ -74,12 +74,10 @@ public final class DevCommands {
         }
         // 登录拦截检查：与真实客户端登录链路等价（额度全满 -> 拒绝登录并延长封禁）
         dev.chunkplan.common.QuotaEngine eng = ChunkPlanNeoForge.engine;
-        if (eng != null) {
-            String block = eng.loginBlockMessage(uuid);
-            if (block != null) {
-                ctx.getSource().sendFailure(Component.literal("§c登录被拒绝：" + block));
-                return 0;
-            }
+        if (eng != null && eng.isAllLinesExceeded(uuid)) {
+            dev.chunkplan.common.QuotaEngine.QuotaStatus status = eng.quotaStatus(uuid);
+            ctx.getSource().sendFailure(Component.literal("§c登录被拒绝：" + ChunkPlanMessages.banMessage(status, true)));
+            return 0;
         }
         ServerLevel level = server.overworld();
         GameProfile profile = new GameProfile(uuid, name);

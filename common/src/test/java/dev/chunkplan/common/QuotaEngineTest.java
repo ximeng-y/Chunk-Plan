@@ -2,8 +2,6 @@ package dev.chunkplan.common;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
@@ -146,9 +144,6 @@ class QuotaEngineTest {
         engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0);  // 3.0：1min 线满，2min 线未满
         var r = engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0); // 4.0：两条都满 -> BAN
         assertEquals(QuotaEngine.ResultType.BAN, r.type());
-        assertNotNull(r.message());
-        assertTrue(r.message().contains("探索额度已耗尽"));
-        assertTrue(r.message().contains("1m 窗口"));
         // 恢复时间 = 各满线恢复时间的 max = 最早消费桶(M0) + 最长满线窗口(2min)
         long m0 = clock.now / 60000;
         assertEquals(m0 * 60000L + 120_000L, r.banUntilMillis());
@@ -170,7 +165,7 @@ class QuotaEngineTest {
         engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);
         engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);
         // 1min 线已 2.0（未超）；1h 线未满 -> 登录不拦
-        assertNull(engine.loginBlockMessage(player));
+        assertFalse(engine.isAllLinesExceeded(player));
         // 收紧 1h 线（阈值保持禁用倍率）
         QuotaConfig cfg = QuotaConfig.builder()
                 .lines(List.of(
@@ -181,11 +176,13 @@ class QuotaEngineTest {
         engine.setConfig(cfg);
         engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0); // 3.0
         engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0); // 4.0
-        engine.onPlayerTick(player, false, OVERWORLD, 80, 64, 0); // 5.0：两条都满
-        var msg = engine.loginBlockMessage(player);
-        assertNotNull(msg);
-        assertTrue(msg.contains("预计"));
-        assertTrue(msg.contains("恢复"));
+        engine.onPlayerTick(player, false, OVERWORLD, 80, 64, 0); // 5.0：两条都满 -> 登录拦截
+        assertTrue(engine.isAllLinesExceeded(player));
+        var status = engine.quotaStatus(player);
+        assertTrue(status.allExceeded());
+        // 恢复时间 = 各满线恢复时间的 max = 最早消费桶(M0) + 最长满线窗口(1h)
+        long m0 = clock.now / 60000;
+        assertEquals(m0 * 60000L + 3_600_000L, status.recoveryMillis());
     }
 
     @Test
@@ -291,18 +288,6 @@ class QuotaEngineTest {
         engine.onPlayerTick(player, false, OVERWORLD, 1.0, 64, 0);  // 区块 0 内，不扣费
         engine.onPlayerTick(player, false, OVERWORLD, 17.0, 64, 0); // 区块 1，speed=16 > 1 -> 2.0
         assertEquals(2.0, engine.quotaStatus(player).lines().get(0).spent(), 1e-9);
-    }
-
-    @Test
-    void banMessageListsAllFullLines() {
-        allLinesFullTriggersBanWithRecoveryTime();
-        // 重建场景拿消息：连续消费直至全满
-        engine.onPlayerTick(player, false, OVERWORLD, 80, 64, 0);
-        var r = engine.onPlayerTick(player, false, OVERWORLD, 96, 64, 0);
-        assertEquals(QuotaEngine.ResultType.BAN, r.type());
-        // 两条线的状态都出现在消息中
-        assertTrue(r.message().contains("1m 窗口"));
-        assertTrue(r.message().contains("2m 窗口"));
     }
 
     @Test

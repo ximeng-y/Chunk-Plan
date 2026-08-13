@@ -139,7 +139,7 @@ public final class ChunkPlanFabric implements ModInitializer {
                     player.level().dimension().location().toString(),
                     player.getX(), player.getY(), player.getZ());
             if (result.type() == QuotaEngine.ResultType.BAN) {
-                applyBan(player, result.message(), result.banUntilMillis());
+                applyBan(player, result.banUntilMillis());
             }
         } catch (Exception e) {
             LOG.error("玩家 {} tick 计费处理异常", player.getGameProfile().getName(), e);
@@ -153,10 +153,9 @@ public final class ChunkPlanFabric implements ModInitializer {
         }
         try {
             // 兜底检查：额度全满则拒绝登录（已探索集合与消费桶跨重启持久化）
-            String message = eng.loginBlockMessage(player.getUUID());
-            if (message != null) {
+            if (eng.isAllLinesExceeded(player.getUUID())) {
                 QuotaEngine.QuotaStatus status = eng.quotaStatus(player.getUUID());
-                applyBan(player, message, status.recoveryMillis());
+                applyBan(player, status.recoveryMillis());
             }
         } catch (Exception e) {
             LOG.error("玩家 {} 登录检查异常", player.getGameProfile().getName(), e);
@@ -171,9 +170,12 @@ public final class ChunkPlanFabric implements ModInitializer {
     }
 
     /** 额度耗尽处理：加入原版 UserBanList（expires=恢复时间，原版自动过期兜底）+ 管理名单 + 踢出 */
-    static void applyBan(ServerPlayer player, String message, long untilMillis) {
+    static void applyBan(ServerPlayer player, long untilMillis) {
         MinecraftServer server = player.server;
         GameProfile profile = player.getGameProfile();
+        // 文案按玩家客户端语言渲染（坑 #22：引擎只返回结构化数据）
+        String message = ChunkPlanMessages.banMessage(
+                engine.quotaStatus(profile.getId()), ChunkPlanMessages.isChinese(player.clientInformation().language()));
         UserBanList bans = server.getPlayerList().getBans();
         // 服主已手动封禁的玩家：不覆盖原 ban（避免手动永久 ban 被临时 ban 替换后随额度恢复被误解除）
         UserBanListEntry existing = bans.get(profile);

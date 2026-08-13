@@ -33,14 +33,14 @@ fabric/     Fabric 1.21.1 薄壳（官方 mojmap，与 neoforge 代码对齐）
 | 豁免 | 默认 OP + 配置名单豁免，`exemptByDefault=false` 时全员受限 |
 | 集合 | 个人已探索集合**终身保留**、按维度分区；传送/瞬移只计落点 |
 | 持久化 | `world/chunkplan/players/<uuid>.json` 每玩家一文件，定期（5min）+ 离线 + 关服落盘，原子写 |
-| 配置 | 数值全部可配；**不做指令配置**；`/quota check|reset <player>|reload`（reset/reload 权限 2） |
+| 配置 | 数值全部可配；**不做指令配置**；`/chunkplan check|reset <player>|confirm|reload`（reset/confirm/reload 权限 2；reset 需 confirm 二次确认） |
 | 日志 | 扣费事件写独立 `logs/chunkplan.log`，不污染默认日志 |
 
 ## 计费与额度线算法（common/QuotaEngine，防实现偏差）
 
 1. 首 tick（prevChunk==null）只记录基准；否则每 tick：speed = 与上 tick 的三维位移
 2. 区块或维度变化 → 计费：先查集合定费率（不在集合**先加入集合**），× 高速倍率，累加进分钟桶（`epochMinute -> 点数`）
-3. **先记账后判踢**：所有额度线均满（`spent > limit`，窗口 `(now-window, now]`）→ 返回 BAN（消息含各满线状态与恢复时间）
+3. **先记账后判踢**：所有额度线均满（`spent > limit`，窗口 `(now-window, now]`）→ 返回 BAN（恢复时间；文案由壳层按玩家语言渲染，坑 #22）
 4. 恢复时间 = 各满线 `窗口内最早消费桶 + 窗口长` 的**最晚者**
 5. 过期桶清理：早于最长窗口线 2 倍的桶删除
 6. 配置校验：线数 1~4、窗口/上限为正、费率非负，非法回退默认并告警
@@ -49,7 +49,7 @@ fabric/     Fabric 1.21.1 薄壳（官方 mojmap，与 neoforge 代码对齐）
 
 ```bash
 export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x64"
-.XMTEMP/gradle-8.14.2/bin/gradle :common:test        # 引擎单测（37 个，全绿为验收前提）
+.XMTEMP/gradle-8.14.2/bin/gradle :common:test        # 引擎单测（48 个，全绿为验收前提）
 .XMTEMP/gradle-8.14.2/bin/gradle build               # 三模块编译 + 打包
 .XMTEMP/gradle-8.14.2/bin/gradle :neoforge:runServer # dev 服务器（工作目录 neoforge/runs/server/）
 .XMTEMP/gradle-8.14.2/bin/gradle :fabric:runServer   # dev 服务器（工作目录 fabric/run/）
@@ -81,7 +81,7 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
    - **原版移动校验**：非鞘翅位移平方 > `100×包数` 即拒（`moved too quickly`，约 10 格/tick 上限）→ 客户端位置包无法大步瞬移；高速 2x 实测用 `/tp` 命令（OP 权限）驱动
    - mineflayer 物理引擎在目标区块未加载时**不发位置包**（`blockAt()==null` 提前 return）→ 手动 `_client.write('position')` 也不可靠（与物理发包冲突）；真实移动验证以 `/tp` 命令为准
    - 登录拦截的客户端证据：原版 `multiplayer.disconnect.banned.reason` 踢出消息（含恢复时间）
-12. **NeoForge /quota reload 必须读文件**：NeoForge 21.1 虽有运行时 watcher（改文件自动重载 spec 内存值），但**引擎持有的 QuotaConfig 副本不会随之更新** → `NeoForgeConfig.toQuotaConfigFromFile()`（NightConfig FileConfig 直接解析，失败回退 spec 并告警）。另两个陷阱：
+12. **NeoForge /chunkplan reload 必须读文件**：NeoForge 21.1 虽有运行时 watcher（改文件自动重载 spec 内存值），但**引擎持有的 QuotaConfig 副本不会随之更新** → `NeoForgeConfig.toQuotaConfigFromFile()`（NightConfig FileConfig 直接解析，失败回退 spec 并告警）。另两个陷阱：
     - NightConfig 读 TOML 整数返回 `Integer`（非 Double/Long）→ **全部数值字段**（含 firstEntryFee 等 Double 字段）都需 `Number` 转换，否则单字段写整数即 ClassCastException 整次回退
     - 运行中用编辑器**非原子保存** TOML 会触发 NeoForge watcher 解析失败 → 文件被改名 `.bak` 并**静默用默认值重新生成**（用户编辑丢失）→ 改配置应原子写入或停服修改
 13. **豁免期间必须清除 tracking**（QA 实测 P1）：exempt 分支若不清除位移基准，解除豁免后首个 tick 会把豁免期间累积位移当区块变化计费（OP 被取消后第一次移动多扣一次）→ `tracking.remove(uuid)` 已修，单测 `exemptThenUnexemptFirstTickNotCharged` 回归
@@ -92,6 +92,8 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
 18. **离线模式固有弱点**：offline 服务器 UUID 由名字派生，攻击者可用豁免名单中的名字冒名获得同 UUID（绕过计费/封禁），与原版 OP/白名单同源；在线模式不受影响。提示服主：离线模式建议配合其他防护（如登录插件）
 19. **扣费日志轮转严格仿原版**（已从 1.21.1 官方 server.jar 内 log4j2.xml 核实）：触发仅两类——启动时文件非空（OnStartupTriggeringPolicy）+ 跨天（TimeBasedTriggeringPolicy）；旧文件 gzip 为 `chunkplan-YYYY-MM-dd-N.log.gz`（同日多次启动轮转序号递增）；**无大小阈值、不限份数、不删除旧 gz**（原版行为，旧 gz 无限累积是设计语义非 bug）
 20. **explored 按行区间压缩**（v1 格式即区间，无历史格式包袱不做迁移）：内部 `维度 -> z 行号 -> [startX,endX] 区间列表`，增量合并（踏入时与左/右邻相邻即扩展、接住两侧三合一，填平凹口自动合拢，无事后重排）；查询行内二分；序列化 `{"10":[[5,8],[12,15]],...}` 行号排序保证确定性；**不再暴露 Set 视图**（`isExplored(dim, chunkKey)` 替代）；位序依赖 `ChunkPosPacker`（坑 #16 冻结）。改结构须同步 `Dto.explored` 类型与 `markExplored` 不变量
+21. **豁免是设计语义，不是故障**：`exemptByDefault=true`（默认）+ 玩家是 OP → 完全豁免，从不计费、`chunkplan.log` 惰性创建（有扣费事件才建文件）所以豁免环境下文件可能永远不出现、玩家数据目录也不创建（实测排查结论：单人开作弊 = 集成服务器主机恒为 OP）。`/chunkplan check` 已显示豁免状态提示（"当前是管理员/在豁免名单中，不受额度限制"）；离线玩家 OP 状态不可查，仅判豁免名单。豁免不清空已计额度，旧分钟桶随窗口自然滑出（与未豁免玩家一致），只是不再增长
+22. **玩家可见文案渲染在壳层，按玩家客户端语言逐玩家选择中/英文**（`player.getLanguage()` 登录时上报，`zh_` 前缀判中文；控制台/rcon 默认英文；玩家改语言需重登录生效）。引擎（common）只返回结构化数据，不拼用户可见文案（ban 消息等一律经壳层 `ChunkPlanMessages` 渲染）；双端各有一份 `ChunkPlanMessages`，改文案必须双端同步
 
 ## 约定
 
