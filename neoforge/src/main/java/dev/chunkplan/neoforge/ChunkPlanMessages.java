@@ -49,7 +49,7 @@ public final class ChunkPlanMessages {
                     .append(") §cis exhausted\n");
         }
         sb.append("§7").append(DIVIDER).append("\n");
-        sb.append(zh ? "§6您的探索额度情况：\n" : "§6Your exploration quota status:\n");
+        sb.append(zh ? "§e您的探索额度情况：\n" : "§eYour exploration quota status:\n");
         for (QuotaEngine.LineStatus line : status.lines()) {
             // 子条目配色：时间窗口名浅蓝 §b（与原因行一致）、数值白 §f
             String label = windowName(line.windowSeconds(), zh) + (zh ? "：" : ": ");
@@ -69,14 +69,14 @@ public final class ChunkPlanMessages {
             if (status.recoveryMillis() > 0) {
                 sb.append("§a您最早可于：").append(formatTime(status.recoveryMillis())).append(" 再次进入服务器\n");
             }
-            sb.append("§f额度限制是为了节约服务器的CPU、网络流量等资源，感谢您的配合！\n");
-            sb.append("§f如有疑问/需要重置或提高额度，请咨询您的服务器管理员");
+            sb.append("§e额度限制是为了节约服务器的CPU、网络流量等资源，感谢您的配合！\n");
+            sb.append("§e如有疑问/需要重置或提高额度，请咨询您的服务器管理员");
         } else {
             if (status.recoveryMillis() > 0) {
                 sb.append("§aYou may rejoin at: ").append(formatTime(status.recoveryMillis())).append("\n");
             }
-            sb.append("§fThe quota limit saves server CPU, network traffic and other resources. Thank you for your cooperation!\n");
-            sb.append("§fFor quota reset/increase or questions, please contact your server administrator");
+            sb.append("§eThe quota limit saves server CPU, network traffic and other resources. Thank you for your cooperation!\n");
+            sb.append("§eFor quota reset/increase or questions, please contact your server administrator");
         }
         return sb.toString();
     }
