@@ -28,7 +28,7 @@ fabric/     Fabric 1.21.1 薄壳（官方 mojmap，与 neoforge 代码对齐）
 | 计费事件 | 玩家实体踏入区块（chunkPos 变化）即计费，与区块加载状态无关 |
 | 费率 | 集合外 `1.0` / 集合内 `0.05`；高速（>0.5 格/tick，严格大于 = 创造模式飞行速度 ~0.54，地面疾跑 ~0.28 不触发）再 ×2 |
 | 挂机 | 零计费；登录首 tick 只记基准不扣费；边界踱步重复计费**接受，不加防抖** |
-| 额度线 | 四档滚动窗口线（每档独立开关 + 窗口预设校验，坑 #24），**全部满才拒**；默认仅开第一档 `5h≤500` + 第二档 `24h≤2000` |
+| 额度线 | 四档滚动窗口线（每档独立开关 + 窗口预设校验，坑 #24），**任一窗口满即拒**（坑 #25）；默认仅开第一档 `5h≤500` + 第二档 `24h≤2000` |
 | 耗尽处理 | 临时 ban：游玩中当场踢出；纯窗口滑出自动恢复，不设最短 ban 时长 |
 | 豁免 | 默认 OP + 配置名单豁免，`exemptByDefault=false` 时全员受限 |
 | 集合 | 个人已探索集合**终身保留**、按维度分区；传送/瞬移只计落点 |
@@ -41,7 +41,7 @@ fabric/     Fabric 1.21.1 薄壳（官方 mojmap，与 neoforge 代码对齐）
 
 1. 首 tick（prevChunk==null）只记录基准；否则每 tick：speed = 与上 tick 的三维位移
 2. 区块或维度变化 → 计费：先查集合定费率（不在集合**先加入集合**），× 高速倍率，累加进分钟桶（`epochMinute -> 点数`）
-3. **先记账后判踢**：所有额度线均满（`spent > limit`，窗口 `(now-window, now]`）→ 返回 BAN（恢复时间；文案由壳层按玩家语言渲染，坑 #22）
+3. **先记账后判踢**：任一额度线满（`spent > limit`，窗口 `(now-window, now]`）→ 返回 BAN（恢复时间；文案由壳层按玩家语言渲染，坑 #22）
 4. 恢复时间 = 各满线 `窗口内最早消费桶 + 窗口长` 的**最晚者**
 5. 过期桶清理：早于最长窗口线 2 倍的桶删除
 6. 配置校验：线数 1~4、窗口/上限为正、费率非负，非法回退默认并告警
@@ -50,7 +50,7 @@ fabric/     Fabric 1.21.1 薄壳（官方 mojmap，与 neoforge 代码对齐）
 
 ```bash
 export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x64"
-.XMTEMP/gradle-8.14.2/bin/gradle :common:test        # 引擎单测（54 个，全绿为验收前提）
+.XMTEMP/gradle-8.14.2/bin/gradle :common:test        # 引擎单测（55 个，全绿为验收前提）
 .XMTEMP/gradle-8.14.2/bin/gradle build               # 三模块编译 + 打包
 .XMTEMP/gradle-8.14.2/bin/gradle :neoforge:runServer # dev 服务器（工作目录 neoforge/runs/server/）
 .XMTEMP/gradle-8.14.2/bin/gradle :fabric:runServer   # dev 服务器（工作目录 fabric/run/）
@@ -103,6 +103,7 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - mineflayer 库缺陷：其 `settings` 包在进 play 后才发（晚于服务端 JOIN），不在配置阶段上报语言 → 用它验证登录欢迎**必须**在 `state=configuration` 时手动 `write('settings', {locale})` 模拟原版（`.XMTEMP/real-client/verify-welcome.js` 已固化）；原生 `minecraft-protocol` createClient 在 NeoForge 1.21.1 配置阶段会卡住（不做额外处理时服务端不发 finish_configuration），勿用
     - **聊天框禁止显示配置文件路径**：reload 与 config 命令反馈均不含路径（路径只进服务端日志），`loadAndApplyConfig` 返回 `List<String>` 告警列表
     - 旧配置迁移：四档改造后旧 `lines`/`lineLimits` 键成为孤儿键（NeoForge 文件里残留但不生效），`highSpeedThreshold` 旧值（如 1.0）持久化覆盖新默认 → 升级需删除旧配置文件（`config/chunkplan-server.toml` / `config/chunkplan.json`）重新生成，否则新默认不生效
+25. **任一窗口满即拒（规格变更）**：原设计"全部额度线同时超限才拒"（AND 语义），用户实测发现单线超限（如 5h 500.9/500.0）仍显示"未满，可正常探索"，确认是设计失误 → 改为**任一窗口满即拒**（OR 语义，`isAllLinesExceeded` 与 `quotaStatus.allExceeded` 的循环条件由"存在未满线→false"反转为"存在满线→true"）。`recoveryMillis` 不变（只遍历满线取最早桶+窗口的最晚者，恢复时刻保证满线滑出；未满线不参与）。字段名 `allExceeded` 保留（壳层双端引用，注释注明"任一满"语义）。恢复时间只保证"满的那条线滑出"，玩家恢复后再次探索可能再次触发该线 → 属正常行为。check/ban 文案不变，各线状态全部列出可看出哪条满
 
 ## 约定
 

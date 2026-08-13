@@ -190,7 +190,7 @@ public final class QuotaEngine {
             feeLogger.logFee(uuid, dimKey, curChunk, speed, fee, totalSpent(data, now));
         }
 
-        // 先记账后判踢：所有额度线均满 -> BAN
+        // 先记账后判踢：任一额度线满 -> BAN（坑 #25：原"全部满才拒"，用户确认为单线满即拒）
         if (isAllLinesExceeded(data, now)) {
             long until = recoveryMillis(data, now);
             return TickResult.ban(until);
@@ -199,7 +199,7 @@ public final class QuotaEngine {
     }
 
     /**
-     * 登录兜底检查：该玩家当前是否所有额度线均满（自动懒加载数据）。
+     * 登录兜底检查：该玩家当前是否已有任一额度线满（自动懒加载数据）。
      * 壳层据此拒绝登录并自行渲染 ban 文案（文案渲染在壳层，坑 #22）。
      */
     public boolean isAllLinesExceeded(UUID uuid) {
@@ -207,21 +207,21 @@ public final class QuotaEngine {
         return isAllLinesExceeded(data, clock.getAsLong());
     }
 
-    /** /chunkplan check 状态：各线已消费/上限、全满标志、恢复时间（未满为 -1） */
+    /** /chunkplan check 状态：各线已消费/上限、任一满标志、恢复时间（未满为 -1） */
     public QuotaStatus quotaStatus(UUID uuid) {
         PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
         long now = clock.getAsLong();
         List<LineStatus> lines = new ArrayList<>();
-        boolean all = true;
+        boolean any = false;
         for (QuotaConfig.Line line : config.lines()) {
             double spent = data.spendInWindow(now, line.windowSeconds());
             lines.add(new LineStatus(line.windowSeconds(), line.limit(), spent));
-            if (spent <= line.limit()) {
-                all = false;
+            if (spent > line.limit()) {
+                any = true;
             }
         }
-        long recovery = all ? recoveryMillis(data, now) : -1;
-        return new QuotaStatus(lines, recovery, all);
+        long recovery = any ? recoveryMillis(data, now) : -1;
+        return new QuotaStatus(lines, recovery, any);
     }
 
     /** /chunkplan reset：只清消费桶，已探索集合终身保留 */
@@ -273,17 +273,18 @@ public final class QuotaEngine {
     // ---------- 内部 ----------
 
     private boolean isAllLinesExceeded(PlayerQuotaData data, long nowMillis) {
+        // 坑 #25：任一额度线满即视为超限（原"全部满才拒"改为单线满即拒）
         for (QuotaConfig.Line line : config.lines()) {
-            if (data.spendInWindow(nowMillis, line.windowSeconds()) <= line.limit()) {
-                return false;
+            if (data.spendInWindow(nowMillis, line.windowSeconds()) > line.limit()) {
+                return true;
             }
         }
-        return !config.lines().isEmpty();
+        return false;
     }
 
     /**
      * 恢复时间 = 对每条满的线取"min(有消费的分钟) + 窗口长"的最晚者，
-     * 即"何时不再全满"（最早消费桶滑出窗口的时刻）。
+     * 即"何时不再有任一满线"（最早消费桶滑出窗口的时刻）。
      */
     private long recoveryMillis(PlayerQuotaData data, long nowMillis) {
         long worst = -1;

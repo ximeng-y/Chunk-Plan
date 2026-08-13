@@ -83,6 +83,11 @@ class QuotaEngineTest {
 
     @Test
     void newChunkChargesFirstFeeThenFamiliarFee() {
+        // 本测试只验证计费（首费 1.0 + 熟悉费 0.05），放宽线避免新语义下单线满触发 BAN（坑 #25）
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(new QuotaConfig.Line(60, 10.0), new QuotaConfig.Line(120, 20.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
         engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);   // 基准（区块 0）
         engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);  // 踏入区块 1：集合外 -> 1.0 入集合
         assertEquals(1.0, engine.quotaStatus(player).lines().get(0).spent(), 1e-9);
@@ -147,6 +152,28 @@ class QuotaEngineTest {
         // 恢复时间 = 各满线恢复时间的 max = 最早消费桶(M0) + 最长满线窗口(2min)
         long m0 = clock.now / 60000;
         assertEquals(m0 * 60000L + 120_000L, r.banUntilMillis());
+    }
+
+    @Test
+    void singleLineFullTriggersBanAndLoginBlock() {
+        // 坑 #25：任一窗口满即限制——1min 线满、2min 线（宽松 100.0）未满 -> 拦截
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(new QuotaConfig.Line(60, 2.0), new QuotaConfig.Line(120, 100.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);   // 基准（区块 0）
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);  // 1.0
+        engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);  // 2.0：等于上限不算满
+        assertFalse(engine.isAllLinesExceeded(player));
+        assertFalse(engine.quotaStatus(player).allExceeded());
+        var r = engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0); // 3.0：1min 线满 -> BAN
+        assertEquals(QuotaEngine.ResultType.BAN, r.type());
+        // 恢复时间 = 满线（1min 线）最早桶 M0 + 60s；2min 线未满不参与
+        long m0 = clock.now / 60000;
+        assertEquals(m0 * 60000L + 60_000L, r.banUntilMillis());
+        // 登录拦截语义：单线满同样拒绝登录
+        assertTrue(engine.isAllLinesExceeded(player));
+        assertTrue(engine.quotaStatus(player).allExceeded());
     }
 
     @Test
