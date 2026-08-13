@@ -45,19 +45,21 @@ public final class ChunkPlanMessages {
         StringBuilder sb = new StringBuilder();
         if (zh) {
             sb.append("§c[ChunkPlan] 由于服务器管理员对于区块探索额度的限制，您已被限制进入服务器！\n");
-            sb.append("§c原因：您的 §f").append(fullName == null ? "探索额度" : fullName)
-                    .append(" §c探索额度上限 已耗尽\n");
+            // 原因行配色：窗口名浅蓝 §b、探索额度上限黄 §e、其余红色警示
+            sb.append("§c原因：您的 §b").append(fullName == null ? "探索额度" : fullName)
+                    .append(" §e探索额度上限 §c已耗尽\n");
         } else {
             sb.append("§c[ChunkPlan] You have been restricted from joining the server due to the admin's chunk exploration quota limit!\n");
-            sb.append("§cReason: Your exploration quota limit (").append(fullName == null ? "quota" : fullName.toLowerCase())
-                    .append(") is exhausted\n");
+            sb.append("§cReason: Your §eexploration quota limit §b(").append(fullName == null ? "quota" : fullName.toLowerCase())
+                    .append(") §cis exhausted\n");
         }
         sb.append("§7").append(DIVIDER).append("\n");
-        sb.append(zh ? "§e您的探索额度情况：\n" : "§eYour exploration quota status:\n");
+        sb.append(zh ? "§6您的探索额度情况：\n" : "§6Your exploration quota status:\n");
         for (QuotaEngine.LineStatus line : status.lines()) {
+            // 子条目配色：时间窗口名黄 §e、数值白 §f
             String label = windowName(line.windowSeconds(), zh) + (zh ? "：" : ": ");
-            sb.append("§f").append(label).append(" ".repeat(Math.max(0, maxLabel - displayWidth(label))))
-                    .append(String.format("%.1f/%.1f", line.spent(), line.limit()));
+            sb.append("§e").append(label).append(" ".repeat(Math.max(0, maxLabel - displayWidth(label))))
+                    .append("§f").append(String.format("%.1f/%.1f", line.spent(), line.limit()));
             if (line.spent() > line.limit()) {
                 sb.append(zh ? " §c（已满，下次重置时间：" : " §c(exhausted, next reset: ")
                         .append(formatTime(line.nextResetMillis())).append(zh ? "）" : ")");
