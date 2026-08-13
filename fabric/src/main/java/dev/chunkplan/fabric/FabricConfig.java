@@ -126,4 +126,15 @@ public final class FabricConfig {
                 .logFeeEvents(dto.logFeeEvents == null ? true : dto.logFeeEvents)
                 .build(warnings);
     }
+
+    /**
+     * /chunkplan config exemptByDefault 用：改 JSON 字段并原子写回（重启后保留）。
+     * 用 GsonHolder（compact 单行格式），写回后格式与原文件一致。
+     */
+    public static void writeExemptByDefault(Path configFile, boolean value) throws IOException {
+        com.google.gson.JsonObject root = GsonHolder.GSON.fromJson(
+                Files.readString(configFile, StandardCharsets.UTF_8), com.google.gson.JsonObject.class);
+        root.addProperty("exemptByDefault", value);
+        dev.chunkplan.common.AtomicFile.write(configFile, GsonHolder.GSON.toJson(root));
+    }
 }

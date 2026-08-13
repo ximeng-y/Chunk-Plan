@@ -1,5 +1,8 @@
 package dev.chunkplan.neoforge;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -166,5 +169,20 @@ public final class NeoForgeConfig {
             warnings.add("配置文件解析失败（" + e.getMessage() + "），回退为已加载配置");
             return toQuotaConfig(warnings);
         }
+    }
+
+    /**
+     * /chunkplan config exemptByDefault 用：原子改写 TOML 文件中的该字段（重启后保留）。
+     * 不用 NightConfig 写器：其非原子保存可能被 NeoForge watcher 半读，触发 .bak + 静默重置（坑 #12）。
+     * 文本替换 + AtomicFile 原子写（同目录 .tmp + rename），watcher 只会看到完整文件。
+     */
+    public static void writeExemptByDefault(Path file, boolean value) throws IOException {
+        String text = Files.readString(file, StandardCharsets.UTF_8);
+        String replaced = text.replaceAll("(?m)^exemptByDefault\\s*=\\s*(true|false)\\s*$", "exemptByDefault = " + value);
+        if (replaced.equals(text)) {
+            // 文件中没有该字段（异常情况）：追加一行，保持文件合法
+            replaced = text + (text.endsWith("\n") ? "" : "\n") + "exemptByDefault = " + value + "\n";
+        }
+        dev.chunkplan.common.AtomicFile.write(file, replaced);
     }
 }

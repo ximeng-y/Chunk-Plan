@@ -20,6 +20,7 @@ import dev.chunkplan.common.QuotaEngine;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.arguments.BoolArgumentType;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
@@ -59,6 +60,12 @@ public final class QuotaCommands {
                 .then(Commands.literal("confirm")
                         .requires(s -> s.hasPermission(2))
                         .executes(ctx -> confirm(ctx)))
+                .then(Commands.literal("config")
+                        .then(Commands.literal("exemptByDefault")
+                                .executes(ctx -> configExemptQuery(ctx))
+                                .then(Commands.argument("value", BoolArgumentType.bool())
+                                        .requires(s -> s.hasPermission(2))
+                                        .executes(ctx -> configExemptSet(ctx)))))
                 .then(Commands.literal("reload")
                         .requires(s -> s.hasPermission(2))
                         .executes(ctx -> reload(ctx))));
@@ -110,17 +117,17 @@ public final class QuotaCommands {
         } else {
             sb.append(zh ? "\n§a  未满，可正常探索" : "\n§a  Under limit, exploration allowed");
         }
-        // 豁免状态提示（坑 #21：OP 默认豁免是设计语义，显式告知避免误判为故障）
+        // 豁免状态提示（坑 #21：OP 默认豁免是设计语义，显式告知避免误判为故障；金色强调）
         if (eng.isExempt(uuid, isOp)) {
             boolean inList = eng.getConfig().exemptPlayers().contains(uuid);
             if (zh) {
                 sb.append(inList
-                        ? "\n§7  [豁免] " + (self ? "你在豁免名单中" : "该玩家在豁免名单中") + "，不受额度限制"
-                        : "\n§7  [豁免] " + (self ? "你当前是管理员" : "该玩家当前是管理员") + "，不受额度限制");
+                        ? "\n§6  [豁免] " + (self ? "你在豁免名单中" : "该玩家在豁免名单中") + "，不受额度限制"
+                        : "\n§6  [豁免] " + (self ? "你当前是管理员" : "该玩家当前是管理员") + "，不受额度限制");
             } else {
                 sb.append(inList
-                        ? "\n§7  [exempt] " + (self ? "You are in the exempt list" : "This player is in the exempt list") + "; quota limits do not apply"
-                        : "\n§7  [exempt] " + (self ? "You are an operator" : "This player is an operator") + "; quota limits do not apply");
+                        ? "\n§6  [exempt] " + (self ? "You are in the exempt list" : "This player is in the exempt list") + "; quota limits do not apply"
+                        : "\n§6  [exempt] " + (self ? "You are an operator" : "This player is an operator") + "; quota limits do not apply");
             }
         }
         ctx.getSource().sendSuccess(() -> Component.literal(sb.toString()), false);
@@ -188,6 +195,17 @@ public final class QuotaCommands {
             ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
             return 0;
         }
+        ConfigApplyResult result = loadAndApplyConfig(ctx);
+        String warning = result.warnings().isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
+        ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                "§aChunkPlan 配置已重载",
+                "§aChunkPlan configuration reloaded") + warning), true);
+        return 1;
+    }
+
+    /** 读文件并应用到引擎（reload 与 config 设置共用）；返回实际读取路径与告警 */
+    private static ConfigApplyResult loadAndApplyConfig(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
         List<String> warnings = new ArrayList<>();
         QuotaConfig config = FabricConfig.load(ChunkPlanFabric.configFile, warnings);
         for (String w : warnings) {
@@ -204,11 +222,48 @@ public final class QuotaCommands {
         } else {
             eng.setFeeLogger(null);
         }
-        String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
+        return new ConfigApplyResult(ChunkPlanFabric.configFile.toString(), warnings);
+    }
+
+    private record ConfigApplyResult(String path, List<String> warnings) {
+    }
+
+    /** /chunkplan config exemptByDefault：查询当前值（gamerule 风格，无权限要求） */
+    private static int configExemptQuery(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        boolean value = eng.getConfig().exemptByDefault();
         ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
-                "§aChunkPlan 配置已重载",
-                "§aChunkPlan configuration reloaded") + warning), true);
+                "§aexemptByDefault §7当前值: §f" + value,
+                "§aexemptByDefault §7is currently set to: §f" + value)), false);
         return 1;
+    }
+
+    /** /chunkplan config exemptByDefault true|false：原子改写配置文件并热生效（重启保留） */
+    private static int configExemptSet(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        boolean value = BoolArgumentType.getBool(ctx, "value");
+        try {
+            FabricConfig.writeExemptByDefault(ChunkPlanFabric.configFile, value);
+            ConfigApplyResult result = loadAndApplyConfig(ctx);
+            String warning = result.warnings().isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
+            ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                    "§a已设置 exemptByDefault = " + value + "（已写入配置文件并生效，读取: " + result.path() + "）",
+                    "§aSet exemptByDefault to " + value + " (written to config and applied, from: " + result.path() + ")") + warning), true);
+            return 1;
+        } catch (java.io.IOException e) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c写入配置失败: " + e.getMessage(),
+                    "§cFailed to write config: " + e.getMessage())));
+            return 0;
+        }
     }
 
     /** 玩家参数 tab 补全：在线（PlayerList + mock 注册表），去重并按前缀过滤（离线名需手动输入） */
