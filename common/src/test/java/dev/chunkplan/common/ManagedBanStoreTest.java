@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.UUID;
@@ -47,6 +49,22 @@ class ManagedBanStoreTest {
         Path file = tmp.resolve("bans.json");
         UUID u = UUID.randomUUID();
         new ManagedBanStore(file).add(new ManagedBanStore.Entry(u, "额度耗尽", 9_999L));
+        ManagedBanStore reloaded = new ManagedBanStore(file);
+        assertTrue(reloaded.contains(u));
+        assertEquals("额度耗尽", reloaded.all().get(0).reason());
+        assertEquals(9_999L, reloaded.all().get(0).expiresAtMillis());
+    }
+
+    @Test
+    void corruptedMainFileRestoresFromBackup() throws Exception {
+        Path file = tmp.resolve("bans.json");
+        UUID u = UUID.randomUUID();
+        new ManagedBanStore(file).add(new ManagedBanStore.Entry(u, "额度耗尽", 9_999L));
+        // 模拟写前备份留下的上一版好数据，然后损坏主文件
+        Files.copy(file, tmp.resolve("bans.json.bak"));
+        Files.writeString(file, "{broken json", StandardCharsets.UTF_8);
+
+        // 重新加载：从 .bak 恢复条目（坑 #27，避免管理名单损坏导致 scanBans 失效）
         ManagedBanStore reloaded = new ManagedBanStore(file);
         assertTrue(reloaded.contains(u));
         assertEquals("额度耗尽", reloaded.all().get(0).reason());

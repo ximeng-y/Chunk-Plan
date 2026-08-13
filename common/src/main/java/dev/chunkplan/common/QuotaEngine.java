@@ -1,7 +1,6 @@
 package dev.chunkplan.common;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -320,17 +319,19 @@ public final class QuotaEngine {
 
     private PlayerQuotaData loadOrCreate(UUID uuid) {
         Path file = playerDataDir.resolve(uuid + ".json");
-        if (Files.exists(file)) {
-            try {
-                PlayerQuotaData.Dto dto = GsonHolder.GSON.fromJson(
-                        Files.readString(file, StandardCharsets.UTF_8), PlayerQuotaData.Dto.class);
-                if (dto != null && dto.version == PlayerQuotaData.VERSION) {
-                    return PlayerQuotaData.fromDto(dto);
-                }
-                LOG.warn("玩家 {} 配额数据版本不兼容（{}），将重建", uuid, dto == null ? "空文件" : dto.version);
-            } catch (Exception e) {
-                LOG.error("读取玩家 {} 配额数据失败，将重建", uuid, e);
+        if (!Files.exists(file)) {
+            return new PlayerQuotaData();
+        }
+        // 坑 #27：损坏时从 .bak 兜底恢复（额度/探索集合不清零）；
+        // 版本不符不尝试 .bak（.bak 同版本也会不符，恢复无意义，保持重建+告警）
+        PlayerQuotaData.Dto dto = AtomicFile.readJson(file, PlayerQuotaData.Dto.class, "玩家 " + uuid + " 配额数据", LOG);
+        if (dto != null) {
+            if (dto.version == PlayerQuotaData.VERSION) {
+                return PlayerQuotaData.fromDto(dto);
             }
+            LOG.warn("玩家 {} 配额数据版本不兼容（{}），将重建", uuid, dto.version);
+        } else {
+            LOG.warn("玩家 {} 无可用配额数据，将重建", uuid);
         }
         return new PlayerQuotaData();
     }

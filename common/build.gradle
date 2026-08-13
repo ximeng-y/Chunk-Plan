@@ -26,6 +26,7 @@ dependencies {
     testImplementation platform("org.junit:junit-bom:${junit_version}")
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testImplementation "com.google.code.gson:gson:${gson_version}"
+    testImplementation "org.slf4j:slf4j-api:${slf4j_version}"
     testRuntimeOnly 'org.slf4j:slf4j-nop:2.0.13'
 }
 

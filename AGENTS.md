@@ -50,7 +50,7 @@ fabric/     Fabric 1.21.1 薄壳（官方 mojmap，与 neoforge 代码对齐）
 
 ```bash
 export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x64"
-.XMTEMP/gradle-8.14.2/bin/gradle :common:test        # 引擎单测（55 个，全绿为验收前提）
+.XMTEMP/gradle-8.14.2/bin/gradle :common:test        # 引擎单测（64 个，全绿为验收前提）
 .XMTEMP/gradle-8.14.2/bin/gradle build               # 三模块编译 + 打包
 .XMTEMP/gradle-8.14.2/bin/gradle :neoforge:runServer # dev 服务器（工作目录 neoforge/runs/server/）
 .XMTEMP/gradle-8.14.2/bin/gradle :fabric:runServer   # dev 服务器（工作目录 fabric/run/）
@@ -105,6 +105,7 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - 旧配置迁移：四档改造后旧 `lines`/`lineLimits` 键成为孤儿键（NeoForge 文件里残留但不生效），`highSpeedThreshold` 旧值（如 1.0）持久化覆盖新默认 → 升级需删除旧配置文件（`config/chunkplan-server.toml` / `config/chunkplan.json`）重新生成，否则新默认不生效
 25. **任一窗口满即拒（规格变更）**：原设计"全部额度线同时超限才拒"（AND 语义），用户实测发现单线超限（如 5h 500.9/500.0）仍显示"未满，可正常探索"，确认是设计失误 → 改为**任一窗口满即拒**（OR 语义，`isAllLinesExceeded` 与 `quotaStatus.allExceeded` 的循环条件由"存在未满线→false"反转为"存在满线→true"）。`recoveryMillis` 不变（只遍历满线取最早桶+窗口的最晚者，恢复时刻保证满线滑出；未满线不参与）。字段名 `allExceeded` 保留（壳层双端引用，注释注明"任一满"语义）。恢复时间只保证"满的那条线滑出"，玩家恢复后再次探索可能再次触发该线 → 属正常行为。check/ban 文案不变，各线状态全部列出可看出哪条满
 26. **ban 公告排版（坑 #26）**：踢出消息按用户模板排版——标题（§c 红，禁止警示）+ 原因行（§c，满线中**窗口最长者**，如 5h 与 1d 同时满显示"1天内 探索额度上限 已耗尽"）+ §7 分割线（44 个 '-'，适中防自动换行）+ "您的探索额度情况："（§e 黄小标题）+ 各线状态（§f 白；满线"（§c已满，下次重置时间：X）"、未满线"（§7下次重置时间：X）"）+ 分割线 + "您最早可于：X 再次进入服务器"（§a 绿）+ 结尾感谢/咨询（§7 灰）。**每线显示各自独立的下次重置时间**（= 该线窗口内最早消费桶 + 窗口长，未满线也有——额度线互相独立、可能跨天不同步，如 5h 满 08-13 21:24 而 1d 未满次日才重置）：引擎 `QuotaStatus.LineStatus` 增加 `nextResetMillis` 字段（`quotaStatus` 逐线计算，无消费为 -1），`recoveryMillis` 保持只算满线。标签列按显示宽度对齐（CJK/全角 2 格、ASCII 1 格，`displayWidth`）；窗口显示名用"5小时内/1天内/30天内"（`windowName`，区别于 check 的 `formatWindow` "5h/1d" 简写）。双端 `ChunkPlanMessages.banMessage` 重写，改文案必须双端同步
+27. **JSON 损坏 .bak 备份兜底（坑 #27）**：所有 JSON（玩家数据 `players/<uuid>.json`、管理名单 `chunkplan-managed-bans.json`、Fabric 配置 `chunkplan.json`）写入统一走 `AtomicFile.write`——**写前备份**：目标存在时先把现有文件复制为 `<file>.bak`（覆盖式，同一文件 .bak 最多一个，恒为上一份完好数据）；读取经 `AtomicFile.readJson` 兜底：主文件 parse/IO 失败时尝试 `.bak`，成功则从 .bak 恢复并立即用 `writeNoBackup` 写回主文件修复现场——**恢复写回必须跳过写前备份**，否则损坏的主文件会覆盖唯一的好 .bak；主与 .bak 均失败才走原降级（重建/空名单/回退默认+告警）。**版本不符不尝试 .bak**（.bak 同版本也会不符，恢复无意义，保持重建+告警）。NeoForge 的 TOML 配置由 NightConfig 生态自管（坑 #12），不纳入本机制。Fabric 配置 IO 失败从"中断启动"改为"告警回退默认"（与 NeoForge reload 语义对齐）。实现位置：`AtomicFile.write/writeNoBackup/readJson`、`QuotaEngine.loadOrCreate`、`ManagedBanStore.load`、`FabricConfig.load`；测试 55 → 64（新增 `AtomicFileTest` 6 个 + 引擎/管理名单恢复测试 3 个）
 
 ## 约定
 

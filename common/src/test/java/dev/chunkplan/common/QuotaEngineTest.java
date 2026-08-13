@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -247,6 +248,48 @@ class QuotaEngineTest {
         engine2.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);  // 首 tick 基准
         engine2.onPlayerTick(player, false, OVERWORLD, 16, 64, 0); // 区块 1 已探索 -> 0.05
         assertEquals(1.05, engine2.quotaStatus(player).lines().get(0).spent(), 1e-9);
+    }
+
+    @Test
+    void corruptedPlayerFileRestoresFromBackup() throws Exception {
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0); // 跨区块：1.0 入集合
+        engine.saveAll();
+        Path f = tmp.resolve("players/" + player + ".json");
+        Path bak = tmp.resolve("players/" + player + ".json.bak");
+        Files.copy(f, bak); // 模拟写前备份留下的上一版好数据
+        Files.writeString(f, "{broken json", StandardCharsets.UTF_8); // 损坏主文件
+
+        // 新引擎：懒加载应命中 .bak，消费与探索集合都恢复（坑 #27）
+        QuotaEngine engine2 = new QuotaEngine(tmp,
+                QuotaConfig.builder()
+                        .lines(List.of(new QuotaConfig.Line(60, 2.0), new QuotaConfig.Line(120, 3.0)))
+                        .highSpeedThreshold(1000)
+                        .build(new ArrayList<>()),
+                null, new ManagedBanStore(tmp.resolve("bans.json")), clock::get);
+        assertEquals(1.0, engine2.quotaStatus(player).lines().get(0).spent(), 1e-9);
+        // 已探索集合恢复：新引擎下踏入区块 2 收 0.05 而非首费 1.0
+        engine2.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);  // 首 tick 基准
+        engine2.onPlayerTick(player, false, OVERWORLD, 32, 64, 0); // 区块 2 已从 .bak 恢复 -> 0.05
+        assertEquals(1.05, engine2.quotaStatus(player).lines().get(0).spent(), 1e-9);
+        // 主文件已被写回修复（不再残留损坏内容）
+        assertTrue(Files.readString(f, StandardCharsets.UTF_8).startsWith("{"));
+    }
+
+    @Test
+    void corruptedPlayerFileAndBackupRebuildsEmpty() throws Exception {
+        Files.createDirectories(tmp.resolve("players"));
+        Files.writeString(tmp.resolve("players/" + player + ".json"), "{broken json", StandardCharsets.UTF_8);
+        Files.writeString(tmp.resolve("players/" + player + ".json.bak"), "also broken", StandardCharsets.UTF_8);
+
+        QuotaEngine engine2 = new QuotaEngine(tmp,
+                QuotaConfig.builder()
+                        .lines(List.of(new QuotaConfig.Line(60, 2.0), new QuotaConfig.Line(120, 3.0)))
+                        .highSpeedThreshold(1000)
+                        .build(new ArrayList<>()),
+                null, new ManagedBanStore(tmp.resolve("bans.json")), clock::get);
+        // 主与 .bak 均损坏：重建清零（原降级语义）
+        assertEquals(0.0, engine2.quotaStatus(player).lines().get(0).spent(), 1e-9);
     }
 
     @Test

@@ -1,7 +1,6 @@
 package dev.chunkplan.common;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -74,19 +73,16 @@ public final class ManagedBanStore {
         if (!Files.exists(file)) {
             return;
         }
-        try {
-            Dto dto = GsonHolder.GSON.fromJson(Files.readString(file, StandardCharsets.UTF_8), Dto.class);
-            entries.clear();
-            if (dto != null && dto.bans != null) {
-                for (EntryDto e : dto.bans) {
-                    if (e == null || e.uuid == null) {
-                        continue;
-                    }
-                    entries.put(e.uuid, new Entry(e.uuid, e.reason == null ? "" : e.reason, e.expiresAt));
+        // 坑 #27：损坏时从 .bak 兜底恢复（避免管理名单损坏导致 scanBans 失效、残留 ban 无人解除）
+        Dto dto = AtomicFile.readJson(file, Dto.class, "管理名单", LOG);
+        entries.clear();
+        if (dto != null && dto.bans != null) {
+            for (EntryDto e : dto.bans) {
+                if (e == null || e.uuid == null) {
+                    continue;
                 }
+                entries.put(e.uuid, new Entry(e.uuid, e.reason == null ? "" : e.reason, e.expiresAt));
             }
-        } catch (Exception e) {
-            LOG.error("读取管理名单 {} 失败，按空名单处理", file, e);
         }
     }
 

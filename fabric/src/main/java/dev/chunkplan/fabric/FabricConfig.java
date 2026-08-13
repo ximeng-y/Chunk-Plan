@@ -8,6 +8,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import dev.chunkplan.common.AtomicFile;
 import dev.chunkplan.common.GsonHolder;
 import dev.chunkplan.common.QuotaConfig;
 import dev.chunkplan.common.QuotaTiers;
@@ -17,6 +21,8 @@ import dev.chunkplan.common.QuotaTiers;
  * 结构与 NeoForge TOML 一致，全部数值可配；非法值由 common 校验回退默认并告警。
  */
 public final class FabricConfig {
+
+    private static final Logger LOG = LoggerFactory.getLogger("ChunkPlan");
 
     /** 默认配置（与 NeoForge TOML 一致：第一二档开、第三四档关；阈值 0.5 即创造飞行） */
     private static final String DEFAULT_JSON = """
@@ -84,21 +90,20 @@ public final class FabricConfig {
                 if (configFile.getParent() != null) {
                     Files.createDirectories(configFile.getParent());
                 }
-                Files.writeString(configFile, DEFAULT_JSON, StandardCharsets.UTF_8);
+                // 首跑生成默认配置走原子写（防半写；无现有文件故不产生 .bak）
+                AtomicFile.write(configFile, DEFAULT_JSON);
                 dto = GsonHolder.GSON.fromJson(DEFAULT_JSON, Dto.class);
             } else {
-                dto = GsonHolder.GSON.fromJson(Files.readString(configFile, StandardCharsets.UTF_8), Dto.class);
+                // 坑 #27：损坏时从 .bak 兜底恢复（管理员改过的配置不丢）；
+                // IO/parse 失败不再中断启动，主与 .bak 均失败时回退默认并告警（与 NeoForge reload 语义对齐）
+                dto = AtomicFile.readJson(configFile, Dto.class, "配置文件", LOG);
             }
         } catch (IOException e) {
-            throw new IllegalStateException("读取配置文件失败: " + configFile, e);
-        } catch (RuntimeException e) {
-            // 畸形 JSON（JsonSyntaxException/NPE 等）解析失败：回退默认配置并告警，
-            // 与 NeoForge reload 回退行为对齐，避免配置文件损坏导致整服启动失败
-            warnings.add("配置文件解析失败（" + e.getMessage() + "），已回退默认配置: " + configFile);
-            dto = GsonHolder.GSON.fromJson(DEFAULT_JSON, Dto.class);
+            warnings.add("配置文件 IO 失败（" + e.getMessage() + "），已回退默认配置");
+            dto = null;
         }
         if (dto == null) {
-            warnings.add("配置文件为空，已回退默认配置: " + configFile);
+            warnings.add("配置文件为空或损坏且无可用备份，已回退默认配置");
             dto = GsonHolder.GSON.fromJson(DEFAULT_JSON, Dto.class);
         }
 
