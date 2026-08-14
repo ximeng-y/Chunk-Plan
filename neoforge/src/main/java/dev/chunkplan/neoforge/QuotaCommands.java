@@ -690,14 +690,45 @@ public final class QuotaCommands {
 
     // ---------- 参数解析与补全 ----------
 
-    /** reset 目标参数补全：未输入目标时补玩家名+选择器；已输入目标后补窗口层级（greedy 参数整体替换） */
+    /**
+     * reset 目标参数补全：按已输入词数分阶段（坑 #35）——第 1 词补玩家名+选择器；
+     * 第 2 词补窗口层级（tier1~tier4|all）；第 3 词起不再建议（reset 只接受
+     * &lt;目标&gt; [层级] 两个词，无脑建议层级会把用户引入套娃死路）。greedy 参数建议需含完整剩余文本。
+     */
     private static CompletableFuture<Suggestions> suggestResetTarget(CommandContext<CommandSourceStack> ctx, SuggestionsBuilder builder) {
         String remaining = builder.getRemaining();
-        int sp = remaining.lastIndexOf(' ');
-        if (sp >= 0) {
-            // 已输入目标：补全窗口层级（tier1~tier4|all），greedy 参数建议需含完整剩余文本
-            String head = remaining.substring(0, sp + 1);
-            String tail = remaining.substring(sp + 1).toLowerCase();
+        List<String> words = new ArrayList<>();
+        for (String w : remaining.split("\\s+")) {
+            if (!w.isEmpty()) {
+                words.add(w);
+            }
+        }
+        int n = words.size();
+        boolean trailingSpace = remaining.endsWith(" ");
+        if (n == 0 || (n == 1 && !trailingSpace)) {
+            // 第 1 词输入中：玩家名 + 常用选择器
+            MinecraftServer server = ctx.getSource().getServer();
+            String prefix = remaining.toLowerCase();
+            Set<String> seen = new HashSet<>();
+            for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+                addName(builder, seen, prefix, p.getGameProfile().getName());
+            }
+            for (ServerPlayer p : DevCommands.MOCK_PLAYERS) {
+                if (!p.isRemoved()) {
+                    addName(builder, seen, prefix, p.getGameProfile().getName());
+                }
+            }
+            for (String sel : List.of("@a", "@e", "@p", "@s", "@r")) {
+                if (prefix.isEmpty() || sel.startsWith(prefix)) {
+                    builder.suggest(sel);
+                }
+            }
+            return builder.buildFuture();
+        }
+        if (n <= 2 && !(n == 2 && trailingSpace)) {
+            // 第 2 词输入中或未完成：补全窗口层级（greedy 参数建议需含完整剩余文本）
+            String head = words.get(0) + " ";
+            String tail = n == 2 ? words.get(1).toLowerCase() : "";
             for (String v : List.of("tier1", "tier2", "tier3", "tier4", "all")) {
                 if (tail.isEmpty() || v.startsWith(tail)) {
                     builder.suggest(head + v);
@@ -705,23 +736,7 @@ public final class QuotaCommands {
             }
             return builder.buildFuture();
         }
-        // 未输入目标：玩家名 + 常用选择器
-        MinecraftServer server = ctx.getSource().getServer();
-        String prefix = remaining.toLowerCase();
-        Set<String> seen = new HashSet<>();
-        for (ServerPlayer p : server.getPlayerList().getPlayers()) {
-            addName(builder, seen, prefix, p.getGameProfile().getName());
-        }
-        for (ServerPlayer p : DevCommands.MOCK_PLAYERS) {
-            if (!p.isRemoved()) {
-                addName(builder, seen, prefix, p.getGameProfile().getName());
-            }
-        }
-        for (String sel : List.of("@a", "@e", "@p", "@s", "@r")) {
-            if (prefix.isEmpty() || sel.startsWith(prefix)) {
-                builder.suggest(sel);
-            }
-        }
+        // 第 3 词起：reset 只接受 <目标> [层级]，不再建议（坑 #35）
         return builder.buildFuture();
     }
 

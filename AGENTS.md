@@ -158,6 +158,7 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **修复**：四个 fabric.mod.json（根 fabric 1.21.1 + fabric-multi 1.21.11/26.1.2/26.2）`environment` 一律改 `"*"`（2026-08-15 提交）；entrypoints 保持 `main` + `ModInitializer` 不动——`*` 时 main 入口在客户端与 dedicated 双端都会调用，mod 无任何客户端类引用，客户端加载无害。NeoForge 无 environment 过滤机制（单人是内嵌服务器），不受影响
     - **`*` ≠ 客户端必装**：Fabric 无 Forge 式强制 mod 列表同步；ChunkPlan 不注册网络包/注册表条目（无协议级差异）→ 客户端不装可正常连装有本 mod 的服务器（dedicated 冒烟即裸 mineflayer 客户端验证），客户端装了连未装服务器也正常（回调仅在服务器存在时触发）
     - **验证方法**：打包后 unzip 静态检查 jar 内 fabric.mod.json 的 environment（此后 fabric 冒烟阶段应加此检查）；实机判断——日志出现 `[ChunkPlan] ChunkPlan Fabric 壳已注册`、Loading N mods 数量 +1、游戏内有 /chunkplan。单人复测注意坑 #21：单人主机恒权限 4，默认豁免下计费恒 0，须先 `/chunkplan config exemptByDefault false`
+35. **reset 补全套娃（坑 #35，2026-08-15 用户 1.21.11 实机暴露）**：`suggestResetTarget` 原实现只看剩余文本有无空格——只要有空格就无条件建议层级词（tier1~tier4|all），且 greedy 参数建议需含完整剩余文本 → 用户选完层级词后再打空格，补全继续建议 `all all`/`all tier1`… **每选一次建议多一个词，无限套娃**（用户截图实证输入到 `reset ximeng_y tier4 all all`），而 `reset()` 只接受 `<目标> [层级]` 两词（`parts.length>2` 报参数格式错）——补全把用户引导进死路。修复：**按已输入词数分阶段**——第 1 词输入中（零词或一词无尾随空格）补玩家名+选择器；第 2 词（一词尾随空格或两词无尾随空格）补层级词；第 3 词起（两词尾随空格或更多词）**返回空建议**堵死套娃链。三处（neoforge/fabric 1.21.1/fabric-multi shared）同步，API 差异行（getName()/name()）除外；纯壳层，common 测试不变
 
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
