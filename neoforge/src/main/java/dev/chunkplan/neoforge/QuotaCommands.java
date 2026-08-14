@@ -705,7 +705,15 @@ public final class QuotaCommands {
             }
         }
         int n = words.size();
-        boolean trailingSpace = remaining.endsWith(" ");
+        // 尾随空白用 isWhitespace 判定，与 split("\\s+") 一致（坑 #35 补丁：多空格/tab 不再误入第 1 词分支）
+        int lastWs = -1;
+        for (int i = remaining.length() - 1; i >= 0; i--) {
+            if (Character.isWhitespace(remaining.charAt(i))) {
+                lastWs = i;
+                break;
+            }
+        }
+        boolean trailingSpace = !remaining.isEmpty() && lastWs == remaining.length() - 1;
         if (n == 0 || (n == 1 && !trailingSpace)) {
             // 第 1 词输入中：玩家名 + 常用选择器
             MinecraftServer server = ctx.getSource().getServer();
@@ -728,7 +736,7 @@ public final class QuotaCommands {
         }
         if (n <= 2 && !(n == 2 && trailingSpace)) {
             // 第 2 词输入中或未完成：补全窗口层级（greedy 参数建议需含完整剩余文本）
-            String head = words.get(0) + " ";
+            String head = lastWs >= 0 ? remaining.substring(0, lastWs + 1) : words.get(0) + " ";
             String tail = n == 2 ? words.get(1).toLowerCase() : "";
             for (String v : List.of("tier1", "tier2", "tier3", "tier4", "all")) {
                 if (tail.isEmpty() || v.startsWith(tail)) {
