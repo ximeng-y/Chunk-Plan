@@ -151,9 +151,41 @@ public final class FabricConfig {
      * 用 GsonHolder（compact 单行格式），写回后格式与原文件一致。
      */
     public static void writeExemptByDefault(Path configFile, boolean value) throws IOException {
-        com.google.gson.JsonObject root = GsonHolder.GSON.fromJson(
-                Files.readString(configFile, StandardCharsets.UTF_8), com.google.gson.JsonObject.class);
+        com.google.gson.JsonObject root = readRoot(configFile);
         root.addProperty("exemptByDefault", value);
         dev.chunkplan.common.AtomicFile.write(configFile, GsonHolder.GSON.toJson(root));
+    }
+
+    /** /chunkplan config window 用：改写档位开关 */
+    public static void writeTierEnabled(Path configFile, int tier, boolean enabled) throws IOException {
+        com.google.gson.JsonObject root = readRoot(configFile);
+        root.addProperty("tier" + tier + "Enabled", enabled);
+        dev.chunkplan.common.AtomicFile.write(configFile, GsonHolder.GSON.toJson(root));
+    }
+
+    /** /chunkplan config windowTime 用：改写档位窗口时长 */
+    public static void writeTierWindow(Path configFile, int tier, String window) throws IOException {
+        com.google.gson.JsonObject root = readRoot(configFile);
+        root.addProperty("tier" + tier + "Window", window);
+        dev.chunkplan.common.AtomicFile.write(configFile, GsonHolder.GSON.toJson(root));
+    }
+
+    /** /chunkplan config windowLimit 用：改写档位额度上限（数值类型，勿用字符串 addProperty） */
+    public static void writeTierLimit(Path configFile, int tier, double limit) throws IOException {
+        com.google.gson.JsonObject root = readRoot(configFile);
+        root.addProperty("tier" + tier + "Limit", limit);
+        dev.chunkplan.common.AtomicFile.write(configFile, GsonHolder.GSON.toJson(root));
+    }
+
+    /** /chunkplan config highSpeedMultiplier 用：改写高速移动倍率 */
+    public static void writeHighSpeedMultiplier(Path configFile, double multiplier) throws IOException {
+        com.google.gson.JsonObject root = readRoot(configFile);
+        root.addProperty("highSpeedMultiplier", multiplier);
+        dev.chunkplan.common.AtomicFile.write(configFile, GsonHolder.GSON.toJson(root));
+    }
+
+    private static com.google.gson.JsonObject readRoot(Path configFile) throws IOException {
+        return GsonHolder.GSON.fromJson(
+                Files.readString(configFile, StandardCharsets.UTF_8), com.google.gson.JsonObject.class);
     }
 }

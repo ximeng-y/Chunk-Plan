@@ -13,7 +13,12 @@ import java.util.UUID;
  */
 public final class QuotaConfig {
 
-    public record Line(long windowSeconds, double limit) {
+    /**
+     * 额度线：tier 档位(1~4) + 窗口秒数 + 点数上限。
+     * 坑 #30：引擎按档位独立分桶记账（每档自己的消费桶），tier 是分桶键，
+     * 关闭/重置单窗口、窗口时间调整等操作依赖档位身份（窗口时长可能跨档重叠，不能反推）。
+     */
+    public record Line(int tier, long windowSeconds, double limit) {
     }
 
     private final List<Line> lines;
@@ -80,11 +85,11 @@ public final class QuotaConfig {
         return logFeeEvents;
     }
 
-    /** 默认两条额度线：5h ≤ 500 点 + 24h ≤ 2000 点 */
+    /** 默认两条额度线：5h ≤ 500 点 + 24h ≤ 2000 点（第一二档） */
     public static List<Line> defaultLines() {
         return List.of(
-                new Line(5 * 3600, 500),
-                new Line(24 * 3600, 2000));
+                new Line(1, 5 * 3600, 500),
+                new Line(2, 24 * 3600, 2000));
     }
 
     public static Builder builder() {
@@ -181,8 +186,18 @@ public final class QuotaConfig {
                 return defaultLines();
             }
             List<Line> ok = new ArrayList<>();
+            Set<Integer> seen = new HashSet<>();
             for (Line line : raw) {
-                if (line == null || line.windowSeconds() <= 0 || line.limit() <= 0) {
+                // 档位是分桶键：必须 1~4 且不重复（重复档位会导致分桶互相覆盖）
+                if (line == null || line.tier() < 1 || line.tier() > 4) {
+                    w.add("存在非法额度线（tier 必须为 1~4），已丢弃该线");
+                    continue;
+                }
+                if (!seen.add(line.tier())) {
+                    w.add("存在重复档位 tier" + line.tier() + " 的额度线，已丢弃该线");
+                    continue;
+                }
+                if (line.windowSeconds() <= 0 || line.limit() <= 0) {
                     w.add("存在非法额度线（窗口或上限必须为正），已丢弃该线");
                     continue;
                 }

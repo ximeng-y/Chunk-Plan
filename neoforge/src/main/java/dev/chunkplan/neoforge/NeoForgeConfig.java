@@ -195,17 +195,48 @@ public final class NeoForgeConfig {
     }
 
     /**
-     * /chunkplan config exemptByDefault 用：原子改写 TOML 文件中的该字段（重启后保留）。
+     * /chunkplan config 用：原子改写 TOML 文件中的单个键（重启后保留）。
      * 不用 NightConfig 写器：其非原子保存可能被 NeoForge watcher 半读，触发 .bak + 静默重置（坑 #12）。
      * 文本替换 + AtomicFile 原子写（同目录 .tmp + rename），watcher 只会看到完整文件。
+     *
+     * @param value 格式化好的字面量（"true" / "500.0" / "\"5h\""）
      */
-    public static void writeExemptByDefault(Path file, boolean value) throws IOException {
+    public static void writeKey(Path file, String key, String value) throws IOException {
         String text = Files.readString(file, StandardCharsets.UTF_8);
-        String replaced = text.replaceAll("(?m)^exemptByDefault\\s*=\\s*(true|false)\\s*$", "exemptByDefault = " + value);
-        if (replaced.equals(text)) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                "(?m)^" + java.util.regex.Pattern.quote(key) + "\\s*=\\s*.*$").matcher(text);
+        if (!m.find()) {
             // 文件中没有该字段（异常情况）：追加一行，保持文件合法
-            replaced = text + (text.endsWith("\n") ? "" : "\n") + "exemptByDefault = " + value + "\n";
+            text = text + (text.endsWith("\n") ? "" : "\n") + key + " = " + value + "\n";
+        } else {
+            // 显式按匹配区间替换：与原文相同（幂等写）不算"键不存在"，绝不追加重复键
+            text = text.substring(0, m.start()) + key + " = " + value + text.substring(m.end());
         }
-        dev.chunkplan.common.AtomicFile.write(file, replaced);
+        dev.chunkplan.common.AtomicFile.write(file, text);
+    }
+
+    /** /chunkplan config exemptByDefault 用：委托通用写键（重启后保留） */
+    public static void writeExemptByDefault(Path file, boolean value) throws IOException {
+        writeKey(file, "exemptByDefault", String.valueOf(value));
+    }
+
+    /** /chunkplan config window 用：改写档位开关 */
+    public static void writeTierEnabled(Path file, int tier, boolean enabled) throws IOException {
+        writeKey(file, "tier" + tier + "Enabled", String.valueOf(enabled));
+    }
+
+    /** /chunkplan config windowTime 用：改写档位窗口时长（TOML 字符串需引号） */
+    public static void writeTierWindow(Path file, int tier, String window) throws IOException {
+        writeKey(file, "tier" + tier + "Window", "\"" + window + "\"");
+    }
+
+    /** /chunkplan config windowLimit 用：改写档位额度上限 */
+    public static void writeTierLimit(Path file, int tier, double limit) throws IOException {
+        writeKey(file, "tier" + tier + "Limit", String.valueOf(limit));
+    }
+
+    /** /chunkplan config highSpeedMultiplier 用：改写高速移动倍率 */
+    public static void writeHighSpeedMultiplier(Path file, double multiplier) throws IOException {
+        writeKey(file, "highSpeedMultiplier", String.valueOf(multiplier));
     }
 }

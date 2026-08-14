@@ -25,8 +25,8 @@ class QuotaTiersTest {
         List<String> warnings = new ArrayList<>();
         List<QuotaConfig.Line> lines = QuotaTiers.toLines(DEFAULT_TIERS, warnings);
         assertEquals(2, lines.size());
-        assertEquals(new QuotaConfig.Line(5 * 3600, 500.0), lines.get(0));
-        assertEquals(new QuotaConfig.Line(24 * 3600, 2000.0), lines.get(1));
+        assertEquals(new QuotaConfig.Line(1, 5 * 3600, 500.0), lines.get(0));
+        assertEquals(new QuotaConfig.Line(2, 24 * 3600, 2000.0), lines.get(1));
         assertTrue(warnings.isEmpty());
     }
 
@@ -41,7 +41,7 @@ class QuotaTiersTest {
                 new QuotaTiers.Tier(false, "30d", 40000.0));
         List<QuotaConfig.Line> lines = QuotaTiers.toLines(tiers, warnings);
         assertEquals(2, lines.size());
-        assertEquals(new QuotaConfig.Line(5 * 3600, 500.0), lines.get(0));
+        assertEquals(new QuotaConfig.Line(1, 5 * 3600, 500.0), lines.get(0));
         assertEquals(1, warnings.size());
         assertTrue(warnings.get(0).contains("第 1 档"));
     }
@@ -56,7 +56,7 @@ class QuotaTiersTest {
                 new QuotaTiers.Tier(false, "30d", 40000.0));
         List<QuotaConfig.Line> lines = QuotaTiers.toLines(tiers, warnings);
         assertEquals(2, lines.size());
-        assertEquals(new QuotaConfig.Line(5 * 3600, 500.0), lines.get(0));
+        assertEquals(new QuotaConfig.Line(1, 5 * 3600, 500.0), lines.get(0));
         assertEquals(1, warnings.size());
     }
 
@@ -83,8 +83,8 @@ class QuotaTiersTest {
                 new QuotaTiers.Tier(true, "30d", 40000.0));
         List<QuotaConfig.Line> lines = QuotaTiers.toLines(tiers, warnings);
         assertEquals(4, lines.size());
-        assertEquals(new QuotaConfig.Line(7 * 24 * 3600, 10000.0), lines.get(2));
-        assertEquals(new QuotaConfig.Line(30 * 24 * 3600, 40000.0), lines.get(3));
+        assertEquals(new QuotaConfig.Line(3, 7 * 24 * 3600, 10000.0), lines.get(2));
+        assertEquals(new QuotaConfig.Line(4, 30 * 24 * 3600, 40000.0), lines.get(3));
         assertTrue(warnings.isEmpty());
     }
 
@@ -97,14 +97,14 @@ class QuotaTiersTest {
                 new QuotaTiers.Tier(true, "24h", 2000.0));
         List<QuotaConfig.Line> lines = QuotaTiers.toLines(tiers, warnings);
         assertEquals(2, lines.size());
-        assertEquals(new QuotaConfig.Line(5 * 3600, 500.0), lines.get(0));
-        assertEquals(new QuotaConfig.Line(24 * 3600, 2000.0), lines.get(1));
+        assertEquals(new QuotaConfig.Line(1, 5 * 3600, 500.0), lines.get(0));
+        assertEquals(new QuotaConfig.Line(2, 24 * 3600, 2000.0), lines.get(1));
         assertTrue(warnings.isEmpty());
         // 缺档且默认开启 → 补默认线：只传第一档（默认第二档开启）
         List<QuotaTiers.Tier> one = List.of(new QuotaTiers.Tier(true, "5h", 500.0));
         List<QuotaConfig.Line> lines2 = QuotaTiers.toLines(one, warnings);
         assertEquals(2, lines2.size());
-        assertEquals(new QuotaConfig.Line(24 * 3600, 2000.0), lines2.get(1));
+        assertEquals(new QuotaConfig.Line(2, 24 * 3600, 2000.0), lines2.get(1));
         assertTrue(warnings.isEmpty());
     }
 }

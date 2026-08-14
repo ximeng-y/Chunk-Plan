@@ -88,8 +88,8 @@ public final class ChunkPlanMessages {
     /** 公告分割线（长度取适中值，避免聊天自动换行打断） */
     private static final String DIVIDER = "-".repeat(44);
 
-    /** 窗口显示名："5小时内"/"1天内"/"30分钟内" 或 "Within 5 hours"/"Within 1 day"（公告/每线展示用） */
-    private static String windowName(long windowSeconds, boolean zh) {
+    /** 窗口显示名："5小时内"/"1天内"/"30分钟内" 或 "Within 5 hours"/"Within 1 day"（公告/每线展示/命令反馈用） */
+    public static String windowName(long windowSeconds, boolean zh) {
         long m = windowSeconds / 60;
         if (zh) {
             if (m >= 1440) {
@@ -235,6 +235,45 @@ public final class ChunkPlanMessages {
         String link = zh ? "点击此处查看详细计费规则" : "Click here to view detailed billing rules";
         return Component.literal(sb.toString()).append(Component.literal(link)
                 .withStyle(s -> s.withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/chunkplan rules"))));
+    }
+
+    /**
+     * 确认超链接（坑 #30）：点击执行 /chunkplan confirm。
+     * 用于 reset / 关闭窗口 / 调低额度的待确认提示尾部，复用坑 #28 的 ClickEvent 模式。
+     */
+    public static Component confirmLink(boolean zh) {
+        String link = zh ? "点击此处进行确认" : "Click here to confirm";
+        return Component.literal(link)
+                .withStyle(s -> s.withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/chunkplan confirm")));
+    }
+
+    /**
+     * /chunkplan help（仅管理员）：config 与 reset 的用法教学（双语，纯文本）。
+     * 展示完整命令族，数值规则一句话带过。
+     */
+    public static String helpMessage(boolean zh) {
+        if (zh) {
+            return "§e--- ChunkPlan 管理员帮助 ---\n"
+                    + "§f查询：§a/chunkplan check [玩家]\n"
+                    + "§f重置：§a/chunkplan reset <玩家|@a> [tier1|tier2|tier3|tier4|all]§f，执行后点击消息中的确认链接（60 秒内有效）\n"
+                    + "§f窗口开关：§a/chunkplan config window <tier1|tier2|tier3|tier4|all> <on|off>§f，关闭会清空该窗口所有玩家记录，需确认\n"
+                    + "§f窗口时长：§a/chunkplan config windowTime <tier1..tier4> <时长>§f，时长从补全列表选择（如 5h/24h）\n"
+                    + "§f额度上限：§a/chunkplan config windowLimit <tier1..tier4> <数值>§f，调低可能踢出已超限玩家，需确认\n"
+                    + "§f高速倍率：§a/chunkplan config highSpeedMultiplier <数值>§f（1.00~1000.00）\n"
+                    + "§f默认豁免：§a/chunkplan config exemptByDefault <true|false>\n"
+                    + "§f重载配置：§a/chunkplan reload\n"
+                    + "§7数值允许整数或最多 2 位小数；所有修改写入配置文件并立即生效";
+        }
+        return "§e--- ChunkPlan Admin Help ---\n"
+                + "§fQuery: §a/chunkplan check [player]\n"
+                + "§fReset: §a/chunkplan reset <player|@a> [tier1|tier2|tier3|tier4|all]§f - click the confirm link in the message (valid for 60s)\n"
+                + "§fWindows: §a/chunkplan config window <tier1|tier2|tier3|tier4|all> <on|off>§f - disabling clears that window's records for all players (needs confirmation)\n"
+                + "§fWindow time: §a/chunkplan config windowTime <tier1..tier4> <duration>§f - pick from the tab-completed presets (e.g. 5h/24h)\n"
+                + "§fWindow limit: §a/chunkplan config windowLimit <tier1..tier4> <number>§f - lowering may kick players who now exceed (needs confirmation)\n"
+                + "§fHigh-speed multiplier: §a/chunkplan config highSpeedMultiplier <number>§f (1.00~1000.00)\n"
+                + "§fDefault exempt: §a/chunkplan config exemptByDefault <true|false>\n"
+                + "§fReload: §a/chunkplan reload\n"
+                + "§7Numbers may be integers or up to 2 decimals; all changes are written to the config file and take effect immediately";
     }
 
     /**

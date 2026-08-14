@@ -15,8 +15,10 @@ class QuotaConfigTest {
     void defaults() {
         QuotaConfig cfg = QuotaConfig.builder().build(new ArrayList<>());
         assertEquals(2, cfg.lines().size());
+        assertEquals(1, cfg.lines().get(0).tier());
         assertEquals(5 * 3600, cfg.lines().get(0).windowSeconds());
         assertEquals(500, cfg.lines().get(0).limit());
+        assertEquals(2, cfg.lines().get(1).tier());
         assertEquals(24 * 3600, cfg.lines().get(1).windowSeconds());
         assertEquals(2000, cfg.lines().get(1).limit());
         assertEquals(1.0, cfg.firstEntryFee());
@@ -35,7 +37,7 @@ class QuotaConfigTest {
         for (int n = 1; n <= 4; n++) {
             List<QuotaConfig.Line> lines = new ArrayList<>();
             for (int i = 0; i < n; i++) {
-                lines.add(new QuotaConfig.Line((i + 1) * 3600, (i + 1) * 100));
+                lines.add(new QuotaConfig.Line(i + 1, (i + 1) * 3600, (i + 1) * 100));
             }
             List<String> warnings = new ArrayList<>();
             QuotaConfig cfg = QuotaConfig.builder().lines(lines).build(warnings);
@@ -56,11 +58,11 @@ class QuotaConfigTest {
     void fiveLinesFallbackToDefault() {
         List<String> warnings = new ArrayList<>();
         List<QuotaConfig.Line> lines = List.of(
-                new QuotaConfig.Line(3600, 100),
-                new QuotaConfig.Line(7200, 200),
-                new QuotaConfig.Line(10800, 300),
-                new QuotaConfig.Line(14400, 400),
-                new QuotaConfig.Line(18000, 500));
+                new QuotaConfig.Line(1, 3600, 100),
+                new QuotaConfig.Line(2, 7200, 200),
+                new QuotaConfig.Line(3, 10800, 300),
+                new QuotaConfig.Line(4, 14400, 400),
+                new QuotaConfig.Line(5, 18000, 500));
         QuotaConfig cfg = QuotaConfig.builder().lines(lines).build(warnings);
         assertEquals(2, cfg.lines().size());
         assertFalse(warnings.isEmpty());
@@ -70,9 +72,9 @@ class QuotaConfigTest {
     void invalidLineDropped() {
         List<String> warnings = new ArrayList<>();
         List<QuotaConfig.Line> lines = List.of(
-                new QuotaConfig.Line(0, 100),
-                new QuotaConfig.Line(3600, -1),
-                new QuotaConfig.Line(7200, 200));
+                new QuotaConfig.Line(1, 0, 100),
+                new QuotaConfig.Line(2, 3600, -1),
+                new QuotaConfig.Line(3, 7200, 200));
         QuotaConfig cfg = QuotaConfig.builder().lines(lines).build(warnings);
         assertEquals(1, cfg.lines().size());
         assertEquals(7200, cfg.lines().get(0).windowSeconds());

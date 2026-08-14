@@ -4,11 +4,14 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.LongSupplier;
+import java.util.stream.Stream;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -141,7 +144,26 @@ public final class QuotaEngine {
 
     /** 配置热更新（/chunkplan reload 时调用，先由壳层校验并构建 QuotaConfig） */
     public void setConfig(QuotaConfig config) {
+        QuotaConfig old = this.config;
         this.config = config;
+        // 额度线集合（档位）变化时清空提示状态：AlertState.lastLevels 按下标对齐 lines，
+        // 启用/禁用档位改变线数后旧数组会越界/错位（坑 #30；清后下次 tick 首见只重基线不刷屏）
+        if (old != null && !sameLineTiers(old.lines(), config.lines())) {
+            alertStates.clear();
+        }
+    }
+
+    /** 两条额度线集合的档位序列是否一致（按顺序比较；toLines 恒按档位升序产出） */
+    private static boolean sameLineTiers(List<QuotaConfig.Line> a, List<QuotaConfig.Line> b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (int i = 0; i < a.size(); i++) {
+            if (a.get(i).tier() != b.get(i).tier()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** 运行期更换扣费日志实现（/chunkplan reload 时 logFeeEvents 开关热切换；false 传 null） */
@@ -197,6 +219,11 @@ public final class QuotaEngine {
 
         if (!enteredNewChunk) {
             // 同一区块内（挂机/踱步/移动）：不重复计费
+            // 坑 #30：每 tick 仍判满——配置变更（降额度/改窗口/启用新线）导致超限时
+            // 下一 tick 即踢出，原地不动也生效（保证"降低额度不会瘫痪系统、当场生效"）
+            if (isAllLinesExceeded(data, now)) {
+                return TickResult.ban(recoveryMillis(data, now));
+            }
             return TickResult.none(checkAlerts(uuid, data, now));
         }
 
@@ -210,7 +237,10 @@ public final class QuotaEngine {
         QuotaConfig cfg = config;
         double fee = base * (speed > cfg.highSpeedThreshold() ? cfg.highSpeedMultiplier() : 1.0);
         long minute = now / 60000;
-        data.addSpend(minute, fee);
+        // 按档位分桶：每次消费计入所有启用档位（坑 #30，各窗口独立记账、互不影响）
+        for (QuotaConfig.Line line : cfg.lines()) {
+            data.addSpend(line.tier(), minute, fee);
+        }
 
         if (cfg.logFeeEvents() && feeLogger != null) {
             feeLogger.logFee(uuid, dimKey, curChunk, speed, fee, totalSpent(data, now));
@@ -242,12 +272,12 @@ public final class QuotaEngine {
         boolean any = false;
         WindowAlert worst = null;
         for (QuotaConfig.Line line : config.lines()) {
-            double spent = data.spendInWindow(now, line.windowSeconds());
+            double spent = data.spendInWindow(line.tier(), now, line.windowSeconds());
             // 各线独立的下次重置时间：该线窗口内最早消费桶 + 窗口长（无消费为 -1）。
             // 与满线恢复时间同一公式；未满线也展示，便于玩家看到"该线何时滑出"（坑 #26）
             long nextReset = -1;
             long firstKey = (now - line.windowSeconds() * 1000) / 60000 + 1;
-            Long earliest = data.firstBucketAtOrAfter(firstKey);
+            Long earliest = data.firstBucketAtOrAfter(line.tier(), firstKey);
             if (earliest != null) {
                 nextReset = earliest * 60000L + line.windowSeconds() * 1000L;
             }
@@ -265,11 +295,70 @@ public final class QuotaEngine {
         return new QuotaStatus(lines, recovery, any, worst);
     }
 
-    /** /chunkplan reset：只清消费桶，已探索集合终身保留 */
+    /** /chunkplan reset（全档位）：只清消费桶，已探索集合终身保留 */
     public void resetSpend(UUID uuid) {
+        resetSpend(uuid, null);
+    }
+
+    /**
+     * /chunkplan reset [窗口]：清消费桶（tiers null/空 = 全部档位；否则只清指定档位，坑 #30），
+     * 已探索集合终身保留。
+     */
+    public void resetSpend(UUID uuid, Set<Integer> tiers) {
         PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
-        data.clearSpend();
+        if (tiers == null || tiers.isEmpty()) {
+            data.clearSpend();
+        } else {
+            for (int tier : tiers) {
+                data.clearTierSpend(tier);
+            }
+        }
         savePlayer(uuid);
+    }
+
+    /**
+     * 清空某档位所有玩家的消费桶（/chunkplan config window tierN off 时调用，坑 #30）：
+     * 在线玩家清内存；离线玩家逐个读文件改写落盘——保证重新开启该窗口时从 0 起。
+     */
+    public void clearTierSpendForAll(int tier) {
+        for (PlayerQuotaData data : dataByPlayer.values()) {
+            data.clearTierSpend(tier);
+        }
+        try (Stream<Path> files = Files.list(playerDataDir)) {
+            Iterator<Path> it = files.iterator();
+            while (it.hasNext()) {
+                Path file = it.next();
+                String name = file.getFileName().toString();
+                if (!name.endsWith(".json")) {
+                    continue;
+                }
+                UUID uuid;
+                try {
+                    uuid = UUID.fromString(name.substring(0, name.length() - 5));
+                } catch (IllegalArgumentException e) {
+                    continue; // 非玩家数据文件
+                }
+                if (dataByPlayer.containsKey(uuid)) {
+                    continue; // 在线玩家已在上方处理
+                }
+                PlayerQuotaData.Dto dto = AtomicFile.readJson(file, PlayerQuotaData.Dto.class,
+                        "玩家 " + uuid + " 配额数据", LOG);
+                if (dto == null) {
+                    continue; // 主与 .bak 均损坏：保留原样
+                }
+                PlayerQuotaData data = PlayerQuotaData.fromDto(dto);
+                data.clearTierSpend(tier);
+                if (data.isDirty()) {
+                    try {
+                        AtomicFile.write(file, GsonHolder.GSON.toJson(data.toDto()));
+                    } catch (IOException e) {
+                        LOG.error("改写玩家 {} 配额数据失败", uuid, e);
+                    }
+                }
+            }
+        } catch (IOException e) {
+            LOG.error("清空档位 {} 的玩家记录失败", tier, e);
+        }
     }
 
     /** 玩家离线/被踢：落盘并释放内存 */
@@ -303,12 +392,13 @@ public final class QuotaEngine {
         }
     }
 
-    /** 清理早于"最长窗口线 2 倍"的过期桶 */
+    /** 清理各档位早于"该档窗口 2 倍"的过期桶（各档独立清理，坑 #30） */
     public void cleanupExpiredBuckets() {
-        long maxWindow = config.lines().stream().mapToLong(l -> l.windowSeconds()).max().orElse(0);
-        long cutoffMinute = (clock.getAsLong() - maxWindow * 2000) / 60000;
-        for (PlayerQuotaData data : dataByPlayer.values()) {
-            data.cleanupBucketsBefore(cutoffMinute);
+        for (QuotaConfig.Line line : config.lines()) {
+            long cutoffMinute = (clock.getAsLong() - line.windowSeconds() * 2000) / 60000;
+            for (PlayerQuotaData data : dataByPlayer.values()) {
+                data.cleanupBucketsBefore(line.tier(), cutoffMinute);
+            }
         }
     }
 
@@ -350,7 +440,7 @@ public final class QuotaEngine {
 
     /** 当前最高已过档位（低于 15% 为 -1） */
     private static int currentLevel(PlayerQuotaData data, QuotaConfig.Line line, long now) {
-        double pct = data.spendInWindow(now, line.windowSeconds()) / line.limit() * 100;
+        double pct = data.spendInWindow(line.tier(), now, line.windowSeconds()) / line.limit() * 100;
         int level = -1;
         for (int t : ALERT_PERCENTS) {
             if (pct >= t) {
@@ -374,7 +464,7 @@ public final class QuotaEngine {
     private boolean isAllLinesExceeded(PlayerQuotaData data, long nowMillis) {
         // 坑 #25：任一额度线满即视为超限（原"全部满才拒"改为单线满即拒）
         for (QuotaConfig.Line line : config.lines()) {
-            if (data.spendInWindow(nowMillis, line.windowSeconds()) > line.limit()) {
+            if (data.spendInWindow(line.tier(), nowMillis, line.windowSeconds()) > line.limit()) {
                 return true;
             }
         }
@@ -388,11 +478,11 @@ public final class QuotaEngine {
     private long recoveryMillis(PlayerQuotaData data, long nowMillis) {
         long worst = -1;
         for (QuotaConfig.Line line : config.lines()) {
-            if (data.spendInWindow(nowMillis, line.windowSeconds()) <= line.limit()) {
+            if (data.spendInWindow(line.tier(), nowMillis, line.windowSeconds()) <= line.limit()) {
                 continue;
             }
             long firstKey = (nowMillis - line.windowSeconds() * 1000) / 60000 + 1;
-            Long earliest = data.firstBucketAtOrAfter(firstKey);
+            Long earliest = data.firstBucketAtOrAfter(line.tier(), firstKey);
             if (earliest == null) {
                 continue;
             }
@@ -402,10 +492,15 @@ public final class QuotaEngine {
         return worst;
     }
 
-    /** 累计总点数：按最长窗口线窗口求和（仅用于日志展示） */
+    /** 累计总点数：按最长窗口档位求和（仅用于日志展示；各档位桶内容相同，取最大窗口档位即可） */
     private double totalSpent(PlayerQuotaData data, long nowMillis) {
-        long maxWindow = config.lines().stream().mapToLong(l -> l.windowSeconds()).max().orElse(0);
-        return data.spendInWindow(nowMillis, maxWindow);
+        QuotaConfig.Line maxLine = null;
+        for (QuotaConfig.Line line : config.lines()) {
+            if (maxLine == null || line.windowSeconds() > maxLine.windowSeconds()) {
+                maxLine = line;
+            }
+        }
+        return maxLine == null ? 0 : data.spendInWindow(maxLine.tier(), nowMillis, maxLine.windowSeconds());
     }
 
     private PlayerQuotaData loadOrCreate(UUID uuid) {
@@ -414,10 +509,16 @@ public final class QuotaEngine {
             return new PlayerQuotaData();
         }
         // 坑 #27：损坏时从 .bak 兜底恢复（额度/探索集合不清零）；
-        // 版本不符不尝试 .bak（.bak 同版本也会不符，恢复无意义，保持重建+告警）
+        // 版本不符不尝试 .bak（.bak 同版本也会不符，恢复无意义）
         PlayerQuotaData.Dto dto = AtomicFile.readJson(file, PlayerQuotaData.Dto.class, "玩家 " + uuid + " 配额数据", LOG);
         if (dto != null) {
             if (dto.version == PlayerQuotaData.VERSION) {
+                return PlayerQuotaData.fromDto(dto);
+            }
+            if (dto.version == 1) {
+                // v1 -> v2 迁移（坑 #30）：explored 终身保留；v1 共享消费桶无法无损拆分到档位，
+                // 丢弃（该玩家消费额度从 0 重新累计）
+                LOG.warn("玩家 {} 配额数据为旧版 v1，已保留探索集合，消费额度从 0 重新累计", uuid);
                 return PlayerQuotaData.fromDto(dto);
             }
             LOG.warn("玩家 {} 配额数据版本不兼容（{}），将重建", uuid, dto.version);

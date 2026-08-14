@@ -52,7 +52,7 @@ public final class QuotaTiers {
      * 档位 → 额度线（引擎模型）：
      * - 禁用档跳过；启用档窗口须在预设内且 limit 为正，否则回退该档默认并告警
      * - 全部档无效/全关 → 回退默认两条（5h/500 + 24h/2000）并告警
-     * 返回 1~4 条线，按档位顺序排列。
+     * 返回 1~4 条线，按档位顺序排列（tier 恒为 i+1，是引擎分桶键，坑 #30）。
      */
     public static List<QuotaConfig.Line> toLines(List<Tier> tiers, List<String> warnings) {
         List<String> w = warnings == null ? new ArrayList<>() : warnings;
@@ -63,7 +63,7 @@ public final class QuotaTiers {
             if (tier == null) {
                 // 缺档：按该档默认处理（含默认开关状态）
                 if (def.enabled()) {
-                    lines.add(new QuotaConfig.Line(DurationParser.parseSeconds(def.window()), def.limit()));
+                    lines.add(new QuotaConfig.Line(i + 1, DurationParser.parseSeconds(def.window()), def.limit()));
                 }
                 continue;
             }
@@ -80,10 +80,10 @@ public final class QuotaTiers {
                     || !Double.isFinite(tier.limit()) || tier.limit() <= 0) {
                 w.add("第 " + (i + 1) + " 档额度线非法（window=" + tier.window() + ", limit=" + tier.limit()
                         + "），已回退该档默认（" + def.window() + "/" + def.limit() + "）");
-                lines.add(new QuotaConfig.Line(DurationParser.parseSeconds(def.window()), def.limit()));
+                lines.add(new QuotaConfig.Line(i + 1, DurationParser.parseSeconds(def.window()), def.limit()));
                 continue;
             }
-            lines.add(new QuotaConfig.Line(windowSeconds, tier.limit()));
+            lines.add(new QuotaConfig.Line(i + 1, windowSeconds, tier.limit()));
         }
         if (lines.isEmpty()) {
             w.add("所有额度档均已禁用或非法，已回退默认两条（5h/500 + 24h/2000）");
