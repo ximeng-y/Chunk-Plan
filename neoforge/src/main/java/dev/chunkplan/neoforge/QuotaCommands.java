@@ -292,9 +292,21 @@ public final class QuotaCommands {
             String notified = anyOnline
                     ? (zh ? "（已通知在线玩家）" : " (notified in-game)")
                     : (zh ? "（目标玩家均离线，未通知）" : " (all targets offline, not notified)");
+            // 坑 #32：反馈按重置范围说明（非全部重置显示窗口名，与确认提示一致；findLine 空判为防御）
+            String zhScope;
+            String enScope;
+            if (r.tiers() == null) {
+                zhScope = "全部";
+                enScope = "all windows";
+            } else {
+                int t = r.tiers().iterator().next();
+                QuotaConfig.Line ln = findLine(eng, t);
+                zhScope = ln == null ? "tier" + t : ChunkPlanMessages.windowName(ln.windowSeconds(), true);
+                enScope = ln == null ? "tier" + t : ChunkPlanMessages.windowName(ln.windowSeconds(), false).toLowerCase();
+            }
             ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
-                    "§a已重置 " + who + " 的探索额度消费（已探索集合保留）" + notified,
-                    "§aReset " + who + "'s exploration quota spending (explored chunks kept)." + notified)), true);
+                    "§a已重置 " + who + " 的 " + zhScope + " 额度限制（已探索集合保留）" + notified,
+                    "§aReset " + who + "'s quota for " + enScope + " (explored chunks kept)." + notified)), true);
             return 1;
         }
         if (req instanceof PendingAction.DisableWindow d) {
@@ -343,8 +355,11 @@ public final class QuotaCommands {
                 List<String> warnings = loadAndApplyConfig(ctx);
                 String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
                 ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
-                        "§a已调整 tier" + l.tier() + " 额度为 " + l.rawValue(),
-                        "§aAdjusted tier" + l.tier() + " limit to " + l.rawValue()) + warning), true);
+                        // 坑 #32：窗口名化（与 windowLimit 调高反馈一致）
+                        "§a已调整 " + ChunkPlanMessages.windowName(findLine(eng, l.tier()).windowSeconds(), true)
+                                + " 额度为 §b" + l.rawValue() + "§a",
+                        "§aAdjusted " + ChunkPlanMessages.windowName(findLine(eng, l.tier()).windowSeconds(), false)
+                                .toLowerCase() + " limit to §b" + l.rawValue() + "§a") + warning), true);
                 return 1;
             } catch (IOException e) {
                 org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("confirm 调整额度失败", e);
@@ -464,8 +479,10 @@ public final class QuotaCommands {
             String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
             long secs = DurationParser.parseSeconds(windowArg); // 预置值，解析必成功
             ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
-                    "§a已调整 tier" + tier + " 窗口为 §b" + ChunkPlanMessages.windowName(secs, true) + "§a 内刷新",
-                    "§aAdjusted tier" + tier + " window to §b" + ChunkPlanMessages.windowName(secs, false) + "§a")
+                    // 坑 #32：窗口名化（不再显示 tierX；时长已按预置校验）
+                    "§a已调整计费窗口刷新时长为 §b" + ChunkPlanMessages.windowName(secs, true) + "§a",
+                    "§aAdjusted billing window refresh duration to §b"
+                            + ChunkPlanMessages.windowName(secs, false).toLowerCase() + "§a")
                     + warning), true);
             return 1;
         } catch (IOException e) {
@@ -544,9 +561,12 @@ public final class QuotaCommands {
             // 调低：可能引发在线玩家无警告踢出 -> confirm
             pending = new PendingAction.LowerLimit(tier, raw, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS);
             boolean zh = isZh(ctx);
+            // 坑 #32：前置提示窗口名化（与 reset 确认提示一致）
+            String winZh = ChunkPlanMessages.windowName(line.windowSeconds(), true);
+            String winEn = ChunkPlanMessages.windowName(line.windowSeconds(), false).toLowerCase();
             Component msg = Component.literal(t(ctx,
-                    "§a将把 tier" + tier + " 额度从 §b" + line.limit() + "§a 调低至 §b" + raw + "§a，可能引发部分玩家被无警告踢出，",
-                    "§aThis will lower tier" + tier + " limit from §b" + line.limit() + "§a to §b" + raw
+                    "§a将把 " + winZh + " 额度从 §b" + line.limit() + "§a 调低至 §b" + raw + "§a，可能引发部分玩家被无警告踢出，",
+                    "§aThis will lower " + winEn + " limit from §b" + line.limit() + "§a to §b" + raw
                             + "§a; some players may be kicked without warning, "))
                     .append(ChunkPlanMessages.confirmLink(zh));
             ctx.getSource().sendSuccess(() -> msg, true);
@@ -557,8 +577,10 @@ public final class QuotaCommands {
             List<String> warnings = loadAndApplyConfig(ctx);
             String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
             ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
-                    "§a已调整 tier" + tier + " 额度为 §b" + raw + "§a",
-                    "§aAdjusted tier" + tier + " limit to §b" + raw + "§a") + warning), true);
+                    // 坑 #32：窗口名化
+                    "§a已调整 " + ChunkPlanMessages.windowName(line.windowSeconds(), true) + " 额度为 §b" + raw + "§a",
+                    "§aAdjusted " + ChunkPlanMessages.windowName(line.windowSeconds(), false).toLowerCase()
+                            + " limit to §b" + raw + "§a") + warning), true);
             return 1;
         } catch (IOException e) {
             org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("写入配置失败", e);

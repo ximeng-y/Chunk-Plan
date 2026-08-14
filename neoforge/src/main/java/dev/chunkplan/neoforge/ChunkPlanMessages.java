@@ -6,8 +6,10 @@ import java.time.format.DateTimeFormatter;
 
 import dev.chunkplan.common.QuotaConfig;
 import dev.chunkplan.common.QuotaEngine;
+import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.HoverEvent;
 
 /**
  * 玩家可见消息渲染（按玩家客户端语言逐玩家选择中/英文文案，坑 #22）。
@@ -237,18 +239,24 @@ public final class ChunkPlanMessages {
         sb.append(zh ? "\n§f您可以使用 §a/chunkplan check §f命令来查阅您的详细额度，"
                      : "\n§fYou can use §a/chunkplan check §f to view your detailed quota, ");
         String link = zh ? "点击此处查看详细计费规则" : "Click here to view detailed billing rules";
-        return Component.literal(sb.toString()).append(Component.literal(link)
-                .withStyle(s -> s.withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/chunkplan rules"))));
+        // 坑 #32：链接样式与 confirmLink 统一（黄 §e + [] 包裹 + hover 悬停）
+        return Component.literal(sb.toString()).append(Component.literal("[" + link + "]")
+                .withStyle(s -> s.withColor(ChatFormatting.YELLOW)
+                        .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/chunkplan rules"))
+                        .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, Component.literal(link)))));
     }
 
     /**
-     * 确认超链接（坑 #30）：点击执行 /chunkplan confirm。
-     * 用于 reset / 关闭窗口 / 调低额度的待确认提示尾部，复用坑 #28 的 ClickEvent 模式。
+     * 确认超链接（坑 #30/坑 #32）：点击执行 /chunkplan confirm。
+     * 用于 reset / 关闭窗口 / 调低额度的待确认提示尾部；坑 #32 起统一链接样式：
+     * 黄 §e + [] 包裹 + hover 悬停（文本为链接自身文字），提示管理员可点击。
      */
     public static Component confirmLink(boolean zh) {
         String link = zh ? "点击此处进行确认" : "Click here to confirm";
-        return Component.literal(link)
-                .withStyle(s -> s.withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/chunkplan confirm")));
+        return Component.literal("[" + link + "]")
+                .withStyle(s -> s.withColor(ChatFormatting.YELLOW)
+                        .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/chunkplan confirm"))
+                        .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, Component.literal(link))));
     }
 
     /**
@@ -257,25 +265,27 @@ public final class ChunkPlanMessages {
      */
     public static String helpMessage(boolean zh) {
         if (zh) {
+            // 坑 #32：标签措辞（调整计费窗口开关/刷新时长/额度上限/高速移动倍率/开关管理员计费），
+            // 管道参数加空格（<true | false> 等，纯展示，不影响实际输入）
             return "§e--- ChunkPlan 管理员帮助 ---\n"
                     + "§f查询：§a/chunkplan check [玩家]\n"
-                    + "§f重置：§a/chunkplan reset <玩家|@a> [tier1|tier2|tier3|tier4|all]§f，执行后点击消息中的确认链接（60 秒内有效）\n"
-                    + "§f窗口开关：§a/chunkplan config window <tier1|tier2|tier3|tier4|all> <on|off>§f，关闭会清空该窗口所有玩家记录，需确认\n"
-                    + "§f窗口时长：§a/chunkplan config windowTime <tier1..tier4> <时长>§f，时长从补全列表选择（如 5h/24h）\n"
-                    + "§f额度上限：§a/chunkplan config windowLimit <tier1..tier4> <数值>§f，调低可能踢出已超限玩家，需确认\n"
-                    + "§f高速倍率：§a/chunkplan config highSpeedMultiplier <数值>§f（1.00~1000.00）\n"
-                    + "§f默认豁免：§a/chunkplan config exemptByDefault <true|false>\n"
+                    + "§f重置：§a/chunkplan reset <玩家 | @a> [tier1 | tier2 | tier3 | tier4 | all]§f，执行后点击消息中的确认链接（60 秒内有效）\n"
+                    + "§f调整计费窗口开关：§a/chunkplan config window <tier1 | tier2 | tier3 | tier4 | all> <on | off>§f，关闭会清空该窗口所有玩家记录，需确认\n"
+                    + "§f调整计费窗口刷新时长：§a/chunkplan config windowTime <tier1..tier4> <时长>§f，时长从补全列表选择（如 5h/24h）\n"
+                    + "§f调整额度上限：§a/chunkplan config windowLimit <tier1..tier4> <数值>§f，调低可能踢出已超限玩家，需确认\n"
+                    + "§f高速移动倍率：§a/chunkplan config highSpeedMultiplier <数值>§f（1.00~1000.00）\n"
+                    + "§f开关管理员计费：§a/chunkplan config exemptByDefault <true | false>\n"
                     + "§f重载配置：§a/chunkplan reload\n"
                     + "§7数值允许整数或最多 2 位小数；所有修改写入配置文件并立即生效";
         }
         return "§e--- ChunkPlan Admin Help ---\n"
                 + "§fQuery: §a/chunkplan check [player]\n"
-                + "§fReset: §a/chunkplan reset <player|@a> [tier1|tier2|tier3|tier4|all]§f - click the confirm link in the message (valid for 60s)\n"
-                + "§fWindows: §a/chunkplan config window <tier1|tier2|tier3|tier4|all> <on|off>§f - disabling clears that window's records for all players (needs confirmation)\n"
-                + "§fWindow time: §a/chunkplan config windowTime <tier1..tier4> <duration>§f - pick from the tab-completed presets (e.g. 5h/24h)\n"
-                + "§fWindow limit: §a/chunkplan config windowLimit <tier1..tier4> <number>§f - lowering may kick players who now exceed (needs confirmation)\n"
-                + "§fHigh-speed multiplier: §a/chunkplan config highSpeedMultiplier <number>§f (1.00~1000.00)\n"
-                + "§fDefault exempt: §a/chunkplan config exemptByDefault <true|false>\n"
+                + "§fReset: §a/chunkplan reset <player | @a> [tier1 | tier2 | tier3 | tier4 | all]§f - click the confirm link in the message (valid for 60s)\n"
+                + "§fToggle billing windows: §a/chunkplan config window <tier1 | tier2 | tier3 | tier4 | all> <on | off>§f - disabling clears that window's records for all players (needs confirmation)\n"
+                + "§fAdjust billing window refresh: §a/chunkplan config windowTime <tier1..tier4> <duration>§f - pick from the tab-completed presets (e.g. 5h/24h)\n"
+                + "§fAdjust window limit: §a/chunkplan config windowLimit <tier1..tier4> <number>§f - lowering may kick players who now exceed (needs confirmation)\n"
+                + "§fHigh-speed movement multiplier: §a/chunkplan config highSpeedMultiplier <number>§f (1.00~1000.00)\n"
+                + "§fToggle admin billing: §a/chunkplan config exemptByDefault <true | false>\n"
                 + "§fReload: §a/chunkplan reload\n"
                 + "§7Numbers may be integers or up to 2 decimals; all changes are written to the config file and take effect immediately";
     }
@@ -289,20 +299,21 @@ public final class ChunkPlanMessages {
         String familiar = String.valueOf(config.familiarEntryFee());
         String mult = String.valueOf(config.highSpeedMultiplier()) + "x";
         if (zh) {
-            return "§fChunkPlan计费规则：\n"
-                    + "1.踏入从未踏入过的区块，消耗" + first + "探索额度\n"
-                    + "2.踏入曾经踏入过的区块，消耗" + familiar + "探索额度\n"
-                    + "3.使用鞘翅、创造模式飞行等方式（原版无药水效果疾跑不属于此类）快速移动时，消耗的探索额度倍率提升至" + mult + "\n"
-                    + "4.计费额度分为多个计时窗口，任意一个计时窗口达到上限都会导致您被服务器暂时封禁。您可以使用§a/chunkplan check§f命令来查阅您的详细额度\n"
-                    + "5.服务器管理员有权重置某个玩家的探索额度\n"
-                    + "请注意：您的所有探索额度限制都来自服务器管理员的配置，有任何问题请咨询您的服务器管理员";
+            // 坑 #32 配色层级：标题/编号 §b 浅蓝、正文 §f 白、指令 §a 绿、数值与注意段 §e 黄
+            return "§bChunkPlan计费规则：\n"
+                    + "§b1.§f踏入从未踏入过的区块，消耗§e" + first + "§f探索额度\n"
+                    + "§b2.§f踏入曾经踏入过的区块，消耗§e" + familiar + "§f探索额度\n"
+                    + "§b3.§f使用鞘翅、创造模式飞行等方式（原版无药水效果疾跑不属于此类）快速移动时，消耗的探索额度倍率提升至§e" + mult + "§f\n"
+                    + "§b4.§f计费额度分为多个计时窗口，任意一个计时窗口达到上限都会导致您被服务器暂时封禁。您可以使用§a/chunkplan check§f命令来查阅您的详细额度\n"
+                    + "§b5.§f服务器管理员有权重置某个玩家的探索额度\n"
+                    + "§e请注意：您的所有探索额度限制都来自服务器管理员的配置，有任何问题请咨询您的服务器管理员";
         }
-        return "§fChunkPlan billing rules:\n"
-                + "1. Entering a chunk never explored before costs " + first + " exploration quota\n"
-                + "2. Entering a previously explored chunk costs " + familiar + " exploration quota\n"
-                + "3. Fast movement (elytra, creative flight, etc.; vanilla sprint without potion effects is NOT included) multiplies the cost to " + mult + "\n"
-                + "4. Quota is tracked in multiple timed windows; exceeding the limit of ANY window results in a temporary ban. Use §a/chunkplan check§f to view your detailed quota\n"
-                + "5. Server admins can reset a player's exploration quota\n"
-                + "Note: all exploration quota limits come from the server admin's configuration; contact your server admin with any questions.";
+        return "§bChunkPlan billing rules:\n"
+                + "§b1.§f Entering a chunk never explored before costs §e" + first + "§f exploration quota\n"
+                + "§b2.§f Entering a previously explored chunk costs §e" + familiar + "§f exploration quota\n"
+                + "§b3.§f Fast movement (elytra, creative flight, etc.; vanilla sprint without potion effects is NOT included) multiplies the cost to §e" + mult + "§f\n"
+                + "§b4.§f Quota is tracked in multiple timed windows; exceeding the limit of ANY window results in a temporary ban. Use §a/chunkplan check§f to view your detailed quota\n"
+                + "§b5.§f Server admins can reset a player's exploration quota\n"
+                + "§eNote: all exploration quota limits come from the server admin's configuration; contact your server admin with any questions.";
     }
 }

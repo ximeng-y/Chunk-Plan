@@ -123,6 +123,12 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **Fabric 写路径损坏兜底**：`FabricConfig.readRoot` 原直接 `Gson.fromJson` 抛非受检 JsonSyntaxException 穿透命令层 catch(IOException) → 改为复用 `AtomicFile.readJson`（.bak 兜底恢复，主与 .bak 均坏抛 IOException 拒绝写入）
     - **写失败反馈去路径（Security LOW）**：config 命令族全部 catch 分支反馈固定文案"写入配置失败，详见服务端日志"（坑 #24 禁路径不变量），异常详情只进服务端日志；失败返回码统一 0
     - 测试 88 → 96（`QuotaTiersTest` 全禁改零线 + 全非法回退该档默认 + disabled 不校验；`QuotaConfigTest` 空列表零线 + 全非法丢弃回退默认；`QuotaEngineTest` 零线不记账不加载/永不判满/状态空/重开首 tick 不扣费/清档立即落盘）
+32. **链接样式 + 反馈窗口名化 + help/rules 措辞配色（坑 #32，纯壳层文案，测试不变）**：
+    - **链接样式统一**：confirmLink（点击此处进行确认）与 alert 尾部规则链接（点击此处查看详细计费规则）同为——黄 §e + `[]` 包裹 + hover 悬停（`HoverEvent.Action.SHOW_TEXT`，悬停文本=链接自身文字，提示管理员可点击）。**1.21.1 无 `HoverEvent.ShowText` 包装类**（编译踩坑后 javap 实证），`new HoverEvent(HoverEvent.Action.SHOW_TEXT, Component.literal(...))` 直接收 Component；样式经 `withStyle(s -> s.withColor(ChatFormatting.YELLOW).withClickEvent(...).withHoverEvent(...))`
+    - **help 措辞（双端 helpMessage 同步）**：标签更名——调整计费窗口开关 / 调整计费窗口刷新时长 / 调整额度上限 / 高速移动倍率 / 开关管理员计费（exemptByDefault，语义"开关管理员计费"）；**所有管道参数加空格**（`<true | false>`、`<on | off>`、`<玩家 | @a>`、`[tier1 | tier2 | tier3 | tier4 | all]`，纯展示不影响实际输入）
+    - **反馈窗口名化（QuotaCommands 同步）**：reset confirm 反馈按范围显示窗口名（"已重置 X 的 1天内 额度限制（已探索集合保留）"，全部时"全部"；与确认提示同款 windowName，findLine 空判防御）；windowLimit 前置提示与调高/调低反馈（"将把 5小时内 额度从 …调低至…" / "已调整 5小时内 额度为 …"）；windowTime 反馈（"已调整计费窗口刷新时长为 5小时内"）。**错误提示保留 tierX 字样**（未启用/未知层级/非法预设，管理员排错需要）
+    - **rules 配色层级**：标题与编号 `§b` 浅蓝、正文 `§f` 白、指令（/chunkplan check）`§a` 绿、数值（1.0/0.05/2.0x）与结尾"请注意…"整段 `§e` 黄（数值取管理员配置 String.valueOf 原样）
+    - **实测方法**：rcon 是纯文本通道（样式对象与链接 JSON 不可见）→ 链接样式用 mineflayer 实机验证：`bot._client.on('systemChat')` 事件参数为 `{positionId, formattedMessage}`（非原始包），component 为 NBT 解析对象，直接断言 `color:'yellow'`、`clickEvent.run_command`、`hoverEvent.show_text`；文案断言用 `messagestr` 纯文本（§ 代码已剥离）
 
 ## 约定
 
