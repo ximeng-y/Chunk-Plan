@@ -1,0 +1,15 @@
+pluginManagement {
+    repositories {
+        maven { name = 'Fabric'; url = 'https://maven.fabricmc.net/' }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.8.0'
+}
+
+rootProject.name = 'chunkplan-fabric-multi'
+// 多版本 fabric 子项目（独立 Gradle 构建：Gradle 9.5.1 + Loom 1.17.19，与根构建 Gradle 8.14.2 互不影响）
+include 'fabric-1.21.11', 'fabric-26.1.2', 'fabric-26.2'

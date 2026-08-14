@@ -1,0 +1,1 @@
+// 根构建：仅统一坐标。各子项目独立声明 group/version（与 example-mod 模板一致）。

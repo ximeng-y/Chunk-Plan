@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "${mod_id}",
+  "version": "${mod_version}",
+  "name": "${mod_name}",
+  "description": "探索额度（ChunkPlan）：按玩家实体踏入区块计费的服务端限流 mod。",
+  "authors": ["${mod_authors}"],
+  "license": "All Rights Reserved",
+  "environment": "server",
+  "entrypoints": {
+    "main": ["dev.chunkplan.fabric.ChunkPlanFabric"]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.6",
+    "fabric-api": "*",
+    "minecraft": "=1.21.11",
+    "java": ">=21"
+  }
+}

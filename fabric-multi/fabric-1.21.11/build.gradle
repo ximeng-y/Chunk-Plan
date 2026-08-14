@@ -1,0 +1,44 @@
+// fabric-1.21.11：混淆版（最后一代），Loom remap 插件 + 官方 mojmap（与根构建 fabric 1.21.1 对齐）
+plugins {
+    id 'java'
+    id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+}
+
+group = 'dev.chunkplan'
+version = project.mod_version
+
+base {
+    archivesName = 'chunkplan-fabric-1.21.11'
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of("${java_version}" as int)
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraft_version}"
+    mappings loom.officialMojangMappings()
+    modImplementation "net.fabricmc:fabric-loader:${fabric_loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
+}
+
+// common 引擎 + 多版本共享壳层源码并入本模块编译（发布 jar 直接包含 common 类）；
+// 跨版本编译失败的类从 shared 移出放本模块 src/main/java（坑 #33）
+sourceSets {
+    main {
+        java.srcDir '../shared/src/main/java'
+        java.srcDir '../../common/src/main/java'
+    }
+}
+
+processResources {
+    inputs.property 'mod_id', "${mod_id}"
+    inputs.property 'mod_name', "${mod_name}"
+    inputs.property 'mod_version', "${mod_version}"
+    inputs.property 'mod_authors', "${mod_authors}"
+    inputs.property 'minecraft_version', "${minecraft_version}"
+    filesMatching('fabric.mod.json') {
+        expand 'mod_id': "${mod_id}", 'mod_name': "${mod_name}", 'mod_version': "${mod_version}",
+                'mod_authors': "${mod_authors}", 'minecraft_version': "${minecraft_version}"
+    }
+}
