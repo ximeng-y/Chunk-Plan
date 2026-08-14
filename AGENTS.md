@@ -14,12 +14,13 @@ ChunkPlan（modid=`chunkplan`，中文名「探索额度」）是**纯服务端*
 common/     纯 Java 记账引擎，零 Minecraft/加载器 import（仅 Gson + slf4j，双端内置）
 neoforge/   NeoForge 21.1.176 薄壳：事件 -> QuotaEngine
 fabric/     Fabric 1.21.1 薄壳（官方 mojmap，与 neoforge 代码对齐）
+fabric-multi/ Fabric 多版本独立构建（1.21.11/26.1.2/26.2，坑 #33）：shared/ 共享壳层源码 + 每版本薄模块
 ```
 
 - **壳→core 单向依赖**：壳每 tick 调 `engine.onPlayerTick(uuid, exempt, dimKey, x, y, z)`，返回动作由壳执行（disconnect + UserBanList）
 - **common 源码并入 neoforge 模块编译**（sourceSets 的 java.srcDir），不用 jarJar —— 原因见"已知坑 #1"
-- fabric 用 Loom `include project(':common')`
-- 版本矩阵以 `gradle.properties` 为准（Gradle 8.14.2 是 NeoGradle 7 与 Loom 1.13 的兼容交集）
+- fabric 1.21.1 用 `implementation project(':common')` + sourceSets 源码并入；fabric-multi 各版本用相对路径 srcDir 并入（不用 `include()`，坑 #33）
+- 版本矩阵以 `gradle.properties` 为准（Gradle 8.14.2 是 NeoGradle 7 与 Loom 1.13 的兼容交集）；fabric-multi 为**独立构建**（Gradle 9.5.1 + Loom 1.17.19 + JDK 21/25 toolchain，坑 #33）
 
 ## 产品规格（与用户逐条确认，勿改）
 
@@ -50,15 +51,22 @@ fabric/     Fabric 1.21.1 薄壳（官方 mojmap，与 neoforge 代码对齐）
 
 ```bash
 export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x64"
-.XMTEMP/gradle-8.14.2/bin/gradle :common:test        # 引擎单测（88 个，全绿为验收前提）
+.XMTEMP/gradle-8.14.2/bin/gradle :common:test        # 引擎单测（96 个，全绿为验收前提）
 .XMTEMP/gradle-8.14.2/bin/gradle build               # 三模块编译 + 打包
 .XMTEMP/gradle-8.14.2/bin/gradle :neoforge:runServer # dev 服务器（工作目录 neoforge/runs/server/）
 .XMTEMP/gradle-8.14.2/bin/gradle :fabric:runServer   # dev 服务器（工作目录 fabric/run/）
+
+# fabric 多版本（独立构建，坑 #33；run 目录 fabric-multi/fabric-<版本>/run/）
+.XMTEMP/gradle-9.5.1/bin/gradle -p fabric-multi build                        # 三版本编译 + 打包
+.XMTEMP/gradle-9.5.1/bin/gradle -p fabric-multi :fabric-1.21.11:runServer
+.XMTEMP/gradle-9.5.1/bin/gradle -p fabric-multi :fabric-26.1.2:runServer
+.XMTEMP/gradle-9.5.1/bin/gradle -p fabric-multi :fabric-26.2:runServer
 ```
 
 - 首次启动需 `eula.txt`（`eula=true`）；run 目录已被 gitignore 排除
 - **NeoGradle/Loom 均不转发 stdin 给服务器控制台** → 命令验证用 rcon：dev 环境改 `server.properties` 开 rcon，用 `.XMTEMP/rcon.py` 发命令（脚本不入库）
 - 玩家行为实测（踏入计费/踢出/ban 全链路）需要游戏客户端，服务端启动与命令链路可无客户端验证
+- **1.21.11+/26.x dev 服务器必须在 `server.properties` 设 `pause-when-empty-seconds=0`**（默认 60：无真实玩家即暂停全部 tick，mock 不计入 PlayerList 会被暂停，坑 #33）
 
 ## 已知坑（已踩过，勿重蹈）
 
@@ -129,12 +137,27 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **反馈窗口名化（QuotaCommands 同步）**：reset confirm 反馈按范围显示窗口名（"已重置 X 的 1天内 额度限制（已探索集合保留）"，全部时"全部"；与确认提示同款 windowName，findLine 空判防御）；windowLimit 前置提示与调高/调低反馈（"将把 5小时内 额度从 …调低至…" / "已调整 5小时内 额度为 …"）；windowTime 反馈（"已调整计费窗口刷新时长为 5小时内"）。**错误提示保留 tierX 字样**（未启用/未知层级/非法预设，管理员排错需要）
     - **rules 配色层级**：标题与编号 `§b` 浅蓝、正文 `§f` 白、指令（/chunkplan check）`§a` 绿、数值（1.0/0.05/2.0x）与结尾"请注意…"整段 `§e` 黄（数值取管理员配置 String.valueOf 原样）
     - **实测方法**：rcon 是纯文本通道（样式对象与链接 JSON 不可见）→ 链接样式用 mineflayer 实机验证：`bot._client.on('systemChat')` 事件参数为 `{positionId, formattedMessage}`（非原始包），component 为 NBT 解析对象，直接断言 `color:'yellow'`、`clickEvent.run_command`、`hoverEvent.show_text`；文案断言用 `messagestr` 纯文本（§ 代码已剥离）
+33. **fabric 多版本适配（坑 #33，独立构建 + 1.21.11 API 断层，2026-08-14）**：
+    - **结构**：`fabric-multi/` 是**独立 Gradle 构建**（自带 settings.gradle，命令加 `-p fabric-multi`），根构建（NeoGradle 7 钉在 Gradle 8.14.2）与 26.x（Gradle 9.5 + JDK 25）无法共存。`shared/src/main/java/` 一份壳层源码（5 类，从 fabric 1.21.1 拷贝后迁移）供三版本 srcDir 共用；跨版本编译不过的类移出放各版本自己的 `src/main/java`（当前无覆盖）；common 纯 Java 源码同样相对路径 srcDir 并入（**不用 `include()`**——Loom 26.2 的 include() 有未闭合 issue #1588）。产物按 `archivesName` 区分：`chunkplan-fabric-<版本>-0.1.0.jar`
+    - **工具链矩阵**（fabric-multi/gradle.properties）：Loom **1.17.19**（同一 jar 提供两个插件 id）、loader **0.19.3**。1.21.11（最后一代混淆版）用 `net.fabricmc.fabric-loom-remap` + `mappings loom.officialMojangMappings()` + `modImplementation` + **JDK 21**；26.x（非混淆：官方名内嵌、无 yarn、版本 JSON 无映射、intermediary 为占位符）用 `net.fabricmc.fabric-loom` + **无 mappings** + `implementation`（官方 26.1 迁移博客：modImplementation→implementation、remapJar→jar）+ **JDK 25**。fabric-api：0.141.6+1.21.11 / 0.155.2+26.1.2 / 0.157.0+26.2。fabric.mod.json 依赖下限：1.21.11 `fabricloader>=0.16.6`、`java>=21`；26.x `fabricloader>=0.18.2`（0.18.0 起支持非混淆、0.18.2 起支持日期式版本号）、`java>=25`；minecraft 严格等号 pin。JDK 25 = `D:\Games\ABOUT_MINECRAFT\JAVA\zulu25.30.17-ca-jdk25.0.1-win_x64`（fabric-multi/gradle.properties 的 installations.paths 同时列 JDK 21 与 25）
+    - **1.21.11 API 断层**（26.x 同代，全部 javap 实证；fabric-multi/shared 用新 API，neoforge 与 fabric 1.21.1 用旧 API，**两代永久分叉**）：
+      - `GameProfile` 变 **Record**（authlib 7.0.61+）：`getName()/getId()` → `name()/id()`
+      - 权限：`CommandSourceStack.hasPermission(int)` 与 `ServerPlayer.hasPermissions(int)` 删除 → `permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.byId(n)))`（PermissionLevel 枚举 ALL/MODERATORS/GAMEMASTERS/ADMINS/OWNERS = 0~4 级）；`DevCommands` 新增 `hasPermission(CommandSourceStack/ServerPlayer, int)` 双重载，QuotaCommands requires 与 ChunkPlanFabric 豁免判定复用
+      - profile 解析：`MinecraftServer.getProfileCache()` 删除（GameProfileCache 类移除）→ `server.services().profileResolver().fetchByName/fetchById`（ProfileResolver 接口，底层 UserNameToIdResolver + NameAndId）；离线模式 fetchByName 可能产生标题化名称的缓存条目（authlib 行为，坑 #9 usercache 污染同源），resolvePlayer 顺序不变：在线实体 > UUID 直解 > resolver
+      - 封禁/OP 列表：`UserBanList.get/remove` 与 `ServerOpListEntry` 改收 **`NameAndId`**（`new NameAndId(profile)` 转换；`getKeyForUser`=uuid 字符串）；`UserBanListEntry` 5 参构造收 NameAndId；`ServerOpListEntry` 第 2 参改 `LevelBasedPermissionSet.forLevel(PermissionLevel.GAMEMASTERS)`（原 int 2）
+      - 文本事件：`ClickEvent`/`HoverEvent` 变**接口** → `new ClickEvent.RunCommand("/...")`、`new HoverEvent.ShowText(Component)`；注意 1.21.1 反而**无** ShowText 包装类（坑 #32），两代写法相反
+      - 出生点：`ServerLevel.getSharedSpawnPos()` 删除 → `level.getRespawnData().pos()`（数据驱动世界 RespawnData record）；**26.2 又删 `BlockPos.getCenter()`** → 统一 `Vec3.atCenterOf(pos)`（1.21.11/26.2 都有）
+      - Entity：`kill()` → `kill((ServerLevel) player.level())`；`moveTo(BlockPos,float,float)` 全删 → `teleportTo(double,double,double)`（mock 生成定位）；`Entity/ServerPlayer.getServer()` 删除、`ServerPlayer.server` 字段变 private → `player.level().getServer()`
+      - `ResourceKey.location()` → `identifier()`（dimension().identifier().toString()）
+    - **dev 服务器自动暂停（实测大坑）**：1.21.11+/26.x server.properties 新增 `pause-when-empty-seconds`（默认 60）——无真实玩家（**mock 不进 PlayerList 不计入**）60 秒后暂停**全部 tick** → 壳层每 tick 计费/扫描停摆（曾把"调高上限后不解封"误判为 scanBans 失效，实为服务器暂停）。dev 冒烟必须设 `pause-when-empty-seconds=0`（已写进三个 run 目录的 server.properties）；且 run/config 的配置跨会话持久化（如 tier1Limit 遗留），冒烟前后注意恢复默认
+    - **镜像纪律扩展**：改文案/命令仍须三处同步（neoforge、fabric 1.21.1、fabric-multi/shared）；**API 差异行不属于同步范围**（neoforge/fabric 1.21.1 旧 API vs fabric-multi 新 API），同步只针对业务逻辑与文案
+    - **验证**：common 96 测试不变；三版本 `build` + dev 服务器 rcon 冒烟全链路通过（计费 2.0=1.0×2 高速、调低上限当场踢出、ban 记录 source=ChunkPlan、恢复上限后 scanBans 自动解封）。**fabric 1.21.1 未经实机验证（仅 NeoForge 实机验证过），fabric 实机验收以 1.21.11 为准**（用户 2026-08-14 声明）；26.x 实机待用户意愿
 
 ## 约定
 
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
 - 双端配置结构保持一致（TOML 与 JSON 字段一一对应）
-- 双端 `DevCommands`/`QuotaCommands`/`applyBan`/`scanBans` 逐字重复（架构决定无法下沉 common）→ **改一处必须同步另一端**
-- MC 版本范围已收紧为仅 1.21.1（双端元数据），不得放宽到未测试版本
-- 不做：mixin、客户端内容、指令式配置、多 MC 版本；26.x 迁移只适配壳层
+- 双端 `DevCommands`/`QuotaCommands`/`applyBan`/`scanBans` 逐字重复（架构决定无法下沉 common）→ **改一处必须同步另一端**（三处：neoforge、fabric/1.21.1、fabric-multi/shared，坑 #33；API 差异行除外）
+- MC 版本范围：neoforge 与 fabric 1.21.1 仅 1.21.1；fabric-multi 额外支持 1.21.11/26.1.2/26.2（坑 #33），不得再放宽到未测试版本
+- 不做：mixin、客户端内容、指令式配置；26.x 迁移只适配壳层（fabric 侧已落地为 fabric-multi，neoforge 仍仅 1.21.1）
