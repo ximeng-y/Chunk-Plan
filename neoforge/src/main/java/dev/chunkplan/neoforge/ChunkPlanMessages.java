@@ -210,7 +210,9 @@ public final class ChunkPlanMessages {
                 case HIGH -> sb.append("! Your exploration quota is critically low! To avoid losses from a forced kick, please find a safe place to log off, stay on explored chunks, and avoid fast travel such as elytra!");
             }
         }
-        sb.append("\n§f您可以使用 §a/chunkplan check §f命令来查阅您的详细额度，");
+        // 固定尾部（双语）：白色，check 命令浅绿；链接文本按语言
+        sb.append(zh ? "\n§f您可以使用 §a/chunkplan check §f命令来查阅您的详细额度，"
+                     : "\n§fYou can use §a/chunkplan check §f to view your detailed quota, ");
         String link = zh ? "点击此处查看详细计费规则" : "Click here to view detailed billing rules";
         return Component.literal(sb.toString()).append(Component.literal(link)
                 .withStyle(s -> s.withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/chunkplan rules"))));
