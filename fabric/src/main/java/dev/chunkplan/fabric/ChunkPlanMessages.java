@@ -151,7 +151,26 @@ public final class ChunkPlanMessages {
             String recover = formatTime(status.recoveryMillis());
             sb.append(zh ? "\n§c  已耗尽，预计 " : "\n§c  Exhausted, recovers at ").append(recover).append(zh ? " 恢复" : "");
         } else {
-            sb.append(zh ? "\n§a  未满，可正常探索" : "\n§a  Under limit, exploration allowed");
+            // 坑 #29：档位词按连续百分比区间（<50 充足 / <75 中等 / ≥75 不足），无档归充足；
+            // 跨窗口取最严重档位，跟随当前状态（额度滑出/重置自动回落）
+            int pct = status.worstAlert() == null ? -1 : status.worstAlert().percent();
+            if (zh) {
+                if (pct < 50) {
+                    sb.append("\n§a  额度充足，可正常探索");
+                } else if (pct < 75) {
+                    sb.append("\n§e  额度中等，请注意控制探索消耗");
+                } else {
+                    sb.append("\n§c  额度不足，请谨慎探索，防止额度耗尽");
+                }
+            } else {
+                if (pct < 50) {
+                    sb.append("\n§a  Plenty of quota, exploration allowed");
+                } else if (pct < 75) {
+                    sb.append("\n§e  Moderate quota, watch your exploration spending");
+                } else {
+                    sb.append("\n§c  Quota is low, explore carefully to avoid exhausting it");
+                }
+            }
         }
         // 豁免状态提示（坑 #21：OP 默认豁免是设计语义，显式告知避免误判为故障；金色强调）
         if (isExempt) {

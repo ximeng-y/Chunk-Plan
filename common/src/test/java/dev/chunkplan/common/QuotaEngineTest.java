@@ -2,6 +2,8 @@ package dev.chunkplan.common;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
@@ -565,5 +567,77 @@ class QuotaEngineTest {
         var r = engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0); // 4.0 -> BAN
         assertEquals(QuotaEngine.ResultType.BAN, r.type());
         assertTrue(r.alerts().isEmpty());
+    }
+
+    // ---------- 坑 #29：check 档位词（quotaStatus.worstAlert） ----------
+
+    @Test
+    void worstAlertNullWhenUnder15Percent() {
+        // 单窗口 limit=10：+1.0/区块 = +10%。10% 无档 -> worstAlert null
+        setAlertConfig();
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        assertNull(engine.quotaStatus(player).worstAlert());
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0); // 10%
+        assertNull(engine.quotaStatus(player).worstAlert());
+        engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0); // 20% -> 15 档
+        assertEquals(15, engine.quotaStatus(player).worstAlert().percent());
+    }
+
+    @Test
+    void worstAlertPercentByLevel() {
+        // limit=8.0：+1.0 = +12.5% 步进，逐档可控：25%->15、37.5%->30、50%->50、
+        // 62.5%->50、75%->75（≥75 归不足区）、87.5%->85、100%->98
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(new QuotaConfig.Line(60, 8.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        assertNull(engine.quotaStatus(player).worstAlert());
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);  // 12.5%
+        assertNull(engine.quotaStatus(player).worstAlert());
+        engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);  // 25%
+        assertEquals(15, engine.quotaStatus(player).worstAlert().percent());
+        engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0);  // 37.5%
+        assertEquals(30, engine.quotaStatus(player).worstAlert().percent());
+        engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0);  // 50%
+        assertEquals(50, engine.quotaStatus(player).worstAlert().percent());
+        engine.onPlayerTick(player, false, OVERWORLD, 80, 64, 0);  // 62.5%：最高已过档仍 50
+        assertEquals(50, engine.quotaStatus(player).worstAlert().percent());
+        engine.onPlayerTick(player, false, OVERWORLD, 96, 64, 0);  // 75% -> 75 档（≥75 不足区）
+        assertEquals(75, engine.quotaStatus(player).worstAlert().percent());
+        engine.onPlayerTick(player, false, OVERWORLD, 112, 64, 0); // 87.5% -> 85
+        assertEquals(85, engine.quotaStatus(player).worstAlert().percent());
+        engine.onPlayerTick(player, false, OVERWORLD, 128, 64, 0); // 100% -> 98
+        assertEquals(98, engine.quotaStatus(player).worstAlert().percent());
+    }
+
+    @Test
+    void worstAlertTakesHighestAcrossWindows() {
+        // 双窗口：1min/10.0（+10%/区块）+ 2min/100.0（+1%/区块）
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(new QuotaConfig.Line(60, 10.0), new QuotaConfig.Line(120, 100.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        for (int i = 1; i <= 8; i++) {
+            engine.onPlayerTick(player, false, OVERWORLD, i * 16.0, 64, 0); // 1min 线 80%，2min 线 8%
+        }
+        QuotaEngine.WindowAlert worst = engine.quotaStatus(player).worstAlert();
+        assertNotNull(worst);
+        assertEquals(80, worst.percent());
+        assertEquals(60, worst.windowSeconds()); // 取 80% 档所在的 1min 窗口
+    }
+
+    @Test
+    void worstAlertFallsBackAfterWindowSlides() {
+        // 90% -> 档位 90；时钟推进使消费桶滑出 60s 窗口 -> 无档回落 null（跟随当前状态）
+        setAlertConfig();
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        for (int i = 1; i <= 9; i++) {
+            engine.onPlayerTick(player, false, OVERWORLD, i * 16.0, 64, 0);
+        }
+        assertEquals(90, engine.quotaStatus(player).worstAlert().percent());
+        clock.advanceMillis(61_000);
+        assertNull(engine.quotaStatus(player).worstAlert());
     }
 }

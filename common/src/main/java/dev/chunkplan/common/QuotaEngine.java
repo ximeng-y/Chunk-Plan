@@ -71,7 +71,7 @@ public final class QuotaEngine {
     public record LineStatus(long windowSeconds, double limit, double spent, long nextResetMillis) {
     }
 
-    public record QuotaStatus(List<LineStatus> lines, long recoveryMillis, boolean allExceeded) {
+    public record QuotaStatus(List<LineStatus> lines, long recoveryMillis, boolean allExceeded, WindowAlert worstAlert) {
     }
 
     /** 每玩家追踪状态（首 tick / 上一 tick 位置与区块） */
@@ -233,12 +233,14 @@ public final class QuotaEngine {
         return isAllLinesExceeded(data, clock.getAsLong());
     }
 
-    /** /chunkplan check 状态：各线已消费/上限、任一满标志、恢复时间（未满为 -1） */
+    /** /chunkplan check 状态：各线已消费/上限、任一满标志、恢复时间（未满为 -1）、
+     *  当前跨窗口最严重档位（坑 #29：check 档位词显示用，无档为 null） */
     public QuotaStatus quotaStatus(UUID uuid) {
         PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
         long now = clock.getAsLong();
         List<LineStatus> lines = new ArrayList<>();
         boolean any = false;
+        WindowAlert worst = null;
         for (QuotaConfig.Line line : config.lines()) {
             double spent = data.spendInWindow(now, line.windowSeconds());
             // 各线独立的下次重置时间：该线窗口内最早消费桶 + 窗口长（无消费为 -1）。
@@ -253,9 +255,14 @@ public final class QuotaEngine {
             if (spent > line.limit()) {
                 any = true;
             }
+            // 跨窗口取当前百分比最高档位（现算跟随当前状态：额度滑出/重置自动回落，与 alertStates 触发历史解耦）
+            int level = currentLevel(data, line, now);
+            if (level > 0 && (worst == null || level > worst.percent())) {
+                worst = new WindowAlert(line.windowSeconds(), level, severityOf(level));
+            }
         }
         long recovery = any ? recoveryMillis(data, now) : -1;
-        return new QuotaStatus(lines, recovery, any);
+        return new QuotaStatus(lines, recovery, any, worst);
     }
 
     /** /chunkplan reset：只清消费桶，已探索集合终身保留 */
