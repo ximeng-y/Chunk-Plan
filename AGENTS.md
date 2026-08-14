@@ -159,6 +159,7 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **`*` ≠ 客户端必装**：Fabric 无 Forge 式强制 mod 列表同步；ChunkPlan 不注册网络包/注册表条目（无协议级差异）→ 客户端不装可正常连装有本 mod 的服务器（dedicated 冒烟即裸 mineflayer 客户端验证），客户端装了连未装服务器也正常（回调仅在服务器存在时触发）
     - **验证方法**：打包后 unzip 静态检查 jar 内 fabric.mod.json 的 environment（此后 fabric 冒烟阶段应加此检查）；实机判断——日志出现 `[ChunkPlan] ChunkPlan Fabric 壳已注册`、Loading N mods 数量 +1、游戏内有 /chunkplan。单人复测注意坑 #21：单人主机恒权限 4，默认豁免下计费恒 0，须先 `/chunkplan config exemptByDefault false`
 35. **reset 补全套娃（坑 #35，2026-08-15 用户 1.21.11 实机暴露）**：`suggestResetTarget` 原实现只看剩余文本有无空格——只要有空格就无条件建议层级词（tier1~tier4|all），且 greedy 参数建议需含完整剩余文本 → 用户选完层级词后再打空格，补全继续建议 `all all`/`all tier1`… **每选一次建议多一个词，无限套娃**（用户截图实证输入到 `reset ximeng_y tier4 all all`），而 `reset()` 只接受 `<目标> [层级]` 两词（`parts.length>2` 报参数格式错）——补全把用户引导进死路。修复：**按已输入词数分阶段**——第 1 词输入中（零词或一词无尾随空格）补玩家名+选择器；第 2 词（一词尾随空格或两词无尾随空格）补层级词；第 3 词起（两词尾随空格或更多词）**返回空建议**堵死套娃链。三处（neoforge/fabric 1.21.1/fabric-multi shared）同步，API 差异行（getName()/name()）除外；纯壳层，common 测试不变
+36. **reset 在线玩家通知窗口名化（坑 #36，2026-08-15 用户实机要求）**：坑 #32 只把「确认提示 + 管理员反馈」窗口名化了，**被重置玩家的在线通知漏改**（"您的ChunkPlan探索额度已被管理员重置"无窗口信息）——用户实机截图指出（反馈已显示"1天内"而通知没有）。修复：`confirm` Reset 分支把 `zhScope`/`enScope` 计算提前到通知循环前，玩家通知按重置范围显示窗口名——中文嵌入式 `您的1天内探索额度已被管理员重置`（全部时 `您的全部探索额度已被管理员重置`，与坑 #32 反馈同款 windowName）；英文括号式 `Your exploration quota (within 1 day) has been reset by an administrator.`（全部时 `(all windows)`，windowName 英文 toLowerCase）。三处同步；纯壳层，common 测试不变
 
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行

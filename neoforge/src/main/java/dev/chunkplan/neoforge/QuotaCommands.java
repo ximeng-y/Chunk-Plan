@@ -271,28 +271,8 @@ public final class QuotaCommands {
         }
         boolean zh = isZh(ctx);
         if (req instanceof PendingAction.Reset r) {
-            for (UUID uuid : r.targets()) {
-                eng.resetSpend(uuid, r.tiers());
-            }
-            // 在线通知（含 mock 玩家：虚拟连接发送为 no-op，坑 #9）
-            boolean anyOnline = false;
-            for (UUID uuid : r.targets()) {
-                ServerPlayer target = DevCommands.findByUuid(ctx.getSource().getServer(), uuid);
-                if (target != null) {
-                    anyOnline = true;
-                    boolean tzh = ChunkPlanMessages.isChinese(target.clientInformation().language());
-                    target.sendSystemMessage(Component.literal(tzh
-                            ? "您的ChunkPlan探索额度已被管理员重置"
-                            : "Your ChunkPlan exploration quota has been reset by an administrator."));
-                }
-            }
-            String who = r.targets().size() == 1
-                    ? nameOf(ctx.getSource().getServer(), r.targets().get(0))
-                    : (zh ? r.targets().size() + " 名玩家" : r.targets().size() + " players");
-            String notified = anyOnline
-                    ? (zh ? "（已通知在线玩家）" : " (notified in-game)")
-                    : (zh ? "（目标玩家均离线，未通知）" : " (all targets offline, not notified)");
-            // 坑 #32：反馈按重置范围说明（非全部重置显示窗口名，与确认提示一致；findLine 空判为防御）
+            // 坑 #32/坑 #36：窗口名化——玩家通知与管理员反馈统一按重置范围显示窗口名
+            // （非全部重置显示 windowName 如"1天内"，全部时"全部"），与确认提示同款；findLine 空判为防御
             String zhScope;
             String enScope;
             if (r.tiers() == null) {
@@ -304,6 +284,27 @@ public final class QuotaCommands {
                 zhScope = ln == null ? "tier" + t : ChunkPlanMessages.windowName(ln.windowSeconds(), true);
                 enScope = ln == null ? "tier" + t : ChunkPlanMessages.windowName(ln.windowSeconds(), false).toLowerCase();
             }
+            for (UUID uuid : r.targets()) {
+                eng.resetSpend(uuid, r.tiers());
+            }
+            // 在线通知（含 mock 玩家：虚拟连接发送为 no-op，坑 #9）
+            boolean anyOnline = false;
+            for (UUID uuid : r.targets()) {
+                ServerPlayer target = DevCommands.findByUuid(ctx.getSource().getServer(), uuid);
+                if (target != null) {
+                    anyOnline = true;
+                    boolean tzh = ChunkPlanMessages.isChinese(target.clientInformation().language());
+                    target.sendSystemMessage(Component.literal(tzh
+                            ? "您的" + zhScope + "探索额度已被管理员重置"
+                            : "Your exploration quota (" + enScope + ") has been reset by an administrator."));
+                }
+            }
+            String who = r.targets().size() == 1
+                    ? nameOf(ctx.getSource().getServer(), r.targets().get(0))
+                    : (zh ? r.targets().size() + " 名玩家" : r.targets().size() + " players");
+            String notified = anyOnline
+                    ? (zh ? "（已通知在线玩家）" : " (notified in-game)")
+                    : (zh ? "（目标玩家均离线，未通知）" : " (all targets offline, not notified)");
             ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
                     "§a已重置 " + who + " 的 " + zhScope + " 额度限制（已探索集合保留）" + notified,
                     "§aReset " + who + "'s quota for " + enScope + " (explored chunks kept)." + notified)), true);
