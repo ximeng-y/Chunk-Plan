@@ -187,6 +187,11 @@ public final class QuotaEngine {
             alertStates.remove(uuid);
             return TickResult.none();
         }
+        if (config.lines().isEmpty()) {
+            // 零线（坑 #31）：全部窗口已关闭——不加载玩家数据、不记账、不判踢、不提示；
+            // tracking 不建立 → 重新开启窗口后首个 tick 走首 tick 分支（只记基准不扣费），从 0 起
+            return TickResult.none();
+        }
         PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
         Tracking tr = tracking.computeIfAbsent(uuid, k -> new Tracking());
         long now = clock.getAsLong();
@@ -318,11 +323,20 @@ public final class QuotaEngine {
 
     /**
      * 清空某档位所有玩家的消费桶（/chunkplan config window tierN off 时调用，坑 #30）：
-     * 在线玩家清内存；离线玩家逐个读文件改写落盘——保证重新开启该窗口时从 0 起。
+     * 在线玩家清内存并**立即落盘**（坑 #31：scanBans 懒加载滞留的离线玩家也在内存中，
+     * 若只清内存会等 5 分钟周期保存才写盘，期间崩溃则清除丢失——QA 实测 P1）；
+     * 离线玩家逐个读文件改写落盘——保证重新开启该窗口时从 0 起。
      */
     public void clearTierSpendForAll(int tier) {
         for (PlayerQuotaData data : dataByPlayer.values()) {
             data.clearTierSpend(tier);
+        }
+        // 立即落盘：savePlayer 仅 dirty（确实清掉了桶）才写，无桶玩家零开销
+        for (UUID uuid : dataByPlayer.keySet()) {
+            savePlayer(uuid);
+        }
+        if (!Files.exists(playerDataDir)) {
+            return; // 新世界尚无玩家目录（非错误状态，坑 #31）
         }
         try (Stream<Path> files = Files.list(playerDataDir)) {
             Iterator<Path> it = files.iterator();
@@ -339,12 +353,15 @@ public final class QuotaEngine {
                     continue; // 非玩家数据文件
                 }
                 if (dataByPlayer.containsKey(uuid)) {
-                    continue; // 在线玩家已在上方处理
+                    continue; // 在线玩家已在上方处理（含立即落盘）
                 }
                 PlayerQuotaData.Dto dto = AtomicFile.readJson(file, PlayerQuotaData.Dto.class,
                         "玩家 " + uuid + " 配额数据", LOG);
                 if (dto == null) {
                     continue; // 主与 .bak 均损坏：保留原样
+                }
+                if (dto.version != PlayerQuotaData.VERSION && dto.version != 1) {
+                    continue; // 未知版本：保留原样，避免静默改写丢失未知字段（坑 #31）
                 }
                 PlayerQuotaData data = PlayerQuotaData.fromDto(dto);
                 data.clearTierSpend(tier);

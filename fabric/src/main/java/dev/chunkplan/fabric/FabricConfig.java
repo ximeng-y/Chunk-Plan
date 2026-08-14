@@ -1,7 +1,6 @@
 package dev.chunkplan.fabric;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -185,7 +184,14 @@ public final class FabricConfig {
     }
 
     private static com.google.gson.JsonObject readRoot(Path configFile) throws IOException {
-        return GsonHolder.GSON.fromJson(
-                Files.readString(configFile, StandardCharsets.UTF_8), com.google.gson.JsonObject.class);
+        // 坑 #31：运行时配置损坏（Gson 抛非受检 JsonSyntaxException，原实现会穿透命令层
+        // catch(IOException)）→ 复用 AtomicFile.readJson 的 .bak 兜底（恢复后写回主文件修复现场，
+        // 坑 #27 语义）；主与 .bak 均坏则抛 IOException，由命令层转固定反馈并拒绝写入（不覆盖损坏文件）
+        com.google.gson.JsonObject root = AtomicFile.readJson(configFile, com.google.gson.JsonObject.class,
+                "配置文件", LOG);
+        if (root == null) {
+            throw new IOException("配置文件与备份均损坏");
+        }
+        return root;
     }
 }

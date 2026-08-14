@@ -312,20 +312,30 @@ public final class QuotaCommands {
                     for (int tier = 1; tier <= 4; tier++) {
                         eng.clearTierSpendForAll(tier);
                     }
+                    // 零线（坑 #31）：立即解除所有 ChunkPlan 来源临时封禁（scanBans 只解
+                    // "ChunkPlan" 来源条目，服主手动 ban 保留——坑 #14），并反馈如实明示
+                    ChunkPlanNeoForge.GameEvents.scanBans(ctx.getSource().getServer());
                 } else {
                     eng.clearTierSpendForAll(d.tier());
                 }
                 String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
                 String tierName = d.tier() == 0 ? (zh ? "全部窗口" : "all windows") : "tier" + d.tier();
-                ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                String text = d.tier() == 0
+                        ? t(ctx,
+                        "§a已关闭全部窗口，额度限制已停止（ChunkPlan 临时封禁已解除，所有玩家记录已清空）",
+                        "§aDisabled all windows; quota limits are off (ChunkPlan temporary bans lifted, records cleared for all players)")
+                        : t(ctx,
                         "§a已关闭 " + tierName + "（该窗口所有玩家记录已清空）",
-                        "§aDisabled " + tierName + " (records cleared for all players)") + warning), true);
+                        "§aDisabled " + tierName + " (records cleared for all players)");
+                ctx.getSource().sendSuccess(() -> Component.literal(text + warning), true);
+                return 1;
             } catch (IOException e) {
+                org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("confirm 关闭窗口失败", e);
                 ctx.getSource().sendFailure(Component.literal(t(ctx,
-                        "§c写入配置失败: " + e.getMessage(),
-                        "§cFailed to write config: " + e.getMessage())));
+                        "§c写入配置失败，详见服务端日志",
+                        "§cFailed to write config; see server log for details")));
+                return 0;
             }
-            return 1;
         }
         if (req instanceof PendingAction.LowerLimit l) {
             try {
@@ -337,9 +347,11 @@ public final class QuotaCommands {
                         "§aAdjusted tier" + l.tier() + " limit to " + l.rawValue()) + warning), true);
                 return 1;
             } catch (IOException e) {
+                org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("confirm 调整额度失败", e);
                 ctx.getSource().sendFailure(Component.literal(t(ctx,
-                        "§c写入配置失败: " + e.getMessage(),
-                        "§cFailed to write config: " + e.getMessage())));
+                        "§c写入配置失败，详见服务端日志",
+                        "§cFailed to write config; see server log for details")));
+                return 0;
             }
         }
         return 1;
@@ -399,12 +411,14 @@ public final class QuotaCommands {
                             + (zh ? "§a 内刷新" : "§a");
                 }
                 ctx.getSource().sendSuccess(() -> Component.literal(text + warning), true);
+                return 1;
             } catch (IOException e) {
+                org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("写入配置失败", e);
                 ctx.getSource().sendFailure(Component.literal(t(ctx,
-                        "§c写入配置失败: " + e.getMessage(),
-                        "§cFailed to write config: " + e.getMessage())));
+                        "§c写入配置失败，详见服务端日志",
+                        "§cFailed to write config; see server log for details")));
+                return 0;
             }
-            return 1;
         }
         // 关闭：清空该窗口所有玩家记录 -> confirm
         pending = new PendingAction.DisableWindow(tier, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS);
@@ -455,9 +469,10 @@ public final class QuotaCommands {
                     + warning), true);
             return 1;
         } catch (IOException e) {
+            org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("写入配置失败", e);
             ctx.getSource().sendFailure(Component.literal(t(ctx,
-                    "§c写入配置失败: " + e.getMessage(),
-                    "§cFailed to write config: " + e.getMessage())));
+                    "§c写入配置失败，详见服务端日志",
+                    "§cFailed to write config; see server log for details")));
             return 0;
         }
     }
@@ -486,9 +501,10 @@ public final class QuotaCommands {
                     "§aHigh-speed movement multiplier set to §b" + raw + "x§a") + warning), true);
             return 1;
         } catch (IOException e) {
+            org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("写入配置失败", e);
             ctx.getSource().sendFailure(Component.literal(t(ctx,
-                    "§c写入配置失败: " + e.getMessage(),
-                    "§cFailed to write config: " + e.getMessage())));
+                    "§c写入配置失败，详见服务端日志",
+                    "§cFailed to write config; see server log for details")));
             return 0;
         }
     }
@@ -545,9 +561,10 @@ public final class QuotaCommands {
                     "§aAdjusted tier" + tier + " limit to §b" + raw + "§a") + warning), true);
             return 1;
         } catch (IOException e) {
+            org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("写入配置失败", e);
             ctx.getSource().sendFailure(Component.literal(t(ctx,
-                    "§c写入配置失败: " + e.getMessage(),
-                    "§cFailed to write config: " + e.getMessage())));
+                    "§c写入配置失败，详见服务端日志",
+                    "§cFailed to write config; see server log for details")));
             return 0;
         }
     }
@@ -641,9 +658,10 @@ public final class QuotaCommands {
                     "§aSet exemptByDefault to " + value + " (written to config and applied)") + warning), true);
             return 1;
         } catch (IOException e) {
+            org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("写入配置失败", e);
             ctx.getSource().sendFailure(Component.literal(t(ctx,
-                    "§c写入配置失败: " + e.getMessage(),
-                    "§cFailed to write config: " + e.getMessage())));
+                    "§c写入配置失败，详见服务端日志",
+                    "§cFailed to write config; see server log for details")));
             return 0;
         }
     }

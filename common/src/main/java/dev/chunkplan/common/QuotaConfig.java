@@ -162,7 +162,8 @@ public final class QuotaConfig {
 
         /**
          * 校验并构建配置；非法值回退默认并写入告警（不抛异常）。
-         * 规则：额度线 1~4 条（越界回退默认两条）；窗口/上限必须为正；费率非负；周期为正。
+         * 规则：额度线 0~4 条（null/越界回退默认两条；空列表 = 零线合法，坑 #31）；
+         * 窗口/上限必须为正；费率非负；周期为正。
          */
         public QuotaConfig build(List<String> warnings) {
             List<String> w = warnings == null ? new ArrayList<>() : warnings;
@@ -181,9 +182,13 @@ public final class QuotaConfig {
         }
 
         private static List<Line> normalizeLines(List<Line> raw, List<String> w) {
-            if (raw == null || raw.isEmpty() || raw.size() > 4) {
+            if (raw == null || raw.size() > 4) {
                 w.add("额度线数量必须为 1~4 条（当前 " + (raw == null ? 0 : raw.size()) + "），已回退默认两条");
                 return defaultLines();
+            }
+            if (raw.isEmpty()) {
+                // 零线（坑 #31）：显式空列表 = 管理员关闭全部窗口（QuotaTiers.toLines 的合法产物），不告警
+                return List.of();
             }
             List<Line> ok = new ArrayList<>();
             Set<Integer> seen = new HashSet<>();

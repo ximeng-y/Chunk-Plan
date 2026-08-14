@@ -47,9 +47,23 @@ class QuotaConfigTest {
     }
 
     @Test
-    void zeroLinesFallbackToDefault() {
+    void emptyLinesProduceZeroLines() {
+        // 坑 #31：显式空列表 = 零线（QuotaTiers.toLines 合法产物），不告警
         List<String> warnings = new ArrayList<>();
         QuotaConfig cfg = QuotaConfig.builder().lines(List.of()).build(warnings);
+        assertTrue(cfg.lines().isEmpty());
+        assertTrue(warnings.isEmpty());
+    }
+
+    @Test
+    void allInvalidLinesDroppedFallBackToDefault() {
+        // 非空但全部非法：丢弃后为空 → 回退默认两条并告警（配置损坏保护，坑 #31）
+        List<String> warnings = new ArrayList<>();
+        List<QuotaConfig.Line> lines = List.of(
+                new QuotaConfig.Line(1, 0, 100),
+                new QuotaConfig.Line(2, 3600, -1),
+                new QuotaConfig.Line(3, -7200, 200));
+        QuotaConfig cfg = QuotaConfig.builder().lines(lines).build(warnings);
         assertEquals(2, cfg.lines().size());
         assertFalse(warnings.isEmpty());
     }

@@ -61,7 +61,8 @@ class QuotaTiersTest {
     }
 
     @Test
-    void allTiersDisabledFallBackToDefaultTwoLines() {
+    void allTiersDisabledProduceZeroLines() {
+        // 坑 #31：显式全禁 = 零线（合法，不告警），不再回退默认两条
         List<String> warnings = new ArrayList<>();
         List<QuotaTiers.Tier> tiers = List.of(
                 new QuotaTiers.Tier(false, "5h", 500.0),
@@ -69,8 +70,40 @@ class QuotaTiersTest {
                 new QuotaTiers.Tier(false, "7d", 10000.0),
                 new QuotaTiers.Tier(false, "30d", 40000.0));
         List<QuotaConfig.Line> lines = QuotaTiers.toLines(tiers, warnings);
-        assertEquals(QuotaConfig.defaultLines(), lines);
-        assertEquals(1, warnings.size());
+        assertTrue(lines.isEmpty());
+        assertTrue(warnings.isEmpty());
+    }
+
+    @Test
+    void allEnabledTiersInvalidFallBackToTierDefaults() {
+        // 启用档非法 → 回退该档默认并告警（每档独立兜底，防配置损坏导致无限额线）
+        List<String> warnings = new ArrayList<>();
+        List<QuotaTiers.Tier> tiers = List.of(
+                new QuotaTiers.Tier(true, "5h", 0.0),
+                new QuotaTiers.Tier(true, "24h", -1.0),
+                new QuotaTiers.Tier(true, "7d", 0.0),
+                new QuotaTiers.Tier(true, "30d", -1.0));
+        List<QuotaConfig.Line> lines = QuotaTiers.toLines(tiers, warnings);
+        assertEquals(4, lines.size());
+        assertEquals(new QuotaConfig.Line(1, 5 * 3600, 500.0), lines.get(0));
+        assertEquals(new QuotaConfig.Line(2, 24 * 3600, 2000.0), lines.get(1));
+        assertEquals(new QuotaConfig.Line(3, 7 * 24 * 3600, 10000.0), lines.get(2));
+        assertEquals(new QuotaConfig.Line(4, 30 * 24 * 3600, 40000.0), lines.get(3));
+        assertEquals(4, warnings.size());
+    }
+
+    @Test
+    void allDisabledWithInvalidFieldsProduceZeroLines() {
+        // 全关时残留非法字段不校验（disabled 档不参与组装），仍为零线（坑 #31）
+        List<String> warnings = new ArrayList<>();
+        List<QuotaTiers.Tier> tiers = List.of(
+                new QuotaTiers.Tier(false, "not-a-window", 500.0),
+                new QuotaTiers.Tier(false, "24h", -3.0),
+                new QuotaTiers.Tier(false, "7d", 10000.0),
+                new QuotaTiers.Tier(false, "30d", 40000.0));
+        List<QuotaConfig.Line> lines = QuotaTiers.toLines(tiers, warnings);
+        assertTrue(lines.isEmpty());
+        assertTrue(warnings.isEmpty());
     }
 
     @Test

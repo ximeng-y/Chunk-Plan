@@ -746,4 +746,83 @@ class QuotaEngineTest {
         engine2.onPlayerTick(player, false, OVERWORLD, 16, 64, 0); // 区块 1 已探索 -> 0.05
         assertEquals(0.05, engine2.quotaStatus(player).lines().get(0).spent(), 1e-9);
     }
+
+    // ---------- 坑 #31：零线（全部窗口关闭） ----------
+
+    @Test
+    void zeroLinesTickDoesNotChargeOrLoad() {
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of()) // 零线：无额度线
+                .build(new ArrayList<>()));
+        // 跨多个区块移动：不记账、不提示、不判踢
+        for (int i = 0; i < 5; i++) {
+            QuotaEngine.TickResult r = engine.onPlayerTick(player, false, OVERWORLD, i * 16.0, 64, 0);
+            assertEquals(QuotaEngine.ResultType.NONE, r.type());
+            assertTrue(r.alerts().isEmpty());
+        }
+        // 不加载玩家数据（不创建文件）
+        assertFalse(Files.exists(tmp.resolve("players/" + player + ".json")));
+    }
+
+    @Test
+    void zeroLinesNeverExceeded() {
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);  // 1.0（未满，但已有消费）
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of())
+                .build(new ArrayList<>()));
+        // 切零线后判满恒 false（登录 gate 放行；内存残留消费数据也不触发 BAN）
+        assertFalse(engine.isAllLinesExceeded(player));
+        QuotaEngine.TickResult r = engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);
+        assertEquals(QuotaEngine.ResultType.NONE, r.type());
+    }
+
+    @Test
+    void zeroLinesQuotaStatusEmpty() {
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of())
+                .build(new ArrayList<>()));
+        QuotaEngine.QuotaStatus status = engine.quotaStatus(player);
+        assertTrue(status.lines().isEmpty());
+        assertFalse(status.allExceeded());
+        assertEquals(-1, status.recoveryMillis());
+        assertNull(status.worstAlert());
+    }
+
+    @Test
+    void zeroLinesThenEnableFirstTickNotCharged() {
+        // 零线期间 tick 不建立 tracking（坑 #31）→ 开启窗口后首个 tick 走首 tick 分支只记基准不扣费
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of())
+                .build(new ArrayList<>()));
+        engine.onPlayerTick(player, false, OVERWORLD, 100, 64, 0);  // 零线：大位移，无 tracking
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(new QuotaConfig.Line(1, 60, 10.0), new QuotaConfig.Line(2, 120, 20.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+        QuotaEngine.TickResult r = engine.onPlayerTick(player, false, OVERWORLD, 116, 64, 0); // 首 tick：只记基准
+        assertEquals(QuotaEngine.ResultType.NONE, r.type());
+        assertEquals(0.0, engine.quotaStatus(player).lines().get(0).spent(), 1e-9);
+        engine.onPlayerTick(player, false, OVERWORLD, 132, 64, 0);  // 次 tick：正常计费 1.0
+        assertEquals(1.0, engine.quotaStatus(player).lines().get(0).spent(), 1e-9);
+    }
+
+    @Test
+    void clearTierSpendForAllPersistsOnlineImmediately() throws Exception {
+        // 坑 #31（QA P1 回归）：在线玩家清档后立即落盘，不依赖 5 分钟周期保存；
+        // 期间崩溃不会丢失清除（新引擎读文件即可验证）
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);  // tier1+tier2 = 1.0
+        engine.saveAll();
+        engine.clearTierSpendForAll(1);
+        // 不调 saveAll，直接由新引擎读文件：tier1 已清、tier2 保留
+        QuotaEngine engine2 = new QuotaEngine(tmp,
+                QuotaConfig.builder()
+                        .lines(List.of(new QuotaConfig.Line(1, 60, 2.0), new QuotaConfig.Line(2, 120, 3.0)))
+                        .highSpeedThreshold(1000)
+                        .build(new ArrayList<>()),
+                null, new ManagedBanStore(tmp.resolve("bans.json")), clock::get);
+        assertEquals(0.0, engine2.quotaStatus(player).lines().get(0).spent(), 1e-9);
+        assertEquals(1.0, engine2.quotaStatus(player).lines().get(1).spent(), 1e-9);
+    }
 }

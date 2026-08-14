@@ -147,7 +147,11 @@ public final class ChunkPlanMessages {
                     .append(zh ? " 窗口: §f" : " window: §f")
                     .append(String.format("%.1f§7/%.1f", line.spent(), line.limit()));
         }
-        if (status.allExceeded()) {
+        if (status.lines().isEmpty()) {
+            // 零线（坑 #31）：全部窗口已关闭（config window all off 或全档 off），无额度限制
+            sb.append(zh ? "\n§7  所有探索窗口均已关闭，当前无额度限制"
+                         : "\n§7  All quota windows are disabled; no quota limits are currently in effect");
+        } else if (status.allExceeded()) {
             String recover = formatTime(status.recoveryMillis());
             sb.append(zh ? "\n§c  已耗尽，预计 " : "\n§c  Exhausted, recovers at ").append(recover).append(zh ? " 恢复" : "");
         } else {
