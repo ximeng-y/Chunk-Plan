@@ -152,8 +152,12 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **dev 服务器自动暂停（实测大坑）**：1.21.11+/26.x server.properties 新增 `pause-when-empty-seconds`（默认 60）——无真实玩家（**mock 不进 PlayerList 不计入**）60 秒后暂停**全部 tick** → 壳层每 tick 计费/扫描停摆（曾把"调高上限后不解封"误判为 scanBans 失效，实为服务器暂停）。dev 冒烟必须设 `pause-when-empty-seconds=0`（已写进三个 run 目录的 server.properties）；且 run/config 的配置跨会话持久化（如 tier1Limit 遗留），冒烟前后注意恢复默认
     - **镜像纪律扩展**：改文案/命令仍须三处同步（neoforge、fabric 1.21.1、fabric-multi/shared）；**API 差异行不属于同步范围**（neoforge/fabric 1.21.1 旧 API vs fabric-multi 新 API），同步只针对业务逻辑与文案
     - **验证**：common 96 测试不变；三版本 `build` + dev 服务器 rcon 冒烟全链路通过（计费 2.0=1.0×2 高速、调低上限当场踢出、ban 记录 source=ChunkPlan、恢复上限后 scanBans 自动解封）。**fabric 1.21.1 未经实机验证（仅 NeoForge 实机验证过），fabric 实机验收以 1.21.11 为准**（用户 2026-08-14 声明）；26.x 实机待用户意愿
-
-## 约定
+34. **fabric `environment=server` 单人静默不加载（坑 #34，2026-08-15 用户 1.21.11 实机暴露）**：
+    - **症状**：jar 确认在版本专属 mods 目录，游戏中无 /chunkplan 指令，日志**零 chunkplan 痕迹**（连入口日志 `[ChunkPlan] ChunkPlan Fabric 壳已注册` 都没有），也无任何报错/拒绝提示——用户最初无法判断 mod 是否运行。
+    - **根因**：fabric.mod.json `"environment": "server"`。Fabric Loader 在客户端进程启动时（`Env=CLIENT`）按 environment 过滤 mod 集合，server-only mod 在打印 "Loading N mods" 名单**之前**被**静默剔除**（该过滤只写 debug 级日志）；单人的 integrated server 是客户端进程内的逻辑服务器，**不补加载** server mod → mod 等于不存在。dev 冒烟 `runServer` 是 dedicated 场景（main 入口正常调用）**测不出此过滤**——冒烟全绿 ≠ 单人可用，盲区。
+    - **修复**：四个 fabric.mod.json（根 fabric 1.21.1 + fabric-multi 1.21.11/26.1.2/26.2）`environment` 一律改 `"*"`（2026-08-15 提交）；entrypoints 保持 `main` + `ModInitializer` 不动——`*` 时 main 入口在客户端与 dedicated 双端都会调用，mod 无任何客户端类引用，客户端加载无害。NeoForge 无 environment 过滤机制（单人是内嵌服务器），不受影响
+    - **`*` ≠ 客户端必装**：Fabric 无 Forge 式强制 mod 列表同步；ChunkPlan 不注册网络包/注册表条目（无协议级差异）→ 客户端不装可正常连装有本 mod 的服务器（dedicated 冒烟即裸 mineflayer 客户端验证），客户端装了连未装服务器也正常（回调仅在服务器存在时触发）
+    - **验证方法**：打包后 unzip 静态检查 jar 内 fabric.mod.json 的 environment（此后 fabric 冒烟阶段应加此检查）；实机判断——日志出现 `[ChunkPlan] ChunkPlan Fabric 壳已注册`、Loading N mods 数量 +1、游戏内有 /chunkplan。单人复测注意坑 #21：单人主机恒权限 4，默认豁免下计费恒 0，须先 `/chunkplan config exemptByDefault false`
 
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行

@@ -6,7 +6,7 @@
   "description": "探索额度（ChunkPlan）：按玩家实体踏入区块计费的服务端限流 mod。",
   "authors": ["${mod_authors}"],
   "license": "All Rights Reserved",
-  "environment": "server",
+  "environment": "*",
   "entrypoints": {
     "main": ["dev.chunkplan.fabric.ChunkPlanFabric"]
   },
