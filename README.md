@@ -153,3 +153,156 @@
 **如果您喜欢此模组，请为我们**[**点个Star**](https://github.com/ximeng-y/Chunk-Plan)**\~**
 
 本模组基于 [MPL-2.0](https://www.mozilla.org/en-US/MPL/2.0/) 协议开源
+
+---
+
+# Chunk Plan(English)
+
+A mod that runs mainly on the server, which aims to control server hardware and bandwidth consumption by limiting players' exploration.
+
+## Introduction
+
+If you are managing a Minecraft server, maybe you have met these problems:
+
+- CPU of the server cannot support a crazy player who explores the world endlessly, leaving other players with a poor gaming experience;
+
+- The server has a network traffic limit, but a part of players like exploring, which always causes the traffic to go over budget;
+
+- There are lots of players in the server, so we cannot track who is the crazy explorer in a measurable way;
+
+- You don't want to imprison the players, but wish to allocate the server resources fairly.
+
+If you have been troubled by these, this mod provides a solution.
+
+This Mod is inspired by a kind of product — Token Plan, which is an AI subscription product with parallel billing windows. It can provide more total resources and limit those who want to use up a lot of resources in a short time.
+
+### What This Mod Does
+
+#### Chunk Exploration Quota
+
+It uses chunk exploration quota as the billing unit, shows and controls everyone's exploring in a measurable way.
+
+
+
+#### Layered Billing
+
+This mod charges when a player steps into the next chunk.
+
+Billing is divided into three layers:
+
+- **New chunk:** a chunk that a player has never stepped into is billed at the **default fee**, 1.0 quota per chunk by default;
+
+- **Old chunk:** a chunk that a player has stepped into before is billed at a **low fee**, 0.05 quota per chunk by default;
+
+- **High-speed movement:** stacked on top of the two types above. When a player moves at high speed, the billing is multiplied based on **the triggered billing type**, with a default multiplier of 2.00x.
+
+> The definition of high-speed movement here: when a player's speed reaches the vanilla creative-mode flight speed (without any potions or other effects), it is considered high-speed movement.
+
+The per-chunk quota consumption and the high-speed multiplier of the three billing layers above can all be customized.
+
+
+
+#### Parallel Billing Windows
+
+This mod enables 2 billing windows by default, and supports up to 4:
+
+- **tier1 (Basic):** the window with the fastest refresh and the lowest quota, used to limit burst consumption in a short time;
+
+- **tier2 (Intermediate):** a window with slower refresh and medium quota, used to control unit consumption such as half-day/single-day;
+
+- **tier3 (Advanced):** disabled by default, a window with very slow refresh and higher quota, used for weekly/monthly limits;
+
+- **tier4 (Top):** disabled by default, the window with the slowest refresh and highest quota, used for monthly/quarterly/yearly limits.
+
+Billing window mechanism:
+
+- **Parallel billing:** a player's consumption applies to **all windows at the same time**;
+
+- **Independent refresh:** each billing window resets according to its configured refresh time;
+
+- **Individual configuration:** the on/off state, refresh time, and exploration quota of each billing window can be customized.
+
+
+
+#### Quota Query and Reminders
+
+- When a player joins the server, a message pops up in their chat box showing their quota status;
+
+- A query command `/chunkplan check` is provided, which non-admin players can also execute;
+
+- When a player's quota triggers the percentage threshold of a window, a reminder automatically pops up in the chat box. The less quota remaining, the more severe the reminder;
+
+- Players can query the billing rules via the `/chunkplan rules` command. The specific values in the rules are **replaced in real time** with the server's configured values.
+
+
+
+#### Quota Limit Penalty
+
+- When **any billing window** of a player reaches the configured limit, they will be **kicked out immediately and temporarily banned**, with the reason and unban time announced to them;
+
+- During the temporary ban, if the player tries to enter the server, they will receive the ban reason, unban time, and other information again;
+
+- When the quota limit refreshes, the player's ban will be **automatically lifted** by the server.
+
+
+
+#### Administrator Control
+
+- This mod allows, and enables by default, the **admin billing exemption** mechanism — when enabled, admins' chunk exploration is no longer billed;
+
+- All customization features of this mod can be controlled in real time via the `/chunkplan config` command;
+
+- Admins can use the `/chunkplan reset` command to **reset the exploration quota** of a player or all players, and can choose to reset all windows or a single window.
+
+
+
+## License and Support
+
+### Version Support
+
+The current support status of this mod:
+
+| Version | Forge | NeoForge | Fabric |
+| --- | --- | --- | --- |
+| 1.20.1 | ✓ | —— | —— |
+| 1.21.1 | —— | ✓ | ✓ |
+| 1.21.11 | —— | —— | ✓ |
+| 26.1.2 | —— | —— | ✓ |
+| 26.2 | —— | —— | ✓ |
+
+In principle, this mod **does not plan** to:
+
+- migrate to Forge versions other than 1.20.1;
+
+- migrate to Fabric versions earlier than 1.21.1;
+
+- migrate to NeoForge versions earlier than 1.21.1.
+
+This mod **plans** to:
+
+- keep the Fabric version up to date with Minecraft updates;
+
+- migrate to NeoForge versions that the community considers stable with a good ecosystem.
+
+If you need migration support for Fabric 1.21.2~1.21.10 or other versions, please [submit an issue here](https://github.com/ximeng-y/Chunk-Plan/issues).
+
+Requests in the comment section may also be adopted, but issues are more likely to be noticed and have higher adoption priority.
+
+If you need migration to a version not in the plan, you can also submit an issue. We will consider the migration based on the demand.
+
+
+
+### Feature Plans
+
+- We plan to add a visual GUI interface. Players can choose to install it on their client for visual configuration, quota query, and other features;
+
+- We plan to add a virtual "quota reset card" feature. Admins can issue reset cards to players, and players can freely control when their quota is reset.
+
+
+
+**This mod is allowed and encouraged to be used in any of your modpacks and servers, no permission required.**
+
+**If you like this mod, please [give us a Star](https://github.com/ximeng-y/Chunk-Plan)~**
+
+This mod is open source under the [MPL-2.0](https://www.mozilla.org/en-US/MPL/2.0/) license.
+
