@@ -87,10 +87,10 @@
 #### 额度达限惩罚
 
 - 当一名玩家的**任意一个计费窗口**达到了配置的上限，那么他将被**立即踢出游戏，被暂时封禁**并向他声明理由、解禁时间；
-
 - 在暂时封禁期间，若此玩家尝试进入服务器，会再次收到封禁理由、解禁时间等信息；
-
 - 当额度限制刷新，该玩家的封禁会被服务器**自动解除。**
+
+![中文踢出公告](https://raw.githubusercontent.com/ximeng-y/Chunk-Plan/main/photos/中文踢出.png)
 
 
 
@@ -243,6 +243,8 @@ Billing window mechanism:
 - During the temporary ban, if the player tries to enter the server, they will receive the ban reason, unban time, and other information again;
 
 - When the quota limit refreshes, the player's ban will be **automatically lifted** by the server.
+
+![英文踢出公告](https://raw.githubusercontent.com/ximeng-y/Chunk-Plan/main/photos/英文踢出.png)
 
 
 
