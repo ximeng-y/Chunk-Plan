@@ -2,6 +2,7 @@ pluginManagement {
     repositories {
         maven { url = 'https://maven.neoforged.net/releases' }
         maven { url = 'https://maven.fabricmc.net' }
+        maven { url = 'https://maven.minecraftforge.net/' }
         maven { url = 'https://maven.parchmentmc.org' }
         gradlePluginPortal()
         mavenCentral()
@@ -13,4 +14,5 @@ plugins {
 }
 
 rootProject.name = 'chunkplan'
-include 'common', 'neoforge', 'fabric'
+// forge = Minecraft Forge 1.20.1 薄壳（ForgeGradle 6，Java 17 toolchain；与 neoforge/fabric 平级）
+include 'common', 'neoforge', 'fabric', 'forge'

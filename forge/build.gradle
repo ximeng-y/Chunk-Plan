@@ -1,0 +1,75 @@
+// forge：Minecraft Forge 1.20.1 薄壳（ForgeGradle 6 + 官方 mojmap，与 neoforge 代码对齐）
+// 1.20.1 官方 Java 要求为 17（非 21），故 toolchain 与其余模块分离；
+// common 源码同样并入本模块 sourceSet 编译（不用 project 依赖：common jar 由 JDK 21 产出，
+// class 文件版本 65 无法被 Java 17 运行时读取）。
+
+plugins {
+    id 'java'
+    id 'net.minecraftforge.gradle' version "${forge_gradle_version}"
+}
+
+base {
+    archivesName = 'chunkplan-forge'
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of("${forge_java_version}" as int)
+}
+
+minecraft {
+    // 官方 mojmap（与 neoforge/fabric 一致，类名/方法名对齐，便于三处镜像同步）
+    mappings channel: 'official', version: "${forge_minecraft_version}"
+
+    runs {
+        server {
+            workingDirectory project.file('run/server')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'info'
+            args '--nogui'
+            mods {
+                "${mod_id}" {
+                    source sourceSets.main
+                }
+            }
+        }
+        client {
+            workingDirectory project.file('run/client')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'info'
+            // 客户端自动化实测辅助：-PquickPlay 时自动加入 localhost 服务器（否则停在主菜单）
+            if (project.hasProperty('quickPlay')) {
+                args '--quickPlayMultiplayer', (project.findProperty('quickPlay') ?: 'localhost:25565')
+            }
+            mods {
+                "${mod_id}" {
+                    source sourceSets.main
+                }
+            }
+        }
+    }
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:${forge_minecraft_version}-${forge_version}"
+}
+
+// common 引擎源码直接并入本模块编译（与 neoforge/fabric 一致）：发布 jar 直接包含 common 类
+sourceSets {
+    main {
+        java.srcDir project(':common').sourceSets.main.java.srcDirs
+    }
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    def replaceProperties = [
+            mod_id          : "${mod_id}",
+            mod_name        : "${mod_name}",
+            mod_version     : "${mod_version}",
+            mod_authors     : "${mod_authors}",
+            minecraft_version_range: "${forge_minecraft_version_range}",
+    ]
+    inputs.properties replaceProperties
+    filesMatching('META-INF/mods.toml') {
+        expand replaceProperties
+    }
+}

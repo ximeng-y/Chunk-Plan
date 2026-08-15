@@ -1,0 +1,30 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="All Rights Reserved"
+issueTrackerURL=""
+
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+displayName="${mod_name}"
+authors="${mod_authors}"
+description='''
+探索额度（ChunkPlan）：按玩家实体踏入区块计费的服务端限流 mod。
+'''
+
+# 依赖块字段用 mandatory=<bool>（Forge 1.20.1 schema），不是 NeoForge 的 type="required"：
+# 照抄 neoforge.mods.toml 会以 InvalidModFileException "Missing required field mandatory in
+# dependency (main)" 令整个 mod 文件失效，并连带 "Failed to find system mod: minecraft" 启动崩溃（坑 #38）
+[[dependencies.${mod_id}]]
+    modId="forge"
+    mandatory=true
+    versionRange="[47,)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="${minecraft_version_range}"
+    ordering="NONE"
+    side="BOTH"

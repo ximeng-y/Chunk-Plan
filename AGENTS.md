@@ -4,9 +4,9 @@
 
 ChunkPlan（modid=`chunkplan`，中文名「探索额度」）是**纯服务端** Minecraft mod：按**玩家实体踏入区块**计费，通过多条滚动窗口额度线限制玩家的探索消耗，额度耗尽后临时封禁（窗口滑出自动恢复）。用于控制服务器区块加载成本。
 
-- 双加载器：**NeoForge 1.21.1** + **Fabric 1.21.1**（独立 mod，不依赖任何功能型上游 mod；Fabric 端依赖 `fabric-api` 生态基础设施——生命周期事件/命令注册/连接事件，`fabric.mod.json` 的 `depends` 已声明，NeoForge 端无额外依赖）
+- 三加载器：**NeoForge 1.21.1** + **Fabric 1.21.1** + **Forge 1.20.1**（独立 mod，不依赖任何功能型上游 mod；Fabric 端依赖 `fabric-api` 生态基础设施——生命周期事件/命令注册/连接事件，`fabric.mod.json` 的 `depends` 已声明，NeoForge 与 Forge 端无额外依赖）
 - 一期纯服务端；客户端 HUD / 配置 GUI 为二期
-- 零 mixin，纯事件；Java 21（`D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x64`）
+- 零 mixin，纯事件；Java 21（`D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x64`），**forge 模块为 Java 17**（1.20.1 官方要求，`zulu17.62.17-ca-jdk17.0.17-win_x64`，坑 #38）
 
 ## 架构（实现必须遵循）
 
@@ -14,13 +14,14 @@ ChunkPlan（modid=`chunkplan`，中文名「探索额度」）是**纯服务端*
 common/     纯 Java 记账引擎，零 Minecraft/加载器 import（仅 Gson + slf4j，双端内置）
 neoforge/   NeoForge 21.1.176 薄壳：事件 -> QuotaEngine
 fabric/     Fabric 1.21.1 薄壳（官方 mojmap，与 neoforge 代码对齐）
+forge/      Forge 1.20.1 薄壳（ForgeGradle 6 + 官方 mojmap，Java 17，坑 #38）
 fabric-multi/ Fabric 多版本独立构建（1.21.11/26.1.2/26.2，坑 #33）：shared/ 共享壳层源码 + 每版本薄模块
 ```
 
 - **壳→core 单向依赖**：壳每 tick 调 `engine.onPlayerTick(uuid, exempt, dimKey, x, y, z)`，返回动作由壳执行（disconnect + UserBanList）
 - **common 源码并入 neoforge 模块编译**（sourceSets 的 java.srcDir），不用 jarJar —— 原因见"已知坑 #1"
-- fabric 1.21.1 用 `implementation project(':common')` + sourceSets 源码并入；fabric-multi 各版本用相对路径 srcDir 并入（不用 `include()`，坑 #33）
-- 版本矩阵以 `gradle.properties` 为准（Gradle 8.14.2 是 NeoGradle 7 与 Loom 1.13 的兼容交集）；fabric-multi 为**独立构建**（Gradle 9.5.1 + Loom 1.17.19 + JDK 21/25 toolchain，坑 #33）
+- fabric 1.21.1 用 `implementation project(':common')` + sourceSets 源码并入；fabric-multi 各版本用相对路径 srcDir 并入（不用 `include()`，坑 #33）；**forge 只并入 srcDir，绝不加 `project(':common')` 依赖**（common jar 由 JDK 21 产出，class 版本 65 无法被 Java 17 运行时读取，坑 #38）
+- 版本矩阵以 `gradle.properties` 为准（Gradle 8.14.2 是 NeoGradle 7 与 Loom 1.13 的兼容交集；ForgeGradle 6.0.54 实测与之共存，故 forge 留在根构建，不像 fabric-multi 那样独立）；fabric-multi 为**独立构建**（Gradle 9.5.1 + Loom 1.17.19 + JDK 21/25 toolchain，坑 #33）
 
 ## 产品规格（与用户逐条确认，勿改）
 
@@ -52,9 +53,10 @@ fabric-multi/ Fabric 多版本独立构建（1.21.11/26.1.2/26.2，坑 #33）：
 ```bash
 export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x64"
 .XMTEMP/gradle-8.14.2/bin/gradle :common:test        # 引擎单测（96 个，全绿为验收前提）
-.XMTEMP/gradle-8.14.2/bin/gradle build               # 三模块编译 + 打包
+.XMTEMP/gradle-8.14.2/bin/gradle build               # 四模块编译 + 打包
 .XMTEMP/gradle-8.14.2/bin/gradle :neoforge:runServer # dev 服务器（工作目录 neoforge/runs/server/）
 .XMTEMP/gradle-8.14.2/bin/gradle :fabric:runServer   # dev 服务器（工作目录 fabric/run/）
+.XMTEMP/gradle-8.14.2/bin/gradle :forge:runServer    # dev 服务器（工作目录 forge/run/server/，坑 #38）
 
 # fabric 多版本（独立构建，坑 #33；run 目录 fabric-multi/fabric-<版本>/run/）
 .XMTEMP/gradle-9.5.1/bin/gradle -p fabric-multi build                        # 三版本编译 + 打包
@@ -64,7 +66,8 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
 ```
 
 - 首次启动需 `eula.txt`（`eula=true`）；run 目录已被 gitignore 排除
-- **NeoGradle/Loom 均不转发 stdin 给服务器控制台** → 命令验证用 rcon：dev 环境改 `server.properties` 开 rcon，用 `.XMTEMP/rcon.py` 发命令（脚本不入库）
+- forge 模块用 Java 17 toolchain（JDK 17 路径已加入 `org.gradle.java.installations.paths`）；Gradle 守护进程仍跑 JDK 21，toolchain 自动切换，**不需要**改 `JAVA_HOME`
+- **NeoGradle/Loom/ForgeGradle 均不转发 stdin 给服务器控制台** → 命令验证用 rcon：dev 环境改 `server.properties` 开 rcon，用 `.XMTEMP/rcon.py` 发命令（脚本不入库）
 - 玩家行为实测（踏入计费/踢出/ban 全链路）需要游戏客户端，服务端启动与命令链路可无客户端验证
 - **1.21.11+/26.x dev 服务器必须在 `server.properties` 设 `pause-when-empty-seconds=0`**（1.21.2 快照 24w33a 引入、默认 60：无真实玩家即暂停全部 tick，mock 不计入 PlayerList 会被暂停；1.21.1 无此属性，坑 #33）
 
@@ -160,10 +163,29 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **验证方法**：打包后 unzip 静态检查 jar 内 fabric.mod.json 的 environment（此后 fabric 冒烟阶段应加此检查）；实机判断——日志出现 `[ChunkPlan] ChunkPlan Fabric 壳已注册`、Loading N mods 数量 +1、游戏内有 /chunkplan。单人复测注意坑 #21：单人主机恒权限 4，默认豁免下计费恒 0，须先 `/chunkplan config exemptByDefault false`
 35. **reset 补全套娃（坑 #35，2026-08-15 用户 1.21.11 实机暴露）**：`suggestResetTarget` 原实现只看剩余文本有无空格——只要有空格就无条件建议层级词（tier1~tier4|all），且 greedy 参数建议需含完整剩余文本 → 用户选完层级词后再打空格，补全继续建议 `all all`/`all tier1`… **每选一次建议多一个词，无限套娃**（用户截图实证输入到 `reset ximeng_y tier4 all all`），而 `reset()` 只接受 `<目标> [层级]` 两词（`parts.length>2` 报参数格式错）——补全把用户引导进死路。修复：**按已输入词数分阶段**——第 1 词输入中（零词或一词无尾随空格）补玩家名+选择器；第 2 词（一词尾随空格或两词无尾随空格）补层级词；第 3 词起（两词尾随空格或更多词）**返回空建议**堵死套娃链。三处（neoforge/fabric 1.21.1/fabric-multi shared）同步，API 差异行（getName()/name()）除外；纯壳层，common 测试不变
 36. **reset 在线玩家通知窗口名化（坑 #36，2026-08-15 用户实机要求）**：坑 #32 只把「确认提示 + 管理员反馈」窗口名化了，**被重置玩家的在线通知漏改**（"您的ChunkPlan探索额度已被管理员重置"无窗口信息）——用户实机截图指出（反馈已显示"1天内"而通知没有）。修复：`confirm` Reset 分支把 `zhScope`/`enScope` 计算提前到通知循环前，玩家通知按重置范围显示窗口名——中文嵌入式 `您的1天内探索额度已被管理员重置`（全部时 `您的全部探索额度已被管理员重置`，与坑 #32 反馈同款 windowName）；英文括号式 `Your exploration quota (within 1 day) has been reset by an administrator.`（全部时 `(all windows)`，windowName 英文 toLowerCase）。三处同步；纯壳层，common 测试不变
+38. **Forge 1.20.1 移植（坑 #38，2026-08-15）**：`forge/` 模块，ForgeGradle **6.0.54** + Forge **1.20.1-47.4.22** + 官方 mojmap，**Java 17**（1.20.1 官方要求，非 21）。（编号跳过 37：坑 #37 是 ultra review 修复，只落在 commit `ca9ff4a` 未建本表条目）
+    - **构建结构**：ForgeGradle 6.0.54 与根构建的 Gradle 8.14.2 实测兼容（与 NeoGradle 7 共存无冲突）→ forge **留在根构建**，不需要像 fabric-multi 那样独立。`settings.gradle` 的 pluginManagement 需加 `https://maven.minecraftforge.net/`；forge 专用版本键在根 `gradle.properties` 以 `forge_` 前缀独立成组（`forge_java_version=17` 等），不与 1.21.1 的 `minecraft_version`/`java_version` 混用。JDK 17 路径须加入 `org.gradle.java.installations.paths`（toolchain 自动切换，守护进程仍可跑 JDK 21）
+    - **common 只并入 srcDir，禁止 `implementation project(':common')`**：common jar 由 JDK 21 toolchain 产出（class 版本 65），Java 17 运行时读不了；并入源码后由 forge 模块以 17 重编（实测 common 无任何 Java 21 专属特性，`sealed`/`record`/switch 表达式均为 17 已有）
+    - **`mods.toml` 依赖块 schema 与 NeoForge 不同**：Forge 1.20.1 用 `mandatory=<bool>`，NeoForge 用 `type="required"`。照抄 `neoforge.mods.toml` 会以 `InvalidModFileException: Missing required field mandatory in dependency (main)` **令整个 mod 文件失效**，并连带 `Failed to find system mod: minecraft` 启动崩溃——报错指向 MinecraftLocator，极易误判为环境问题（实际 `(main)` 就是本 mod 的 dev 源集）。文件名也不同：`META-INF/mods.toml`（非 `neoforge.mods.toml`），`loaderVersion="[47,)"`，依赖 modId 为 `forge`
+    - **SERVER 配置路径与 NeoForge 相反**（坑 #5 的镜像）：Forge 1.20.1 的 SERVER 配置是**存档级唯一位置** `<world>/serverconfig/chunkplan-server.toml`（`ServerLifecycleHooks.SERVERCONFIG` 私有 LevelResource，字节码实证；实机启动即在此生成），没有 NeoForge 那种 `config/` 主位置 + serverconfig 覆盖层的两级语义 → `resolveConfigFile` 优先级反转（serverconfig 优先，config/ 仅作异常时序兜底）
+    - **API 断层清单**（全部 javap 实证于 `forge-1.20.1-47.4.22_mapped_official_1.20.1.jar`；neoforge/fabric 1.21.1 用新 API，forge 用旧 API，**两代永久分叉**，同步只针对业务逻辑与文案）：
+      - `MinecraftServer.getServerDirectory()` 返回 **`java.io.File`**（1.21.1 起才是 Path）→ 全部调用点 `.toPath()`
+      - **无 `ClientInformation`**（1.20.2 才引入）：`player.clientInformation().language()` → **`player.getLanguage()`**
+      - `new ServerPlayer(server, level, profile)` **三参**；`new ServerGamePacketListenerImpl(server, conn, player)` **三参**（`CommonListenerCookie` 1.20.2 才有）
+      - tick 事件：`PlayerTickEvent.Post`/`ServerTickEvent.Post` → **单一事件类 + `phase` 字段**（`TickEvent.PlayerTickEvent`/`TickEvent.ServerTickEvent`，判 `phase == TickEvent.Phase.END`）；玩家取 **`event.player` 公有字段**（非 `getEntity()`，该方法只在 `PlayerEvent` 系有）；`ServerTickEvent.getServer()` 存在可用
+      - 事件总线：`@EventBusSubscriber(bus = Bus.GAME)` → `@Mod.EventBusSubscriber(bus = Mod.EventBusSubscriber.Bus.FORGE)`；`net.neoforged.bus.api.SubscribeEvent` → `net.minecraftforge.eventbus.api.SubscribeEvent`
+      - 配置：`ModConfigSpec` → `ForgeConfigSpec`（`net.minecraftforge.common`，Builder 的 comment/define/defineInRange/defineList/build 逐项签名一致，映射纯改类名）
+      - 配置注册：**构造器注入 `FMLJavaModLoadingContext`**（`FMLModContainer.constructMod` 按 `getParameterCount()` 分派 0 参/1 参，字节码实证）——不要用 `ModLoadingContext.get()`，Forge 47.4 已 `@Deprecated(forRemoval)`
+      - **与 1.21.1 一致、无需改动**的：`ClickEvent(Action,String)` / `HoverEvent(Action<T>,T)`（同样**无** ShowText 包装类，与坑 #32 同）、`UserBanList`/`UserBanListEntry` 5 参构造/`getSource()`、`ServerOpListEntry(GameProfile,int,boolean)`、`GameProfileCache.get(String|UUID)`、`CommandSourceStack.sendSuccess(Supplier<Component>,boolean)`/`getPlayer()`(可空)/`hasPermission(int)`、`Entity.hasPermissions(int)`/`kill()`/`moveTo(BlockPos,float,float)`/`level()`、`Level.getSharedSpawnPos()`、`BlockPos.getCenter()`、`FMLLoader.isProduction()`
+    - **`@Mod.EventBusSubscriber` 已自动注册，不得再 `MinecraftForge.EVENT_BUS.register()`**：双注册会让每个事件处理器触发两次（计费翻倍、提示重复）
+    - **登录欢迎语言时序是 Forge 端的逻辑差异（非文案漂移，不纳入镜像同步）**：1.20.1 **无配置阶段**，原版客户端在收到 login 包后才发 `ServerboundClientInformationPacket` → 语言必然晚于 `PlayerLoggedInEvent`，**首个 tick 未必已收到**（高延迟连接可能落到第 3~4 tick，坑 #24 的"延迟到首 tick"在此不够）。壳层改为 `WELCOME_PENDING: UUID -> 兜底截止 tick`，满足"语言已上报"或"超过 20 tick 宽限"其一即发送；"已上报"的判据是 `ServerPlayer.language` 不再等于初值 `"en_us"`（字节码实证初始化即 `en_us`，由 `updateOptions` 更新），纯英文客户端不变化则由兜底 tick 正常发英文
+    - **mineflayer 实测方法（1.20.1 与 1.21.1 相反）**：1.21.1 需在 `state=configuration` 手动补发 settings（坑 #24）；**1.20.1 不需要**——mineflayer 的 settings 插件正是在 `bot._client.on('login')` 发包，与原版 1.20.1 时序一致。只需设 `bot.settings.locale`（插件默认 `en_US`，且**不读** `createBot` 的 `options.locale`），且 `bot.settings` 由插件注入阶段创建、createBot 后并非立即可用 → 用 `bot.once('inject_allowed')` + `bot._client.prependListener('login')` 双兜底。另：1.20.1 的 `system_chat` content 是 **JSON 字符串**（1.20.3+ 才是 NBT），直接 `JSON.parse` 即可断言 `color`/`clickEvent`/`hoverEvent`
+    - 1.20.1 **无** `pause-when-empty-seconds`（1.21.2 才引入），不受坑 #33 的 dev 自动暂停影响
+    - **验证**：common 96 测试不变；`build` 四模块打包（jar 内含 common 类 + 壳层类，class 版本 61）；`:forge:runServer` rcon 冒烟全链路通过——计费 6.0=3×(1.0×2.0 高速)、调低上限当场踢出、`banned-players.json` source=ChunkPlan、恢复上限后 scanBans 30s 内自动解封、单档 reset 保留他档、零线（window all off）+ 解封、windowTime/windowLimit/highSpeedMultiplier 原子写入且无重复键、reload 热生效、扣费日志仿原版 gzip 轮转。**mineflayer 1.20.1 实机**：中/英登录欢迎按 locale 正确渲染、游玩中踢出收到完整 ban 公告、被 ban 后重登被原版 `multiplayer.disconnect.banned.reason` 拦截、15% 阈值提示的规则链接样式（黄 + `run_command` + `show_text` 悬停）正确
 
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
-- 双端配置结构保持一致（TOML 与 JSON 字段一一对应）
-- 双端 `DevCommands`/`QuotaCommands`/`applyBan`/`scanBans` 逐字重复（架构决定无法下沉 common）→ **改一处必须同步另一端**（三处：neoforge、fabric/1.21.1、fabric-multi/shared，坑 #33；API 差异行除外）
-- MC 版本范围：neoforge 与 fabric 1.21.1 仅 1.21.1；fabric-multi 额外支持 1.21.11/26.1.2/26.2（坑 #33），不得再放宽到未测试版本
-- 不做：mixin、客户端内容、指令式配置；26.x 迁移只适配壳层（fabric 侧已落地为 fabric-multi，neoforge 仍仅 1.21.1）
+- 各端配置结构保持一致（TOML 与 JSON 字段一一对应；forge 与 neoforge 的 TOML 键完全相同）
+- 各端 `DevCommands`/`QuotaCommands`/`applyBan`/`scanBans` 逐字重复（架构决定无法下沉 common）→ **改一处必须同步其余各处**（四处：neoforge、fabric/1.21.1、fabric-multi/shared、forge/1.20.1，坑 #33/#38；API 差异行除外）。`ChunkPlanMessages` 在 forge 端与 neoforge 端**除 package 行外逐字一致**（无版本相关 API），改文案后可用 `diff <(tail -n +2 …neoforge/ChunkPlanMessages.java) <(tail -n +2 …forge/ChunkPlanMessages.java)` 自检
+- MC 版本范围：neoforge 与 fabric 1.21.1 仅 1.21.1；forge 仅 1.20.1（坑 #38）；fabric-multi 额外支持 1.21.11/26.1.2/26.2（坑 #33），不得再放宽到未测试版本
+- 不做：mixin、客户端内容、指令式配置；26.x 迁移只适配壳层（fabric 侧已落地为 fabric-multi，neoforge 与 forge 各自单版本）
