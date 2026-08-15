@@ -304,7 +304,7 @@ If you need migration to a version not in the plan, you can also submit an issue
 
 ### Known Limitations
 
-- **Singleplayer mode:** The host player in singleplayer is always an operator and is exempt by default — your quota consumption will always be 0 with the default config; to experience billing in singleplayer, run `/chunkplan config exemptByDefault false` to disable admin exemption. **Please note: if you trigger a ban in singleplayer mode, you will not be able to enter this world while the ban lasts! We leave the solution for you to explore. We do NOT recommend disabling admin exemption in singleplayer!!!**;
+- **Singleplayer mode:** The host player in singleplayer is always an operator and is exempt by default — your quota consumption will always be 0 with the default config; to experience billing in singleplayer, run `/chunkplan config exemptByDefault false` to disable admin exemption. **Please note: if you trigger a ban in singleplayer mode, you will not be able to enter this world while the ban lasts! We have not tried any workaround for this ourselves, so we cannot provide a solution for now. However, what we do know is that your ban will be automatically lifted once the refresh time arrives (as long as you still have this mod installed). We do NOT recommend disabling admin exemption in singleplayer!!!**;
 
 - **Offline mode:** In offline-mode servers, player UUIDs are derived from their in-game names, so impersonating a name on the exemption list yields the same UUID and can bypass billing and bans (the same inherent issue as vanilla OP/whitelist mechanics); online mode is unaffected; when using offline mode, we recommend pairing it with login plugins or other protective measures.
 
