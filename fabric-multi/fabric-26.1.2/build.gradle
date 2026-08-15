@@ -5,10 +5,11 @@ plugins {
 }
 
 group = 'dev.chunkplan'
-version = project.mod_version
+// 产物名已含版本号（chunkplan-<版本>-<加载器>-<MC版本>），置空 version 避免追加 -0.1.0 尾部后缀
+version = ''
 
 base {
-    archivesName = 'chunkplan-fabric-26.1.2'
+    archivesName = "chunkplan-${mod_version}-fabric-${minecraft_version}"
 }
 
 java {

@@ -6,8 +6,11 @@ plugins {
 }
 
 base {
-    archivesName = 'chunkplan-neoforge'
+    archivesName = "chunkplan-${mod_version}-neoforge-${minecraft_version}"
 }
+
+// 产物名已含版本号（chunkplan-<版本>-<加载器>-<MC版本>），置空 version 避免追加 -0.1.0 尾部后缀
+version = ''
 
 java {
     toolchain.languageVersion = JavaLanguageVersion.of("${java_version}" as int)
