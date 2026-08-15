@@ -747,7 +747,8 @@ public final class QuotaCommands {
             String head = lastWs >= 0 ? remaining.substring(0, lastWs + 1) : words.get(0) + " ";
             String tail = n == 2 ? words.get(1).toLowerCase() : "";
             for (String v : List.of("tier1", "tier2", "tier3", "tier4", "all")) {
-                if (tail.isEmpty() || v.startsWith(tail)) {
+                // 第 2 词已完整输入时不再建议该词本身（否则 @a tier1 后按 Tab 仍弹同一建议，套娃）
+                if (tail.isEmpty() || (v.startsWith(tail) && !v.equalsIgnoreCase(words.get(1)))) {
                     builder.suggest(head + v);
                 }
             }
