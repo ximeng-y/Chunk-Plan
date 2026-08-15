@@ -140,6 +140,14 @@
 
 
 
+### 已知限制
+
+- **单人模式：**单人游戏的主机玩家恒为管理员，且默认受豁免——默认配置下您的额度消耗恒为0；若想在单人模式下体验计费，可执行`/chunkplan config exemptByDefault false`关闭管理员豁免。**请注意，若您在单人模式下触发封禁，那么在封禁期间您将无法进入此存档！解决方式请自行探索。我们不建议您在单人模式下关闭管理员豁免！！！**；
+
+- **离线模式：**离线服务器的玩家UUID由其游戏名派生，冒用豁免名单中的玩家名即可获得相同的UUID，从而绕过计费与封禁（与原版OP/白名单机制同源的问题）；在线模式不受此影响；使用离线模式时，建议配合登录插件等其它防护手段。
+
+
+
 ### 功能计划
 
 - 计划新增可视化GUI界面，玩家可选择在自己的客户端安装以实现可视化配置、额度查询等功能；
@@ -291,6 +299,14 @@ If you need migration support for Fabric 1.21.2~1.21.10 or other versions, pleas
 Requests in the comment section may also be adopted, but issues are more likely to be noticed and have higher adoption priority.
 
 If you need migration to a version not in the plan, you can also submit an issue. We will consider the migration based on the demand.
+
+
+
+### Known Limitations
+
+- **Singleplayer mode:** The host player in singleplayer is always an operator and is exempt by default — your quota consumption will always be 0 with the default config; to experience billing in singleplayer, run `/chunkplan config exemptByDefault false` to disable admin exemption. **Please note: if you trigger a ban in singleplayer mode, you will not be able to enter this world while the ban lasts! We leave the solution for you to explore. We do NOT recommend disabling admin exemption in singleplayer!!!**;
+
+- **Offline mode:** In offline-mode servers, player UUIDs are derived from their in-game names, so impersonating a name on the exemption list yields the same UUID and can bypass billing and bans (the same inherent issue as vanilla OP/whitelist mechanics); online mode is unaffected; when using offline mode, we recommend pairing it with login plugins or other protective measures.
 
 
 
