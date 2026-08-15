@@ -623,6 +623,8 @@ public final class QuotaCommands {
         Path configFile = resolveConfigFile(ctx);
         List<String> warnings = new ArrayList<>();
         QuotaConfig config = ForgeConfig.toQuotaConfigFromFile(configFile, warnings);
+        // 坑 #39：同步 spec 内存值，防止 Forge 关服时用启动旧值覆盖文件（重启回退默认）
+        ForgeConfig.syncSpecFromFile(configFile);
         for (String w : warnings) {
             org.slf4j.LoggerFactory.getLogger("ChunkPlan").warn("配置告警: {}", w);
         }

@@ -95,7 +95,57 @@ public final class ForgeConfig {
         SPEC = b.build();
     }
 
+    /** 坑 #39：同步失败仅告警，不影响命令主流程 */
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger("ChunkPlan");
+
     private ForgeConfig() {
+    }
+
+    /**
+     * 命令/reload 改文件后同步 spec 内存值（坑 #39）：Forge 1.20.1 平台在关服
+     * （ConfigTracker.unloadConfigs → ModConfig.save()）与启动加载后都会把 spec 内存值
+     * 无条件写回 serverconfig 文件；只改文件不同步 spec 会令关服用启动旧值覆盖文件、
+     * 重启回退默认（NeoForge 21.1 的 unloadConfig 从不写回，不受影响）。
+     * 用 FileConfig 重读文件、逐键 set 回 spec（ForgeConfigSpec.ConfigValue.set 只改内存，
+     * javap 实证 public），使平台任何写回都与文件一致。
+     */
+    public static void syncSpecFromFile(Path file) {
+        try (com.electronwill.nightconfig.core.file.FileConfig cfg =
+                     com.electronwill.nightconfig.core.file.FileConfig.of(file)) {
+            cfg.load();
+            TIER1_ENABLED.set(readBool(cfg.get("tier1Enabled"), TIER1_ENABLED.get()));
+            TIER1_WINDOW.set(String.valueOf(cfg.getOrElse("tier1Window", TIER1_WINDOW.get())));
+            TIER1_LIMIT.set(readLimit(cfg.get("tier1Limit"), TIER1_LIMIT.get()));
+            TIER2_ENABLED.set(readBool(cfg.get("tier2Enabled"), TIER2_ENABLED.get()));
+            TIER2_WINDOW.set(String.valueOf(cfg.getOrElse("tier2Window", TIER2_WINDOW.get())));
+            TIER2_LIMIT.set(readLimit(cfg.get("tier2Limit"), TIER2_LIMIT.get()));
+            TIER3_ENABLED.set(readBool(cfg.get("tier3Enabled"), TIER3_ENABLED.get()));
+            TIER3_WINDOW.set(String.valueOf(cfg.getOrElse("tier3Window", TIER3_WINDOW.get())));
+            TIER3_LIMIT.set(readLimit(cfg.get("tier3Limit"), TIER3_LIMIT.get()));
+            TIER4_ENABLED.set(readBool(cfg.get("tier4Enabled"), TIER4_ENABLED.get()));
+            TIER4_WINDOW.set(String.valueOf(cfg.getOrElse("tier4Window", TIER4_WINDOW.get())));
+            TIER4_LIMIT.set(readLimit(cfg.get("tier4Limit"), TIER4_LIMIT.get()));
+            FIRST_ENTRY_FEE.set(readLimit(cfg.get("firstEntryFee"), FIRST_ENTRY_FEE.get()));
+            FAMILIAR_ENTRY_FEE.set(readLimit(cfg.get("familiarEntryFee"), FAMILIAR_ENTRY_FEE.get()));
+            HIGH_SPEED_THRESHOLD.set(readLimit(cfg.get("highSpeedThreshold"), HIGH_SPEED_THRESHOLD.get()));
+            HIGH_SPEED_MULTIPLIER.set(readLimit(cfg.get("highSpeedMultiplier"), HIGH_SPEED_MULTIPLIER.get()));
+            EXEMPT_BY_DEFAULT.set(readBool(cfg.get("exemptByDefault"), EXEMPT_BY_DEFAULT.get()));
+            Object exemptRaw = cfg.get("exemptPlayers");
+            if (exemptRaw instanceof List<?> exemptList) {
+                List<String> list = new ArrayList<>();
+                for (Object s : exemptList) {
+                    list.add(String.valueOf(s));
+                }
+                EXEMPT_PLAYERS.set(list);
+            }
+            Object saveRaw = cfg.get("saveIntervalSec");
+            Object scanRaw = cfg.get("banScanIntervalSec");
+            SAVE_INTERVAL_SEC.set(saveRaw instanceof Number sv ? sv.longValue() : SAVE_INTERVAL_SEC.get());
+            BAN_SCAN_INTERVAL_SEC.set(scanRaw instanceof Number sc ? sc.longValue() : BAN_SCAN_INTERVAL_SEC.get());
+            LOG_FEE_EVENTS.set(readBool(cfg.get("logFeeEvents"), LOG_FEE_EVENTS.get()));
+        } catch (Exception e) {
+            LOG.warn("同步 spec 内存值失败（关服时配置可能回退旧值）: {}", e.getMessage());
+        }
     }
 
     /** 构建 common 配置；返回告警列表（非法配置回退默认时产生） */
