@@ -152,4 +152,4 @@
 
 **如果您喜欢此模组，请为我们**[**点个Star**](https://github.com/ximeng-y/Chunk-Plan)**\~**
 
-本模组基于 MPL-2.0 协议开源
+本模组基于 [MPL-2.0](https://www.mozilla.org/en-US/MPL/2.0/) 协议开源
