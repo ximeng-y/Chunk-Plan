@@ -808,6 +808,30 @@ class QuotaEngineTest {
     }
 
     @Test
+    void zeroLinesAfterTrackedThenEnableFirstTickNotCharged() {
+        // review 回归：零线前已追踪的玩家（tracking 有 stale 基准），零线期间跨大位移，
+        // 重开窗口后首个 tick 必须走首 tick 分支只记基准不扣费——若 tracking 残留，会把
+        // 零线期间整段位移当区块变化计费（5000 格位移必触发高速 ×2，误扣 2.0 并把远块
+        // 标记为已探索），违反坑 #31「重开首 tick 从 0 起」语义
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);    // 首 tick：建立 tracking
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);   // 跨块计费 1.0
+        double spentBefore = engine.quotaStatus(player).lines().get(0).spent();
+        assertEquals(1.0, spentBefore, 1e-9);
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of())
+                .build(new ArrayList<>()));
+        engine.onPlayerTick(player, false, OVERWORLD, 5000, 64, 0); // 零线：大位移跨块，tracking 应被清
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(new QuotaConfig.Line(1, 60, 10.0), new QuotaConfig.Line(2, 120, 20.0)))
+                .build(new ArrayList<>()));                          // 默认高速阈值 0.5：误计费必 ×2
+        QuotaEngine.TickResult r = engine.onPlayerTick(player, false, OVERWORLD, 5016, 64, 0); // 重开首 tick：只记基准
+        assertEquals(QuotaEngine.ResultType.NONE, r.type());
+        assertEquals(spentBefore, engine.quotaStatus(player).lines().get(0).spent(), 1e-9);
+        engine.onPlayerTick(player, false, OVERWORLD, 5032, 64, 0);  // 次 tick：正常计费（位移 16 > 阈值 ×2）
+        assertEquals(spentBefore + 2.0, engine.quotaStatus(player).lines().get(0).spent(), 1e-9);
+    }
+
+    @Test
     void clearTierSpendForAllPersistsOnlineImmediately() throws Exception {
         // 坑 #31（QA P1 回归）：在线玩家清档后立即落盘，不依赖 5 分钟周期保存；
         // 期间崩溃不会丢失清除（新引擎读文件即可验证）

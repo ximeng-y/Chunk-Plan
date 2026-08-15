@@ -189,7 +189,11 @@ public final class QuotaEngine {
         }
         if (config.lines().isEmpty()) {
             // 零线（坑 #31）：全部窗口已关闭——不加载玩家数据、不记账、不判踢、不提示；
-            // tracking 不建立 → 重新开启窗口后首个 tick 走首 tick 分支（只记基准不扣费），从 0 起
+            // 清除位移基准：零线期间 tracking 不更新，若不清理，零线前已追踪的玩家在
+            // 重开窗口后首个 tick 会把零线期间整段位移当区块变化计费（且必然触发高速
+            // 倍率）——与豁免分支（上方）同款清理；清理后重开首 tick 走首 tick 分支
+            // （只记基准不扣费），从 0 起
+            tracking.remove(uuid);
             return TickResult.none();
         }
         PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
