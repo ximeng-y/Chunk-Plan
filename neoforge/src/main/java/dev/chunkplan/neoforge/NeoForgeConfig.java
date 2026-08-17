@@ -184,6 +184,37 @@ public final class NeoForgeConfig {
         }
     }
 
+    /**
+     * 读取四档原始配置（含禁用档的窗口/上限，供客户端管理页展示与编辑）。
+     * 与 toQuotaConfigFromFile 同源（FileConfig 直接读文件，绕过可能滞后的 spec 内存，坑 #12）；
+     * 解析失败回退 spec 内存值。恒返回 4 项（tier1~tier4）。
+     */
+    public static List<QuotaTiers.Tier> readRawTiers(Path file) {
+        try (com.electronwill.nightconfig.core.file.FileConfig cfg =
+                     com.electronwill.nightconfig.core.file.FileConfig.of(file)) {
+            cfg.load();
+            return List.of(
+                    new QuotaTiers.Tier(readBool(cfg.get("tier1Enabled"), TIER1_ENABLED.get()),
+                            String.valueOf(cfg.getOrElse("tier1Window", TIER1_WINDOW.get())),
+                            readLimit(cfg.get("tier1Limit"), TIER1_LIMIT.get())),
+                    new QuotaTiers.Tier(readBool(cfg.get("tier2Enabled"), TIER2_ENABLED.get()),
+                            String.valueOf(cfg.getOrElse("tier2Window", TIER2_WINDOW.get())),
+                            readLimit(cfg.get("tier2Limit"), TIER2_LIMIT.get())),
+                    new QuotaTiers.Tier(readBool(cfg.get("tier3Enabled"), TIER3_ENABLED.get()),
+                            String.valueOf(cfg.getOrElse("tier3Window", TIER3_WINDOW.get())),
+                            readLimit(cfg.get("tier3Limit"), TIER3_LIMIT.get())),
+                    new QuotaTiers.Tier(readBool(cfg.get("tier4Enabled"), TIER4_ENABLED.get()),
+                            String.valueOf(cfg.getOrElse("tier4Window", TIER4_WINDOW.get())),
+                            readLimit(cfg.get("tier4Limit"), TIER4_LIMIT.get())));
+        } catch (Exception e) {
+            return List.of(
+                    new QuotaTiers.Tier(TIER1_ENABLED.get(), TIER1_WINDOW.get(), TIER1_LIMIT.get()),
+                    new QuotaTiers.Tier(TIER2_ENABLED.get(), TIER2_WINDOW.get(), TIER2_LIMIT.get()),
+                    new QuotaTiers.Tier(TIER3_ENABLED.get(), TIER3_WINDOW.get(), TIER3_LIMIT.get()),
+                    new QuotaTiers.Tier(TIER4_ENABLED.get(), TIER4_WINDOW.get(), TIER4_LIMIT.get()));
+        }
+    }
+
     /** TOML 布尔读取（类型不符回退默认；键缺失时 cfg.get 返回 null） */
     private static boolean readBool(Object raw, boolean def) {
         return raw instanceof Boolean b ? b : def;

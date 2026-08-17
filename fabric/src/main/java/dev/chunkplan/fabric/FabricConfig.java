@@ -106,19 +106,7 @@ public final class FabricConfig {
             dto = GsonHolder.GSON.fromJson(DEFAULT_JSON, Dto.class);
         }
 
-        List<QuotaTiers.Tier> tiers = List.of(
-                new QuotaTiers.Tier(dto.tier1Enabled == null ? true : dto.tier1Enabled,
-                        dto.tier1Window == null ? "5h" : dto.tier1Window,
-                        dto.tier1Limit == null ? 500.0 : dto.tier1Limit),
-                new QuotaTiers.Tier(dto.tier2Enabled == null ? true : dto.tier2Enabled,
-                        dto.tier2Window == null ? "24h" : dto.tier2Window,
-                        dto.tier2Limit == null ? 2000.0 : dto.tier2Limit),
-                new QuotaTiers.Tier(dto.tier3Enabled == null ? false : dto.tier3Enabled,
-                        dto.tier3Window == null ? "7d" : dto.tier3Window,
-                        dto.tier3Limit == null ? 10000.0 : dto.tier3Limit),
-                new QuotaTiers.Tier(dto.tier4Enabled == null ? false : dto.tier4Enabled,
-                        dto.tier4Window == null ? "30d" : dto.tier4Window,
-                        dto.tier4Limit == null ? 40000.0 : dto.tier4Limit));
+        List<QuotaTiers.Tier> tiers = tiersOf(dto);
 
         List<UUID> exempt = new ArrayList<>();
         if (dto.exemptPlayers != null) {
@@ -143,6 +131,40 @@ public final class FabricConfig {
                 .banScanIntervalSec(dto.banScanIntervalSec == null ? 30 : dto.banScanIntervalSec)
                 .logFeeEvents(dto.logFeeEvents == null ? true : dto.logFeeEvents)
                 .build(warnings);
+    }
+
+    /**
+     * 读取四档原始配置（含禁用档的窗口/上限，供客户端管理页展示与编辑）。
+     * 直接读 JSON 文件（复用 .bak 兜底）；失败回退默认。恒返回 4 项（tier1~tier4）。
+     */
+    public static List<QuotaTiers.Tier> readRawTiers(Path configFile) {
+        Dto dto;
+        if (!Files.exists(configFile)) {
+            dto = GsonHolder.GSON.fromJson(DEFAULT_JSON, Dto.class);
+        } else {
+            dto = AtomicFile.readJson(configFile, Dto.class, "配置文件", LOG);
+        }
+        if (dto == null) {
+            dto = GsonHolder.GSON.fromJson(DEFAULT_JSON, Dto.class);
+        }
+        return tiersOf(dto);
+    }
+
+    /** 四档原始配置（缺字段回退该档默认，与 DEFAULT_JSON 一致） */
+    private static List<QuotaTiers.Tier> tiersOf(Dto dto) {
+        return List.of(
+                new QuotaTiers.Tier(dto.tier1Enabled == null ? true : dto.tier1Enabled,
+                        dto.tier1Window == null ? "5h" : dto.tier1Window,
+                        dto.tier1Limit == null ? 500.0 : dto.tier1Limit),
+                new QuotaTiers.Tier(dto.tier2Enabled == null ? true : dto.tier2Enabled,
+                        dto.tier2Window == null ? "24h" : dto.tier2Window,
+                        dto.tier2Limit == null ? 2000.0 : dto.tier2Limit),
+                new QuotaTiers.Tier(dto.tier3Enabled == null ? false : dto.tier3Enabled,
+                        dto.tier3Window == null ? "7d" : dto.tier3Window,
+                        dto.tier3Limit == null ? 10000.0 : dto.tier3Limit),
+                new QuotaTiers.Tier(dto.tier4Enabled == null ? false : dto.tier4Enabled,
+                        dto.tier4Window == null ? "30d" : dto.tier4Window,
+                        dto.tier4Limit == null ? 40000.0 : dto.tier4Limit));
     }
 
     /**

@@ -246,6 +246,36 @@ public final class ForgeConfig {
     }
 
     /**
+     * 读取四档原始配置（含禁用档的窗口/上限，供客户端管理页展示与编辑）。
+     * 与 toQuotaConfigFromFile 同源（FileConfig 直接读文件）；失败回退 spec 内存值。恒返回 4 项。
+     */
+    public static List<QuotaTiers.Tier> readRawTiers(Path file) {
+        try (com.electronwill.nightconfig.core.file.FileConfig cfg =
+                     com.electronwill.nightconfig.core.file.FileConfig.of(file)) {
+            cfg.load();
+            return List.of(
+                    new QuotaTiers.Tier(readBool(cfg.get("tier1Enabled"), TIER1_ENABLED.get()),
+                            String.valueOf(cfg.getOrElse("tier1Window", TIER1_WINDOW.get())),
+                            readLimit(cfg.get("tier1Limit"), TIER1_LIMIT.get())),
+                    new QuotaTiers.Tier(readBool(cfg.get("tier2Enabled"), TIER2_ENABLED.get()),
+                            String.valueOf(cfg.getOrElse("tier2Window", TIER2_WINDOW.get())),
+                            readLimit(cfg.get("tier2Limit"), TIER2_LIMIT.get())),
+                    new QuotaTiers.Tier(readBool(cfg.get("tier3Enabled"), TIER3_ENABLED.get()),
+                            String.valueOf(cfg.getOrElse("tier3Window", TIER3_WINDOW.get())),
+                            readLimit(cfg.get("tier3Limit"), TIER3_LIMIT.get())),
+                    new QuotaTiers.Tier(readBool(cfg.get("tier4Enabled"), TIER4_ENABLED.get()),
+                            String.valueOf(cfg.getOrElse("tier4Window", TIER4_WINDOW.get())),
+                            readLimit(cfg.get("tier4Limit"), TIER4_LIMIT.get())));
+        } catch (Exception e) {
+            return List.of(
+                    new QuotaTiers.Tier(TIER1_ENABLED.get(), TIER1_WINDOW.get(), TIER1_LIMIT.get()),
+                    new QuotaTiers.Tier(TIER2_ENABLED.get(), TIER2_WINDOW.get(), TIER2_LIMIT.get()),
+                    new QuotaTiers.Tier(TIER3_ENABLED.get(), TIER3_WINDOW.get(), TIER3_LIMIT.get()),
+                    new QuotaTiers.Tier(TIER4_ENABLED.get(), TIER4_WINDOW.get(), TIER4_LIMIT.get()));
+        }
+    }
+
+    /**
      * /chunkplan config 用：原子改写 TOML 文件中的单个键（重启后保留）。
      * 不用 NightConfig 写器：其非原子保存可能被 Forge 的配置 watcher 半读，触发 .bak + 静默重置（坑 #12）。
      * 文本替换 + AtomicFile 原子写（同目录 .tmp + rename），watcher 只会看到完整文件。

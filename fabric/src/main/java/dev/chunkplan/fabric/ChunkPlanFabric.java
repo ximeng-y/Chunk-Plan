@@ -71,6 +71,10 @@ public final class ChunkPlanFabric implements ModInitializer {
                     DevCommands.register(dispatcher));
         }
 
+        // 客户端 GUI 网络通道：注册 payload 类型 + 服务端接收器（main 入口双端都执行）
+        ChunkPlanNetwork.registerTypes();
+        ChunkPlanNetwork.registerServerReceivers();
+
         LOG.info("ChunkPlan Fabric 壳已注册，配置文件: {}", configFile);
     }
 

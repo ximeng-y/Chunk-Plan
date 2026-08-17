@@ -59,6 +59,8 @@ public final class ChunkPlanForge {
         // 用构造器注入的 context 而非 ModLoadingContext.get()——后者在 Forge 47.4 已 @Deprecated(forRemoval)；
         // FMLModContainer 按构造器参数个数分派（0 参无注入 / 1 参注入 FMLJavaModLoadingContext，字节码实证）
         context.registerConfig(ModConfig.Type.SERVER, ForgeConfig.SPEC);
+        // 客户端 GUI 网络通道（SimpleChannel，双端注册；vanilla 客户端经 acceptMissingOr 放行）
+        ChunkPlanNetwork.register();
         // GAME 事件由 GameEvents 上的 @Mod.EventBusSubscriber 自动注册，此处不得再手动
         // MinecraftForge.EVENT_BUS.register()，否则处理器双注册、每个事件触发两次
     }
