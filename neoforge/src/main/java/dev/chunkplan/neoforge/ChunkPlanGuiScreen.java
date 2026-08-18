@@ -18,6 +18,9 @@ import net.minecraft.network.chat.Component;
  * <p>两页：用量页（所有玩家可见，等价 /chunkplan check，进度条可视化）+ 管理页（仅权限等级 2
  * 可见，覆盖 config 全部功能与 reset）。命令不删除：GUI 操作拼成命令串透传给服务端复用同一套
  * 权限/确认/配置逻辑（见 {@link ChunkPlanNetwork}）。
+ *
+ * <p>用户可见文案统一走 lang 文件（{@code gui.chunkplan.*}），按客户端语言由
+ * {@link Component#translatable(String, Object...)} 渲染，与按键绑定的本地化方式一致。
  */
 public final class ChunkPlanGuiScreen extends Screen {
 
@@ -39,7 +42,7 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     // 待确认对话框（reset / 关窗口 / 调低额度需二次确认，与命令 confirm 流一致）
     private boolean pendingConfirm;
-    private String confirmText;
+    private Component confirmText;
     private int yesX, yesY, yesW, yesH;
     private int noX, noY, noW, noH;
 
@@ -53,7 +56,7 @@ public final class ChunkPlanGuiScreen extends Screen {
     private EditBox resetTarget;
     private int resetTier; // 0 = all，1..4
 
-    // 用户输入保留（跨状态刷新重建不丢字）
+    // 用户输入保留（跨状态刷新重建不丢字）；命令派发后清空以便回显服务端确认值
     private final String[] savedLimit = new String[4];
     private String savedMult;
     private String savedResetTarget;
@@ -77,16 +80,17 @@ public final class ChunkPlanGuiScreen extends Screen {
     }
 
     private void buildTabs() {
-        boolean zh = zh();
-        addRenderableWidget(Button.builder(Component.literal((page == 0 ? "▶ " : "") + t(zh, "用量", "Usage")),
+        addRenderableWidget(Button.builder(
+                Component.literal((page == 0 ? "▶ " : "")).append(Component.translatable("gui.chunkplan.tab.usage")),
                 b -> switchPage(0)).bounds(10, 8, 80, 20).build());
         if (isAdmin()) {
-            addRenderableWidget(Button.builder(Component.literal((page == 1 ? "▶ " : "") + t(zh, "管理", "Admin")),
+            addRenderableWidget(Button.builder(
+                    Component.literal((page == 1 ? "▶ " : "")).append(Component.translatable("gui.chunkplan.tab.admin")),
                     b -> switchPage(1)).bounds(94, 8, 80, 20).build());
         }
-        addRenderableWidget(Button.builder(Component.literal(t(zh, "刷新", "Refresh")),
+        addRenderableWidget(Button.builder(Component.translatable("gui.chunkplan.refresh"),
                 b -> requestStatus()).bounds(width - 132, 8, 56, 20).build());
-        addRenderableWidget(Button.builder(Component.literal(t(zh, "关闭", "Close")),
+        addRenderableWidget(Button.builder(Component.translatable("gui.chunkplan.close"),
                 b -> onClose()).bounds(width - 68, 8, 58, 20).build());
     }
 
@@ -111,7 +115,6 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (!isAdmin()) {
             return;
         }
-        boolean zh = zh();
         int left = 12;
         int rowH = 26;
 
@@ -125,7 +128,8 @@ public final class ChunkPlanGuiScreen extends Screen {
 
             int tx = left + 96;
             tierToggle[i] = addButton(tx, ry, 52, 20,
-                    Component.literal(enabled ? t(zh, "已开启", "On") : t(zh, "已关闭", "Off")),
+                    enabled ? Component.translatable("gui.chunkplan.enabled")
+                            : Component.translatable("gui.chunkplan.disabled"),
                     b -> toggleTier(tier, !enabled));
 
             int wx = tx + 58;
@@ -144,28 +148,31 @@ public final class ChunkPlanGuiScreen extends Screen {
 
             int sx = lx + 62;
             tierLimitSet[i] = addButton(sx, ry, 42, 20,
-                    Component.literal(t(zh, "设置", "Set")), b -> setLimit(tier));
+                    Component.translatable("gui.chunkplan.set"), b -> setLimit(tier));
             tierLimitSet[i].active = enabled;
         }
 
         int gy = 36 + 4 * rowH + 6;
-        addButton(left + 96, gy, 66, 20, Component.literal(t(zh, "全部开启", "All on")),
+        addButton(left + 96, gy, 66, 20, Component.translatable("gui.chunkplan.all_on"),
                 b -> allWindows(true));
-        addButton(left + 168, gy, 66, 20, Component.literal(t(zh, "全部关闭", "All off")),
+        addButton(left + 168, gy, 66, 20, Component.translatable("gui.chunkplan.all_off"),
                 b -> allWindows(false));
         gy += 28;
         multEdit = new EditBox(font, left + 96, gy, 56, 20, Component.empty());
         multEdit.setValue(savedMult != null ? savedMult : fmtNum(status == null ? 0 : status.highSpeedMultiplier()));
         multEdit.setResponder(v -> savedMult = v);
         addRenderableWidget(multEdit);
-        addButton(left + 158, gy, 42, 20, Component.literal(t(zh, "设置", "Set")),
+        addButton(left + 158, gy, 42, 20, Component.translatable("gui.chunkplan.set"),
                 b -> setMultiplier());
         gy += 28;
         boolean ebd = status != null && status.exemptByDefault();
         addButton(left + 96, gy, 104, 20,
-                Component.literal(t(zh, "管理员计费", "Admin billing") + ": " + (ebd ? t(zh, "开", "On") : t(zh, "关", "Off"))),
+                Component.translatable("gui.chunkplan.admin_billing")
+                        .append(Component.literal(": "))
+                        .append(ebd ? Component.translatable("gui.chunkplan.on")
+                                : Component.translatable("gui.chunkplan.off")),
                 b -> setExemptDefault(!ebd));
-        addButton(left + 206, gy, 56, 20, Component.literal(t(zh, "重载配置", "Reload")),
+        addButton(left + 206, gy, 56, 20, Component.translatable("gui.chunkplan.reload"),
                 b -> sendCommand("chunkplan reload"));
         gy += 28;
         resetTarget = new EditBox(font, left + 96, gy, 74, 20, Component.empty());
@@ -174,7 +181,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         addRenderableWidget(resetTarget);
         resetTierCycle = addButton(left + 176, gy, 52, 20,
                 Component.literal(resetTierName()), b -> cycleResetTier());
-        addButton(left + 234, gy, 56, 20, Component.literal(t(zh, "重置", "Reset")),
+        addButton(left + 234, gy, 56, 20, Component.translatable("gui.chunkplan.reset"),
                 b -> doReset());
     }
 
@@ -208,8 +215,7 @@ public final class ChunkPlanGuiScreen extends Screen {
     private void toggleTier(int tier, boolean enable) {
         if (!enable) {
             sendCommand("chunkplan config window tier" + tier + " off");
-            showConfirm("将关闭 tier" + tier + " 窗口并清空该窗口所有玩家记录，",
-                    "This will disable tier" + tier + " and clear all players' records for it, ");
+            showConfirm(Component.translatable("gui.chunkplan.confirm.disable_tier", tier));
         } else {
             sendCommand("chunkplan config window tier" + tier + " on");
         }
@@ -238,11 +244,11 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         if (t != null && newLimit < t.limit()) {
             sendCommand("chunkplan config windowLimit tier" + tier + " " + raw);
-            showConfirm("将调低 tier" + tier + " 额度，可能引发部分玩家被无警告踢出，",
-                    "This will lower tier" + tier + " limit; some players may be kicked without warning, ");
+            showConfirm(Component.translatable("gui.chunkplan.confirm.lower_tier", tier));
         } else {
             sendCommand("chunkplan config windowLimit tier" + tier + " " + raw);
         }
+        savedLimit[tier - 1] = null; // 派发后回读服务端确认值，不再保留输入
     }
 
     private void setMultiplier() {
@@ -251,6 +257,7 @@ public final class ChunkPlanGuiScreen extends Screen {
             return; // 非法数值：不发送，交由玩家修正
         }
         sendCommand("chunkplan config highSpeedMultiplier " + raw);
+        savedMult = null; // 派发后回读服务端确认值，不再保留输入
     }
 
     private void setExemptDefault(boolean value) {
@@ -260,8 +267,7 @@ public final class ChunkPlanGuiScreen extends Screen {
     private void allWindows(boolean enable) {
         if (!enable) {
             sendCommand("chunkplan config window all off");
-            showConfirm("将关闭全部窗口并清空所有玩家记录，额度限制将停止。",
-                    "This will disable all windows and clear all players' records; quota limits will stop. ");
+            showConfirm(Component.translatable("gui.chunkplan.confirm.disable_all"));
         } else {
             sendCommand("chunkplan config window all on");
         }
@@ -285,7 +291,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         String cmd = "chunkplan reset " + target + (resetTier == 0 ? "" : " " + resetTierName());
         sendCommand(cmd);
-        showConfirm("将重置 " + target + " 的探索额度，", "This will reset " + target + "'s exploration quota, ");
+        showConfirm(Component.translatable("gui.chunkplan.confirm.reset", target));
     }
 
     private static double parseDouble(String s) {
@@ -326,9 +332,10 @@ public final class ChunkPlanGuiScreen extends Screen {
         ChunkPlanClient.sendCommand(cmd);
     }
 
-    private void showConfirm(String zhText, String enText) {
+    private void showConfirm(Component message) {
         this.pendingConfirm = true;
-        this.confirmText = t(zhText, enText) + t("点击确认执行（60 秒内有效）", " Click to confirm (valid for 60s)");
+        this.confirmText = Component.empty().append(message)
+                .append(Component.translatable("gui.chunkplan.confirm.hint"));
     }
 
     // ---------- 渲染 ----------
@@ -352,93 +359,92 @@ public final class ChunkPlanGuiScreen extends Screen {
         boolean zh = zh();
         int x = 12;
         int y = 40;
-        g.drawString(font, t(zh, "探索额度状态", "Exploration Quota"), x, y, COL_ACCENT);
+        g.drawString(font, Component.translatable("gui.chunkplan.usage.title"), x, y, COL_ACCENT);
         y += 16;
         if (waiting) {
             if (System.currentTimeMillis() - requestTimeMillis > REQUEST_TIMEOUT_MILLIS) {
-                g.drawString(font, t(zh, "未检测到服务器 ChunkPlan（或版本不匹配），命令仍可用",
-                        "No server ChunkPlan detected (or version mismatch); commands still work"), x, y, COL_RED);
+                g.drawString(font, Component.translatable("gui.chunkplan.no_server"), x, y, COL_RED);
             } else {
-                g.drawString(font, t(zh, "正在获取额度…", "Fetching quota..."), x, y, COL_GRAY);
+                g.drawString(font, Component.translatable("gui.chunkplan.fetching"), x, y, COL_GRAY);
             }
             return;
         }
         GuiStatus s = status;
         if (s == null) {
-            g.drawString(font, t(zh, "无法解析服务器返回的状态（可能版本不匹配）", "Could not parse server status (possible version mismatch)"), x, y, COL_RED);
+            g.drawString(font, Component.translatable("gui.chunkplan.parse_error"), x, y, COL_RED);
             return;
         }
         if (s.isExempt()) {
             g.drawString(font, s.inExemptList()
-                            ? t(zh, "[豁免] 你在豁免名单中，不受额度限制", "[Exempt] You are in the exempt list; quota limits do not apply")
-                            : t(zh, "[豁免] 你当前是管理员，不受额度限制", "[Exempt] You are an operator; quota limits do not apply"),
+                            ? Component.translatable("gui.chunkplan.exempt_list")
+                            : Component.translatable("gui.chunkplan.exempt_admin"),
                     x, y, COL_YELLOW);
             y += 14;
         }
         if (s.lines().isEmpty()) {
-            g.drawString(font, t(zh, "所有探索窗口均已关闭，当前无额度限制", "All quota windows are disabled; no quota limits in effect"),
-                    x, y, COL_GREEN);
+            g.drawString(font, Component.translatable("gui.chunkplan.zero_line"), x, y, COL_GREEN);
         } else {
             for (QuotaEngine.LineStatus l : s.lines()) {
                 double pct = l.limit() > 0 ? l.spent() / l.limit() * 100.0 : 0;
                 int color = pct < 50 ? COL_GREEN : (pct < 75 ? COL_YELLOW : COL_RED);
                 String label = ChunkPlanMessages.windowName(l.windowSeconds(), zh);
-                g.drawString(font, label + "  " + String.format("%.1f / %.1f", l.spent(), l.limit()), x, y, COL_TEXT);
+                g.drawString(font, Component.literal(label + "  " + String.format("%.1f / %.1f", l.spent(), l.limit())),
+                        x, y, COL_TEXT);
                 y += 12;
                 int barW = Math.max(80, Math.min(260, width - 40));
                 drawBar(g, x, y, barW, BAR_H, pct, color);
-                g.drawString(font, String.format("%.0f%%", pct), x + barW + 4, y, color);
+                g.drawString(font, Component.literal(String.format("%.0f%%", pct)), x + barW + 4, y, color);
                 y += BAR_H + 2;
                 if (l.nextResetMillis() > 0) {
-                    g.drawString(font, t(zh, "下次重置：", "Next reset: ") + ChunkPlanMessages.formatTime(l.nextResetMillis()),
-                            x + 12, y, COL_GRAY);
+                    g.drawString(font, Component.translatable("gui.chunkplan.next_reset",
+                            ChunkPlanMessages.formatTime(l.nextResetMillis())), x + 12, y, COL_GRAY);
                 }
                 y += 12;
             }
             y += 2;
             if (s.allExceeded()) {
-                g.drawString(font, t(zh, "已耗尽，预计 ", "Exhausted, recovers at ") + ChunkPlanMessages.formatTime(s.recoveryMillis()),
-                        x, y, COL_RED);
+                g.drawString(font, Component.translatable("gui.chunkplan.exhausted",
+                        ChunkPlanMessages.formatTime(s.recoveryMillis())), x, y, COL_RED);
             } else {
                 int wp = s.worstPercent();
-                String word = wp < 50 ? t(zh, "额度充足，可正常探索", "Plenty of quota")
-                        : (wp < 75 ? t(zh, "额度中等，请注意控制", "Moderate quota, watch spending")
-                        : t(zh, "额度不足，请谨慎探索", "Quota is low, explore carefully"));
+                Component word = wp < 50 ? Component.translatable("gui.chunkplan.adequate")
+                        : (wp < 75 ? Component.translatable("gui.chunkplan.moderate")
+                        : Component.translatable("gui.chunkplan.low"));
                 int wc = wp < 50 ? COL_GREEN : (wp < 75 ? COL_YELLOW : COL_RED);
                 g.drawString(font, word, x, y, wc);
             }
         }
         // 计费规则（所有玩家可见，等价 /chunkplan rules）
         y += 18;
-        g.drawString(font, t(zh, "计费规则", "Billing rules"), x, y, COL_ACCENT);
+        g.drawString(font, Component.translatable("gui.chunkplan.rules_title"), x, y, COL_ACCENT);
         y += 12;
-        g.drawString(font, t(zh, "新踏足区块消耗 ", "New chunk costs ") + String.valueOf(s.firstEntryFee()), x + 8, y, COL_GRAY);
+        g.drawString(font, Component.translatable("gui.chunkplan.rule_new", String.valueOf(s.firstEntryFee())),
+                x + 8, y, COL_GRAY);
         y += 11;
-        g.drawString(font, t(zh, "已踏足区块消耗 ", "Explored chunk costs ") + String.valueOf(s.familiarEntryFee()), x + 8, y, COL_GRAY);
+        g.drawString(font, Component.translatable("gui.chunkplan.rule_explored", String.valueOf(s.familiarEntryFee())),
+                x + 8, y, COL_GRAY);
         y += 11;
-        g.drawString(font, t(zh, "高速移动倍率 ", "High-speed multiplier ") + String.valueOf(s.highSpeedMultiplier()) + "x",
+        g.drawString(font, Component.translatable("gui.chunkplan.rule_speed", String.valueOf(s.highSpeedMultiplier())),
                 x + 8, y, COL_GRAY);
     }
 
     private void renderAdmin(GuiGraphics g) {
-        boolean zh = zh();
         int x = 12;
         if (!isAdmin()) {
-            g.drawString(font, t(zh, "无权限访问管理页", "No permission to view admin page"), x, 44, COL_RED);
+            g.drawString(font, Component.translatable("gui.chunkplan.no_permission"), x, 44, COL_RED);
             return;
         }
         for (int i = 0; i < 4; i++) {
             int ry = 36 + i * 26;
-            g.drawString(font, "tier" + (i + 1), x, ry + 6, COL_TEXT);
+            g.drawString(font, Component.literal("tier" + (i + 1)), x, ry + 6, COL_TEXT);
         }
         int gy = 36 + 4 * 26 + 6;
-        g.drawString(font, t(zh, "全部窗口", "All windows"), x, gy + 6, COL_TEXT);
-        g.drawString(font, t(zh, "高速倍率", "Speed ×"), x, gy + 34, COL_TEXT);
-        g.drawString(font, t(zh, "重置额度", "Reset quota"), x, gy + 90, COL_TEXT);
+        g.drawString(font, Component.translatable("gui.chunkplan.all_windows"), x, gy + 6, COL_TEXT);
+        g.drawString(font, Component.translatable("gui.chunkplan.speed_mult"), x, gy + 34, COL_TEXT);
+        g.drawString(font, Component.translatable("gui.chunkplan.reset_quota"), x, gy + 90, COL_TEXT);
     }
 
     private void renderConfirm(GuiGraphics g) {
-        boolean zh = zh();
         g.fill(0, 0, width, height, 0x80000000);
         int w = Math.min(width - 20, 320);
         int h = 88;
@@ -446,21 +452,21 @@ public final class ChunkPlanGuiScreen extends Screen {
         int by = (height - h) / 2;
         g.fill(bx, by, bx + w, by + h, COL_PANEL);
         g.fill(bx, by, bx + w, by + 1, 0xFFFFFFFF);
-        g.drawString(font, t(zh, "确认操作", "Confirm action"), bx + 8, by + 8, COL_ACCENT);
-        g.drawString(font, confirmText == null ? "" : confirmText, bx + 8, by + 28, COL_TEXT);
+        g.drawString(font, Component.translatable("gui.chunkplan.confirm.title"), bx + 8, by + 8, COL_ACCENT);
+        g.drawString(font, confirmText == null ? Component.empty() : confirmText, bx + 8, by + 28, COL_TEXT);
         int btnY = by + h - 24;
         noX = bx + w - 118;
         noY = btnY;
         noW = 52;
         noH = 18;
         g.fill(noX, noY, noX + noW, noY + noH, 0xFF555555);
-        g.drawCenteredString(font, t(zh, "取消", "Cancel"), noX + noW / 2, noY + 5, COL_TEXT);
+        g.drawCenteredString(font, Component.translatable("gui.chunkplan.confirm.cancel"), noX + noW / 2, noY + 5, COL_TEXT);
         yesX = bx + w - 60;
         yesY = btnY;
         yesW = 52;
         yesH = 18;
         g.fill(yesX, yesY, yesX + yesW, yesY + yesH, 0xFF2E7D32);
-        g.drawCenteredString(font, t(zh, "确认", "Yes"), yesX + yesW / 2, yesY + 5, COL_TEXT);
+        g.drawCenteredString(font, Component.translatable("gui.chunkplan.confirm.yes"), yesX + yesW / 2, yesY + 5, COL_TEXT);
     }
 
     private void drawBar(GuiGraphics g, int x, int y, int w, int h, double pct, int color) {
@@ -512,15 +518,8 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     // ---------- 工具 ----------
 
+    /** 中文判定（仅用于 ChunkPlanMessages.windowName 的窗口名本地化） */
     private boolean zh() {
         return ChunkPlanMessages.isChinese(Minecraft.getInstance().getLanguageManager().getSelected());
-    }
-
-    private String t(String zhText, String enText) {
-        return t(zh(), zhText, enText);
-    }
-
-    private static String t(boolean zh, String zhText, String enText) {
-        return zh ? zhText : enText;
     }
 }
