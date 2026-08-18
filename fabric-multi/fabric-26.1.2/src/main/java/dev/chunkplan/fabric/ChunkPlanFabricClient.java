@@ -7,6 +7,7 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.KeyMapping;
+import net.minecraft.resources.Identifier;
 import net.minecraft.client.Minecraft;
 import org.lwjgl.glfw.GLFW;
 
@@ -22,8 +23,10 @@ public final class ChunkPlanFabricClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+        KeyMapping.Category category = KeyMapping.Category.register(
+                Identifier.fromNamespaceAndPath("chunkplan", "keybinds"));
         openGui = KeyMappingHelper.registerKeyMapping(new KeyMapping(
-                "key.chunkplan.open_gui", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_K, KeyMapping.Category.MISC));
+                "key.chunkplan.open_gui", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_K, category));
 
         ClientPlayNetworking.registerGlobalReceiver(ChunkPlanNetwork.GuiStatusPayload.TYPE,
                 (payload, context) -> onStatus(payload.status()));
