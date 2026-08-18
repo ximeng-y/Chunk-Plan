@@ -2,6 +2,7 @@ package dev.chunkplan.neoforge;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.UUID;
 
 import dev.chunkplan.common.GuiStatus;
@@ -170,7 +171,7 @@ public final class ChunkPlanNetwork {
         return new GuiStatus(
                 cfg.firstEntryFee(), cfg.familiarEntryFee(), cfg.highSpeedThreshold(), cfg.highSpeedMultiplier(),
                 cfg.exemptByDefault(), isExempt, inList, isAdmin,
-                NeoForgeConfig.readRawTiers(resolveConfigFile(player)),
+                isAdmin ? NeoForgeConfig.readRawTiers(resolveConfigFile(player)) : List.of(),
                 qs.lines(), qs.allExceeded(), qs.recoveryMillis(), worst);
     }
 

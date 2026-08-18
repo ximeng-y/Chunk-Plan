@@ -2,6 +2,7 @@ package dev.chunkplan.forge;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -160,7 +161,7 @@ public final class ChunkPlanNetwork {
         return new GuiStatus(
                 cfg.firstEntryFee(), cfg.familiarEntryFee(), cfg.highSpeedThreshold(), cfg.highSpeedMultiplier(),
                 cfg.exemptByDefault(), isExempt, inList, isAdmin,
-                ForgeConfig.readRawTiers(resolveConfigFile(player)),
+                isAdmin ? ForgeConfig.readRawTiers(resolveConfigFile(player)) : List.of(),
                 qs.lines(), qs.allExceeded(), qs.recoveryMillis(), worst);
     }
 

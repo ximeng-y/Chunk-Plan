@@ -1,5 +1,6 @@
 package dev.chunkplan.fabric;
 
+import java.util.List;
 import java.util.UUID;
 
 import org.slf4j.Logger;
@@ -140,7 +141,7 @@ public final class ChunkPlanNetwork {
         return new GuiStatus(
                 cfg.firstEntryFee(), cfg.familiarEntryFee(), cfg.highSpeedThreshold(), cfg.highSpeedMultiplier(),
                 cfg.exemptByDefault(), isExempt, inList, isAdmin,
-                FabricConfig.readRawTiers(ChunkPlanFabric.configFile),
+                isAdmin ? FabricConfig.readRawTiers(ChunkPlanFabric.configFile) : List.of(),
                 qs.lines(), qs.allExceeded(), qs.recoveryMillis(), worst);
     }
 }
