@@ -3,6 +3,7 @@ package dev.chunkplan.fabric;
 import java.util.List;
 
 import dev.chunkplan.common.GuiStatus;
+import dev.chunkplan.common.NumericParser;
 import dev.chunkplan.common.QuotaEngine;
 import dev.chunkplan.common.QuotaTiers;
 import net.minecraft.client.Minecraft;
@@ -255,12 +256,12 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (raw.isEmpty()) {
             return;
         }
-        QuotaTiers.Tier t = rawTier(tier);
-        double newLimit = parseDouble(raw);
-        if (Double.isNaN(newLimit)) {
+        NumericParser.Parsed p = NumericParser.parseLimit(raw);
+        if (!p.isOk()) {
             return; // 非法数值：不发送，交由玩家修正
         }
-        if (t != null && newLimit < t.limit()) {
+        QuotaTiers.Tier t = rawTier(tier);
+        if (t != null && p.value() < t.limit()) {
             sendCommand("chunkplan config windowLimit tier" + tier + " " + raw);
             showConfirm(Component.translatable("gui.chunkplan.confirm.lower_tier", tier));
         } else {
@@ -271,7 +272,7 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     private void setMultiplier() {
         String raw = multEdit.getValue().trim();
-        if (raw.isEmpty() || Double.isNaN(parseDouble(raw))) {
+        if (!NumericParser.parseMultiplier(raw).isOk()) {
             return; // 非法数值：不发送，交由玩家修正
         }
         sendCommand("chunkplan config highSpeedMultiplier " + raw);
@@ -280,7 +281,7 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     private void setNewFee() {
         String raw = newFeeEdit.getValue().trim();
-        if (raw.isEmpty() || Double.isNaN(parseDouble(raw))) {
+        if (!NumericParser.parseFee(raw).isOk()) {
             return; // 非法数值：不发送，交由玩家修正
         }
         sendCommand("chunkplan config firstEntryFee " + raw);
@@ -289,7 +290,7 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     private void setFamiliarFee() {
         String raw = familiarFeeEdit.getValue().trim();
-        if (raw.isEmpty() || Double.isNaN(parseDouble(raw))) {
+        if (!NumericParser.parseFee(raw).isOk()) {
             return; // 非法数值：不发送，交由玩家修正
         }
         sendCommand("chunkplan config familiarEntryFee " + raw);
@@ -328,14 +329,6 @@ public final class ChunkPlanGuiScreen extends Screen {
         String cmd = "chunkplan reset " + target + (resetTier == 0 ? "" : " " + resetTierName());
         sendCommand(cmd);
         showConfirm(Component.translatable("gui.chunkplan.confirm.reset", target));
-    }
-
-    private static double parseDouble(String s) {
-        try {
-            return Double.parseDouble(s);
-        } catch (NumberFormatException e) {
-            return Double.NaN;
-        }
     }
 
     private static List<String> presets(int tier) {
