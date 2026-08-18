@@ -19,6 +19,8 @@
   "gui.chunkplan.exempt_admin": "[豁免] 你当前是管理员，不受额度限制",
   "gui.chunkplan.exempt_list": "[豁免] 你在豁免名单中，不受额度限制",
   "gui.chunkplan.exhausted": "已耗尽，预计 %s",
+  "gui.chunkplan.fee_explored": "旧区块费用",
+  "gui.chunkplan.fee_new": "新区块费用",
   "gui.chunkplan.fetching": "正在获取额度…",
   "gui.chunkplan.low": "额度不足，请谨慎探索",
   "gui.chunkplan.moderate": "额度中等，请注意控制",

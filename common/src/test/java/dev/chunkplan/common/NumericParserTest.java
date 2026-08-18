@@ -51,4 +51,19 @@ class NumericParserTest {
         assertEquals(NumericParser.Error.RANGE, NumericParser.parseLimit("0.5").error());
         assertEquals(NumericParser.Error.FORMAT, NumericParser.parseLimit("1.001").error());
     }
+
+    @Test
+    void feeRangeAndPrecision() {
+        assertTrue(NumericParser.parseFee("0").isOk());
+        assertTrue(NumericParser.parseFee("0.05").isOk());
+        assertTrue(NumericParser.parseFee("1").isOk());
+        assertTrue(NumericParser.parseFee("999999999.99").isOk());
+        assertEquals(0.05, NumericParser.parseFee("0.05").value(), EPS);
+        assertEquals(999999999.99, NumericParser.parseFee("999999999.99").value(), EPS);
+        assertEquals(NumericParser.Error.RANGE, NumericParser.parseFee("1000000000.00").error());
+        assertEquals(NumericParser.Error.FORMAT, NumericParser.parseFee("-0.01").error()); // 负号不匹配数字格式
+        assertEquals(NumericParser.Error.FORMAT, NumericParser.parseFee("0.001").error()); // 3 位小数
+        assertEquals(NumericParser.Error.FORMAT, NumericParser.parseFee("1e3").error());
+        assertEquals(NumericParser.Error.FORMAT, NumericParser.parseFee("abc").error());
+    }
 }

@@ -52,6 +52,8 @@ public final class ChunkPlanGuiScreen extends Screen {
     private final EditBox[] tierLimit = new EditBox[4];
     private final Button[] tierLimitSet = new Button[4];
     private EditBox multEdit;
+    private EditBox newFeeEdit;
+    private EditBox familiarFeeEdit;
     private Button resetTierCycle;
     private EditBox resetTarget;
     private int resetTier; // 0 = all，1..4
@@ -59,6 +61,8 @@ public final class ChunkPlanGuiScreen extends Screen {
     // 用户输入保留（跨状态刷新重建不丢字）；命令派发后清空以便回显服务端确认值
     private final String[] savedLimit = new String[4];
     private String savedMult;
+    private String savedNewFee;
+    private String savedFamiliarFee;
     private String savedResetTarget;
 
     public ChunkPlanGuiScreen() {
@@ -157,6 +161,20 @@ public final class ChunkPlanGuiScreen extends Screen {
                 b -> allWindows(true));
         addButton(left + 168, gy, 66, 20, Component.translatable("gui.chunkplan.all_off"),
                 b -> allWindows(false));
+        gy += 28;
+        newFeeEdit = new EditBox(font, left + 96, gy, 56, 20, Component.empty());
+        newFeeEdit.setValue(savedNewFee != null ? savedNewFee : fmtNum(status == null ? 0 : status.firstEntryFee()));
+        newFeeEdit.setResponder(v -> savedNewFee = v);
+        addRenderableWidget(newFeeEdit);
+        addButton(left + 158, gy, 42, 20, Component.translatable("gui.chunkplan.set"),
+                b -> setNewFee());
+        gy += 28;
+        familiarFeeEdit = new EditBox(font, left + 96, gy, 56, 20, Component.empty());
+        familiarFeeEdit.setValue(savedFamiliarFee != null ? savedFamiliarFee : fmtNum(status == null ? 0 : status.familiarEntryFee()));
+        familiarFeeEdit.setResponder(v -> savedFamiliarFee = v);
+        addRenderableWidget(familiarFeeEdit);
+        addButton(left + 158, gy, 42, 20, Component.translatable("gui.chunkplan.set"),
+                b -> setFamiliarFee());
         gy += 28;
         multEdit = new EditBox(font, left + 96, gy, 56, 20, Component.empty());
         multEdit.setValue(savedMult != null ? savedMult : fmtNum(status == null ? 0 : status.highSpeedMultiplier()));
@@ -258,6 +276,24 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         sendCommand("chunkplan config highSpeedMultiplier " + raw);
         savedMult = null; // 派发后回读服务端确认值，不再保留输入
+    }
+
+    private void setNewFee() {
+        String raw = newFeeEdit.getValue().trim();
+        if (raw.isEmpty() || Double.isNaN(parseDouble(raw))) {
+            return; // 非法数值：不发送，交由玩家修正
+        }
+        sendCommand("chunkplan config firstEntryFee " + raw);
+        savedNewFee = null; // 派发后回读服务端确认值，不再保留输入
+    }
+
+    private void setFamiliarFee() {
+        String raw = familiarFeeEdit.getValue().trim();
+        if (raw.isEmpty() || Double.isNaN(parseDouble(raw))) {
+            return; // 非法数值：不发送，交由玩家修正
+        }
+        sendCommand("chunkplan config familiarEntryFee " + raw);
+        savedFamiliarFee = null; // 派发后回读服务端确认值，不再保留输入
     }
 
     private void setExemptDefault(boolean value) {
@@ -440,8 +476,10 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         int gy = 36 + 4 * 26 + 6;
         g.text(font, Component.translatable("gui.chunkplan.all_windows"), x, gy + 6, COL_TEXT);
-        g.text(font, Component.translatable("gui.chunkplan.speed_mult"), x, gy + 34, COL_TEXT);
-        g.text(font, Component.translatable("gui.chunkplan.reset_quota"), x, gy + 90, COL_TEXT);
+        g.text(font, Component.translatable("gui.chunkplan.fee_new"), x, gy + 34, COL_TEXT);
+        g.text(font, Component.translatable("gui.chunkplan.fee_explored"), x, gy + 62, COL_TEXT);
+        g.text(font, Component.translatable("gui.chunkplan.speed_mult"), x, gy + 90, COL_TEXT);
+        g.text(font, Component.translatable("gui.chunkplan.reset_quota"), x, gy + 146, COL_TEXT);
     }
 
     private void renderConfirm(GuiGraphicsExtractor g) {

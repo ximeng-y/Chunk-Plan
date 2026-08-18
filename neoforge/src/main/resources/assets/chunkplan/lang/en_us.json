@@ -19,6 +19,8 @@
   "gui.chunkplan.exempt_admin": "[Exempt] You are an operator; quota limits do not apply",
   "gui.chunkplan.exempt_list": "[Exempt] You are in the exempt list; quota limits do not apply",
   "gui.chunkplan.exhausted": "Exhausted, recovers at %s",
+  "gui.chunkplan.fee_explored": "Explored chunk fee",
+  "gui.chunkplan.fee_new": "New chunk fee",
   "gui.chunkplan.fetching": "Fetching quota...",
   "gui.chunkplan.low": "Quota is low, explore carefully",
   "gui.chunkplan.moderate": "Moderate quota, watch spending",

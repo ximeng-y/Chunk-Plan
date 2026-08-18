@@ -274,6 +274,8 @@ public final class ChunkPlanMessages {
                     + "§f调整计费窗口刷新时长：§a/chunkplan config windowTime <tier1..tier4> <时长>§f，时长从补全列表选择（如 5h/24h）\n"
                     + "§f调整额度上限：§a/chunkplan config windowLimit <tier1..tier4> <数值>§f，调低可能踢出已超限玩家，需确认\n"
                     + "§f高速移动倍率：§a/chunkplan config highSpeedMultiplier <数值>§f（1.00~1000.00）\n"
+                    + "§f新区块费用：§a/chunkplan config firstEntryFee <数值>§f（0.00~999999999.99）\n"
+                    + "§f旧区块费用：§a/chunkplan config familiarEntryFee <数值>§f（0.00~999999999.99）\n"
                     + "§f开关管理员计费：§a/chunkplan config exemptByDefault <true | false>\n"
                     + "§f重载配置：§a/chunkplan reload\n"
                     + "§7数值允许整数或最多 2 位小数；所有修改写入配置文件并立即生效";
@@ -285,6 +287,8 @@ public final class ChunkPlanMessages {
                 + "§fAdjust billing window refresh: §a/chunkplan config windowTime <tier1..tier4> <duration>§f - pick from the tab-completed presets (e.g. 5h/24h)\n"
                 + "§fAdjust window limit: §a/chunkplan config windowLimit <tier1..tier4> <number>§f - lowering may kick players who now exceed (needs confirmation)\n"
                 + "§fHigh-speed movement multiplier: §a/chunkplan config highSpeedMultiplier <number>§f (1.00~1000.00)\n"
+                + "§fNew chunk fee: §a/chunkplan config firstEntryFee <number>§f (0.00~999999999.99)\n"
+                + "§fExplored chunk fee: §a/chunkplan config familiarEntryFee <number>§f (0.00~999999999.99)\n"
                 + "§fToggle admin billing: §a/chunkplan config exemptByDefault <true | false>\n"
                 + "§fReload: §a/chunkplan reload\n"
                 + "§7Numbers may be integers or up to 2 decimals; all changes are written to the config file and take effect immediately";

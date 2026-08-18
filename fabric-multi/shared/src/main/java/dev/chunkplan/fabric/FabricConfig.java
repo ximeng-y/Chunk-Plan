@@ -205,6 +205,20 @@ public final class FabricConfig {
         dev.chunkplan.common.AtomicFile.write(configFile, GsonHolder.GSON.toJson(root));
     }
 
+    /** /chunkplan config firstEntryFee 用：改写踏入未探索区块的费用 */
+    public static void writeFirstEntryFee(Path configFile, double fee) throws IOException {
+        com.google.gson.JsonObject root = readRoot(configFile);
+        root.addProperty("firstEntryFee", fee);
+        dev.chunkplan.common.AtomicFile.write(configFile, GsonHolder.GSON.toJson(root));
+    }
+
+    /** /chunkplan config familiarEntryFee 用：改写踏入已探索区块的费用 */
+    public static void writeFamiliarEntryFee(Path configFile, double fee) throws IOException {
+        com.google.gson.JsonObject root = readRoot(configFile);
+        root.addProperty("familiarEntryFee", fee);
+        dev.chunkplan.common.AtomicFile.write(configFile, GsonHolder.GSON.toJson(root));
+    }
+
     private static com.google.gson.JsonObject readRoot(Path configFile) throws IOException {
         // 坑 #31：运行时配置损坏（Gson 抛非受检 JsonSyntaxException，原实现会穿透命令层
         // catch(IOException)）→ 复用 AtomicFile.readJson 的 .bak 兜底（恢复后写回主文件修复现场，

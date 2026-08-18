@@ -29,6 +29,11 @@ public final class NumericParser {
         return parse(s, 1.0, 999999999.99);
     }
 
+    /** 每区块费用（新区块/旧区块）：0.00 ~ 999999999.99（familiarEntryFee 默认 0.05 允许 <1） */
+    public static Parsed parseFee(String s) {
+        return parse(s, 0.0, 999999999.99);
+    }
+
     private static Parsed parse(String s, double min, double max) {
         if (s == null || s.isEmpty()) {
             return new Parsed(0, Error.EMPTY);

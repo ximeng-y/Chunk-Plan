@@ -115,7 +115,15 @@ public final class QuotaCommands {
                         .then(Commands.literal("highSpeedMultiplier")
                                 .requires(s -> s.hasPermission(2))
                                 .then(Commands.argument("number", StringArgumentType.word())
-                                        .executes(ctx -> configSpeedMultiplier(ctx)))))
+                                        .executes(ctx -> configSpeedMultiplier(ctx))))
+                        .then(Commands.literal("firstEntryFee")
+                                .requires(s -> s.hasPermission(2))
+                                .then(Commands.argument("number", StringArgumentType.word())
+                                        .executes(ctx -> configFirstEntryFee(ctx))))
+                        .then(Commands.literal("familiarEntryFee")
+                                .requires(s -> s.hasPermission(2))
+                                .then(Commands.argument("number", StringArgumentType.word())
+                                        .executes(ctx -> configFamiliarEntryFee(ctx)))))
                 .then(Commands.literal("help")
                         .requires(s -> s.hasPermission(2))
                         .executes(ctx -> help(ctx)))
@@ -517,6 +525,70 @@ public final class QuotaCommands {
             ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
                     "§a高速移动额度倍率已调整为 §b" + raw + "x§a",
                     "§aHigh-speed movement multiplier set to §b" + raw + "x§a") + warning), true);
+            return 1;
+        } catch (IOException e) {
+            org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("写入配置失败", e);
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c写入配置失败，详见服务端日志",
+                    "§cFailed to write config; see server log for details")));
+            return 0;
+        }
+    }
+
+    /** /chunkplan config firstEntryFee <数值>：调整踏入未探索区块的费用（0.00~999999999.99，≤2 位小数） */
+    private static int configFirstEntryFee(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanNeoForge.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        String raw = StringArgumentType.getString(ctx, "number");
+        NumericParser.Parsed p = NumericParser.parseFee(raw);
+        if (!p.isOk()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c新区块费用需为 0.00~999999999.99 的数字，最多 2 位小数",
+                    "§cNew chunk fee must be a number between 0.00 and 999999999.99 with at most 2 decimals")));
+            return 0;
+        }
+        try {
+            NeoForgeConfig.writeFirstEntryFee(resolveConfigFile(ctx), p.value());
+            List<String> warnings = loadAndApplyConfig(ctx);
+            String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
+            ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                    "§a新区块费用已调整为 §b" + raw + "§a",
+                    "§aNew chunk fee set to §b" + raw + "§a") + warning), true);
+            return 1;
+        } catch (IOException e) {
+            org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("写入配置失败", e);
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c写入配置失败，详见服务端日志",
+                    "§cFailed to write config; see server log for details")));
+            return 0;
+        }
+    }
+
+    /** /chunkplan config familiarEntryFee <数值>：调整踏入已探索区块的费用（0.00~999999999.99，≤2 位小数） */
+    private static int configFamiliarEntryFee(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanNeoForge.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        String raw = StringArgumentType.getString(ctx, "number");
+        NumericParser.Parsed p = NumericParser.parseFee(raw);
+        if (!p.isOk()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c旧区块费用需为 0.00~999999999.99 的数字，最多 2 位小数",
+                    "§cExplored chunk fee must be a number between 0.00 and 999999999.99 with at most 2 decimals")));
+            return 0;
+        }
+        try {
+            NeoForgeConfig.writeFamiliarEntryFee(resolveConfigFile(ctx), p.value());
+            List<String> warnings = loadAndApplyConfig(ctx);
+            String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
+            ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                    "§a旧区块费用已调整为 §b" + raw + "§a",
+                    "§aExplored chunk fee set to §b" + raw + "§a") + warning), true);
             return 1;
         } catch (IOException e) {
             org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("写入配置失败", e);

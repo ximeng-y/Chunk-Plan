@@ -270,4 +270,14 @@ public final class NeoForgeConfig {
     public static void writeHighSpeedMultiplier(Path file, double multiplier) throws IOException {
         writeKey(file, "highSpeedMultiplier", String.valueOf(multiplier));
     }
+
+    /** /chunkplan config firstEntryFee 用：改写踏入未探索区块的费用 */
+    public static void writeFirstEntryFee(Path file, double fee) throws IOException {
+        writeKey(file, "firstEntryFee", String.valueOf(fee));
+    }
+
+    /** /chunkplan config familiarEntryFee 用：改写踏入已探索区块的费用 */
+    public static void writeFamiliarEntryFee(Path file, double fee) throws IOException {
+        writeKey(file, "familiarEntryFee", String.valueOf(fee));
+    }
 }
