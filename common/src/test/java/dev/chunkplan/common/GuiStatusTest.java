@@ -93,4 +93,37 @@ class GuiStatusTest {
         assertEquals(-1, d.worstPercent());
         assertFalse(d.isAdmin());
     }
+
+    @Test
+    void decodeRejectsInvalidTierCount() {
+        assertNull(GuiStatus.decode(craftHeader(17, 0)));
+    }
+
+    @Test
+    void decodeRejectsNegativeLineCount() {
+        assertNull(GuiStatus.decode(craftHeader(0, -1)));
+    }
+
+    /** 构造合法头部（版本 + 4 double + 4 boolean）后写入指定的 tierCount/lineCount */
+    private static byte[] craftHeader(int tierCount, int lineCount) {
+        try {
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            java.io.DataOutputStream out = new java.io.DataOutputStream(bos);
+            out.writeInt(GuiStatus.PROTOCOL_VERSION);
+            out.writeDouble(1.0);
+            out.writeDouble(0.05);
+            out.writeDouble(0.5);
+            out.writeDouble(2.0);
+            out.writeBoolean(true);
+            out.writeBoolean(false);
+            out.writeBoolean(true);
+            out.writeBoolean(true);
+            out.writeInt(tierCount);
+            out.writeInt(lineCount);
+            out.flush();
+            return bos.toByteArray();
+        } catch (java.io.IOException e) {
+            throw new AssertionError(e);
+        }
+    }
 }

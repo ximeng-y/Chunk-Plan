@@ -233,7 +233,10 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         QuotaTiers.Tier t = rawTier(tier);
         double newLimit = parseDouble(raw);
-        if (t != null && !Double.isNaN(newLimit) && newLimit < t.limit()) {
+        if (Double.isNaN(newLimit)) {
+            return; // 非法数值：不发送，交由玩家修正
+        }
+        if (t != null && newLimit < t.limit()) {
             sendCommand("chunkplan config windowLimit tier" + tier + " " + raw);
             showConfirm("将调低 tier" + tier + " 额度，可能引发部分玩家被无警告踢出，",
                     "This will lower tier" + tier + " limit; some players may be kicked without warning, ");
@@ -244,9 +247,10 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     private void setMultiplier() {
         String raw = multEdit.getValue().trim();
-        if (!raw.isEmpty()) {
-            sendCommand("chunkplan config highSpeedMultiplier " + raw);
+        if (raw.isEmpty() || Double.isNaN(parseDouble(raw))) {
+            return; // 非法数值：不发送，交由玩家修正
         }
+        sendCommand("chunkplan config highSpeedMultiplier " + raw);
     }
 
     private void setExemptDefault(boolean value) {
@@ -361,7 +365,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         GuiStatus s = status;
         if (s == null) {
-            g.drawString(font, t(zh, "尚未连接服务器", "Not connected to a server"), x, y, COL_GRAY);
+            g.drawString(font, t(zh, "无法解析服务器返回的状态（可能版本不匹配）", "Could not parse server status (possible version mismatch)"), x, y, COL_RED);
             return;
         }
         if (s.isExempt()) {

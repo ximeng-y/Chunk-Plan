@@ -33,6 +33,11 @@ public final class ChunkPlanNetwork {
     private static final Logger LOG = LoggerFactory.getLogger("ChunkPlan");
     private static final String PROTOCOL_VERSION = "1";
 
+    /** 状态请求冷却（毫秒）：防高频请求放大（配置文件仅管理员请求才重读） */
+    private static final long REQUEST_COOLDOWN_MILLIS = 250L;
+    private static final java.util.concurrent.ConcurrentHashMap<UUID, Long> LAST_REQUEST =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation("chunkplan", "gui"),
             () -> PROTOCOL_VERSION,
@@ -70,9 +75,13 @@ public final class ChunkPlanNetwork {
                     return;
                 }
                 ServerPlayer player = ctx.get().getSender();
-                if (player != null) {
-                    sendStatus(player);
+                if (player == null) {
+                    return;
                 }
+                if (!allowRequest(player.getUUID())) {
+                    return;
+                }
+                sendStatus(player);
             });
             ctx.get().setPacketHandled(true);
         }
@@ -135,11 +144,50 @@ public final class ChunkPlanNetwork {
         if (cmd.startsWith("/")) {
             cmd = cmd.substring(1).trim();
         }
-        if (cmd.isEmpty() || cmd.indexOf('\n') >= 0 || cmd.indexOf('\r') >= 0) {
+        if (cmd.isEmpty()) {
+
             return null;
+
         }
+
+        // 拒绝换行/回车与其它控制字符（防日志注入；Brigadier 命令仅用可打印 ASCII）
+
+        for (int i = 0; i < cmd.length(); i++) {
+
+            char c = cmd.charAt(i);
+
+            if (c < 0x20 || c == 0x7F) {
+
+                return null;
+
+            }
+
+        }
+
         return cmd;
+
     }
+
+
+
+    private static boolean allowRequest(UUID uuid) {
+
+        long now = System.currentTimeMillis();
+
+        Long last = LAST_REQUEST.get(uuid);
+
+        if (last != null && now - last < REQUEST_COOLDOWN_MILLIS) {
+
+            return false;
+
+        }
+
+        LAST_REQUEST.put(uuid, now);
+
+        return true;
+
+    }
+
 
     private static void sendStatus(ServerPlayer player) {
         QuotaEngine eng = ChunkPlanForge.engine;

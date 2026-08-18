@@ -42,6 +42,11 @@ public final class ChunkPlanNetwork {
 
     private static final String CHANNEL_VERSION = "1";
 
+    /** 状态请求冷却（毫秒）：防高频请求放大（配置文件仅管理员请求才重读，坑见 buildGuiStatus） */
+    private static final long REQUEST_COOLDOWN_MILLIS = 250L;
+    private static final java.util.concurrent.ConcurrentHashMap<UUID, Long> LAST_REQUEST =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     /** C2S：请求状态（携带协议版本，版本不符服务端不回包） */
     public record GuiRequestPayload(int protocolVersion) implements CustomPacketPayload {
         public static final Type<GuiRequestPayload> TYPE =
@@ -96,9 +101,16 @@ public final class ChunkPlanNetwork {
                 return;
             }
             ServerPlayer player = asPlayer(context);
-            if (player != null) {
-                sendStatus(player);
+            if (player == null) {
+                return;
             }
+            long now = System.currentTimeMillis();
+            Long last = LAST_REQUEST.get(player.getUUID());
+            if (last != null && now - last < REQUEST_COOLDOWN_MILLIS) {
+                return; // 冷却期内丢弃，防高频状态请求放大
+            }
+            LAST_REQUEST.put(player.getUUID(), now);
+            sendStatus(player);
         });
     }
 
@@ -131,7 +143,8 @@ public final class ChunkPlanNetwork {
         context.enqueueWork(() -> ChunkPlanClient.onStatus(payload.status()));
     }
 
-    /** 剥前导斜杠并校验；空串/含换行返回 null（Brigadier 不接受 '/' 开头；\n 被当空白，仅防御） */
+    /** 剥前导斜杠并校验；空串/含控制字符（换行/回车/NUL 等）返回 null——
+     *  Brigadier 不接受 '/' 开头；控制字符只进日志有注入风险，故整串拒绝（仅防御） */
     private static String sanitize(String raw) {
         if (raw == null) {
             return null;
@@ -140,8 +153,15 @@ public final class ChunkPlanNetwork {
         if (cmd.startsWith("/")) {
             cmd = cmd.substring(1).trim();
         }
-        if (cmd.isEmpty() || cmd.indexOf('\n') >= 0 || cmd.indexOf('\r') >= 0) {
+        if (cmd.isEmpty()) {
             return null;
+        }
+        // 拒绝换行/回车与其它控制字符（防日志注入；Brigadier 命令仅用可打印 ASCII）
+        for (int i = 0; i < cmd.length(); i++) {
+            char c = cmd.charAt(i);
+            if (c < 0x20 || c == 0x7F) {
+                return null;
+            }
         }
         return cmd;
     }
