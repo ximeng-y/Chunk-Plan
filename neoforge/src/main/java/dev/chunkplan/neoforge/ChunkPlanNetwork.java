@@ -170,6 +170,11 @@ public final class ChunkPlanNetwork {
         return context.player() instanceof ServerPlayer sp ? sp : null;
     }
 
+    /** 玩家登出时清除其状态请求冷却条目（防 LAST_REQUEST 无界增长） */
+    public static void onPlayerDisconnect(UUID uuid) {
+        LAST_REQUEST.remove(uuid);
+    }
+
     private static void sendStatus(ServerPlayer player) {
         QuotaEngine eng = ChunkPlanNeoForge.engine;
         if (eng == null) {

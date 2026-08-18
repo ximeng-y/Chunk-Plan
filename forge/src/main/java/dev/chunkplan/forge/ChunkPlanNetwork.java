@@ -145,49 +145,33 @@ public final class ChunkPlanNetwork {
             cmd = cmd.substring(1).trim();
         }
         if (cmd.isEmpty()) {
-
             return null;
-
         }
-
         // 拒绝换行/回车与其它控制字符（防日志注入；Brigadier 命令仅用可打印 ASCII）
-
         for (int i = 0; i < cmd.length(); i++) {
-
             char c = cmd.charAt(i);
-
             if (c < 0x20 || c == 0x7F) {
-
                 return null;
-
             }
-
         }
-
         return cmd;
-
     }
-
-
 
     private static boolean allowRequest(UUID uuid) {
-
         long now = System.currentTimeMillis();
-
         Long last = LAST_REQUEST.get(uuid);
-
         if (last != null && now - last < REQUEST_COOLDOWN_MILLIS) {
-
             return false;
-
         }
-
         LAST_REQUEST.put(uuid, now);
-
         return true;
-
     }
 
+
+    /** 玩家登出时清除其状态请求冷却条目（防 LAST_REQUEST 无界增长） */
+    public static void onPlayerDisconnect(UUID uuid) {
+        LAST_REQUEST.remove(uuid);
+    }
 
     private static void sendStatus(ServerPlayer player) {
         QuotaEngine eng = ChunkPlanForge.engine;

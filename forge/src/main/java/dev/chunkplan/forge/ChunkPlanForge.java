@@ -202,6 +202,7 @@ public final class ChunkPlanForge {
             }
             WELCOME_PENDING.remove(player.getUUID());
             eng.onPlayerDisconnect(player.getUUID());
+            ChunkPlanNetwork.onPlayerDisconnect(player.getUUID());
         }
 
         // ---------- 定时保存 + 解 ban 扫描 ----------

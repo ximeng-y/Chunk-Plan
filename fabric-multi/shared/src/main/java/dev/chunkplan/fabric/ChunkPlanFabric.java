@@ -197,6 +197,7 @@ public final class ChunkPlanFabric implements ModInitializer {
         if (eng != null) {
             welcomePending.remove(player.getUUID());
             eng.onPlayerDisconnect(player.getUUID());
+            ChunkPlanNetwork.onPlayerDisconnect(player.getUUID());
         }
     }
 
