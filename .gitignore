@@ -28,3 +28,7 @@ Thumbs.db
 
 # NeoGradle 7 默认运行目录（runs/server 等）
 runs/
+
+# 反编译/字节码研究产物（javap/unzip 提取的 Forge/Mojang class 等，不入库）
+*.class
+/net/
