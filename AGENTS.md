@@ -30,7 +30,7 @@ fabric-multi/ Fabric 多版本独立构建（1.21.11/26.1.2/26.2，坑 #33）：
 | 计费事件 | 玩家实体踏入区块（chunkPos 变化）即计费，与区块加载状态无关 |
 | 费率 | 集合外 `1.0` / 集合内 `0.05`；高速（>0.5 格/tick，严格大于 = 创造模式飞行速度 ~0.54，地面疾跑 ~0.28 不触发）再 ×2 |
 | 挂机 | 零计费；登录首 tick 只记基准不扣费；边界踱步重复计费**接受，不加防抖** |
-| 额度线 | 四档滚动窗口线（每档独立开关 + 窗口预设校验，坑 #24），**任一窗口满即拒**（坑 #25）；默认仅开第一档 `5h≤500` + 第二档 `24h≤2000` |
+| 额度线 | 四档固定周期线（每档独立开关 + 窗口预设校验，坑 #24；首消锚定周期、到点整窗清零，坑 #40），**任一窗口满即拒**（坑 #25）；默认仅开第一档 `5h≤500` + 第二档 `24h≤2000` |
 | 耗尽处理 | 临时 ban：游玩中当场踢出；纯窗口滑出自动恢复，不设最短 ban 时长 |
 | 豁免 | 默认 OP + 配置名单豁免，`exemptByDefault=false` 时全员受限 |
 | 集合 | 个人已探索集合**终身保留**、按维度分区；传送/瞬移只计落点 |
@@ -42,17 +42,16 @@ fabric-multi/ Fabric 多版本独立构建（1.21.11/26.1.2/26.2，坑 #33）：
 ## 计费与额度线算法（common/QuotaEngine，防实现偏差）
 
 1. 首 tick（prevChunk==null）只记录基准；否则每 tick：speed = 与上 tick 的三维位移
-2. 区块或维度变化 → 计费：先查集合定费率（不在集合**先加入集合**），× 高速倍率，累加进分钟桶（`epochMinute -> 点数`）
-3. **先记账后判踢**：任一额度线满（`spent > limit`，窗口 `(now-window, now]`）→ 返回 BAN（恢复时间；文案由壳层按玩家语言渲染，坑 #22）
-4. 恢复时间 = 各满线 `窗口内最早消费桶 + 窗口长` 的**最晚者**
-5. 过期桶清理：早于最长窗口线 2 倍的桶删除
-6. 配置校验：线数 1~4、窗口/上限为正、费率非负，非法回退默认并告警
+2. 区块或维度变化 → 计费：先查集合定费率（不在集合**先加入集合**），× 高速倍率，累加进各启用档位的固定周期（首消锚定周期起点、对齐整分钟，坑 #40）
+3. **先记账后判踢**：任一额度线满（`spent > limit`）→ 返回 BAN（恢复时间；文案由壳层按玩家语言渲染，坑 #22）
+4. 恢复时间 = 各满线 `周期起点 + 窗口长` 的**最晚者**；到点整窗清零（等价 reset），承诺精确兑现（坑 #40）
+5. 配置校验：线数 1~4、窗口/上限为正、费率非负，非法回退默认并告警
 
 ## 构建与验证
 
 ```bash
 export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x64"
-.XMTEMP/gradle-8.14.2/bin/gradle :common:test        # 引擎单测（96 个，全绿为验收前提）
+.XMTEMP/gradle-8.14.2/bin/gradle :common:test        # 引擎单测（115 个，全绿为验收前提）
 .XMTEMP/gradle-8.14.2/bin/gradle build               # 四模块编译 + 打包
 .XMTEMP/gradle-8.14.2/bin/gradle :neoforge:runServer # dev 服务器（工作目录 neoforge/runs/server/）
 .XMTEMP/gradle-8.14.2/bin/gradle :fabric:runServer   # dev 服务器（工作目录 fabric/run/）
@@ -87,7 +86,7 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
    - mock 玩家不进 PlayerList：内置 `/tp <名字>` 解析不到，需用 uuid；`list` 不显示
    - `applyBan` 对 mock 玩家（注册表内）直接 `remove(DISCARDED)` 模拟踢出（虚拟连接 `disconnect` 是 no-op）；**遍历注册表时 applyBan 会 remove → 必须遍历副本否则 CME**
    - usercache 会被同名不同 uuid 的 mock 污染 → `resolvePlayer` 顺序：在线实体（PlayerList + 注册表）> UUID 直解 > usercache
-10. **分钟桶粒度**：消费记入 `epochMinute` 桶，窗口按桶滑出 → ban 实际持续 ≈ 消费所在分钟结束 + 窗口长（比精确窗口**短最多 60 秒**，双端实测一致，是设计语义非 bug）
+10. **分钟桶粒度（已被坑 #40 取代）**：v2 及以前消费记入 `epochMinute` 桶按桶滑出，ban 实际持续 ≈ 消费所在分钟结束 + 窗口长（比精确窗口短最多 60 秒）；坑 #40 改固定周期语义后不再存在，仅存历史价值
 11. **协议级真实客户端实测**（GUI 渲染被环境阻断后的 6.2 验证方案，比 mock 更接近真实链路）：
    - node `mineflayer`/`minecraft-protocol`（PrismarineJS）可完整走 1.21.1 登录→加入世界→位置/命令→踢出/ban 拦截链路（dev 服务器 offline-mode）
    - **原版移动校验**：非鞘翅位移平方 > `100×包数` 即拒（`moved too quickly`，约 10 格/tick 上限）→ 客户端位置包无法大步瞬移；高速 2x 实测用 `/tp` 命令（OP 权限）驱动
@@ -114,13 +113,13 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - mineflayer 库缺陷：其 `settings` 包在进 play 后才发（晚于服务端 JOIN），不在配置阶段上报语言 → 用它验证登录欢迎**必须**在 `state=configuration` 时手动 `write('settings', {locale})` 模拟原版（`.XMTEMP/real-client/verify-welcome.js` 已固化）；原生 `minecraft-protocol` createClient 在 NeoForge 1.21.1 配置阶段会卡住（不做额外处理时服务端不发 finish_configuration），勿用
     - **聊天框禁止显示配置文件路径**：reload 与 config 命令反馈均不含路径（路径只进服务端日志），`loadAndApplyConfig` 返回 `List<String>` 告警列表
     - 旧配置迁移：四档改造后旧 `lines`/`lineLimits` 键成为孤儿键（NeoForge 文件里残留但不生效），`highSpeedThreshold` 旧值（如 1.0）持久化覆盖新默认 → 升级需删除旧配置文件（`config/chunkplan-server.toml` / `config/chunkplan.json`）重新生成，否则新默认不生效
-25. **任一窗口满即拒（规格变更）**：原设计"全部额度线同时超限才拒"（AND 语义），用户实测发现单线超限（如 5h 500.9/500.0）仍显示"未满，可正常探索"，确认是设计失误 → 改为**任一窗口满即拒**（OR 语义，`isAllLinesExceeded` 与 `quotaStatus.allExceeded` 的循环条件由"存在未满线→false"反转为"存在满线→true"）。`recoveryMillis` 不变（只遍历满线取最早桶+窗口的最晚者，恢复时刻保证满线滑出；未满线不参与）。字段名 `allExceeded` 保留（壳层双端引用，注释注明"任一满"语义）。恢复时间只保证"满的那条线滑出"，玩家恢复后再次探索可能再次触发该线 → 属正常行为。check/ban 文案不变，各线状态全部列出可看出哪条满
+25. **任一窗口满即拒（规格变更）**：原设计"全部额度线同时超限才拒"（AND 语义），用户实测发现单线超限（如 5h 500.9/500.0）仍显示"未满，可正常探索"，确认是设计失误 → 改为**任一窗口满即拒**（OR 语义，`isAllLinesExceeded` 与 `quotaStatus.allExceeded` 的循环条件由"存在未满线→false"反转为"存在满线→true"）。`recoveryMillis` 不变（只遍历满线取最早桶+窗口的最晚者，恢复时刻保证满线滑出；未满线不参与）。字段名 `allExceeded` 保留（壳层双端引用，注释注明"任一满"语义）。恢复时间在坑 #40 固定周期语义下精确兑现（到点整窗清零）；玩家恢复后再次探索可能再次触发该线 → 属正常行为。check/ban 文案不变，各线状态全部列出可看出哪条满
 26. **ban 公告排版（坑 #26）**：踢出消息按用户模板排版——标题（§c 红，禁止警示）+ 原因行（§c，满线中**窗口最长者**，如 5h 与 1d 同时满显示"1天内 探索额度上限 已耗尽"）+ §7 分割线（44 个 '-'，适中防自动换行）+ "您的探索额度情况："（§e 黄小标题）+ 各线状态（§f 白；满线"（§c已满，下次重置时间：X）"、未满线"（§7下次重置时间：X）"）+ 分割线 + "您最早可于：X 再次进入服务器"（§a 绿）+ 结尾感谢/咨询（§7 灰）。**每线显示各自独立的下次重置时间**（= 该线窗口内最早消费桶 + 窗口长，未满线也有——额度线互相独立、可能跨天不同步，如 5h 满 08-13 21:24 而 1d 未满次日才重置）：引擎 `QuotaStatus.LineStatus` 增加 `nextResetMillis` 字段（`quotaStatus` 逐线计算，无消费为 -1），`recoveryMillis` 保持只算满线。标签列按显示宽度对齐（CJK/全角 2 格、ASCII 1 格，`displayWidth`）；窗口显示名用"5小时内/1天内/30天内"（`windowName`，区别于 check 的 `formatWindow` "5h/1d" 简写）。双端 `ChunkPlanMessages.banMessage` 重写，改文案必须双端同步
 27. **JSON 损坏 .bak 备份兜底（坑 #27）**：所有 JSON（玩家数据 `players/<uuid>.json`、管理名单 `chunkplan-managed-bans.json`、Fabric 配置 `chunkplan.json`）写入统一走 `AtomicFile.write`——**写前备份**：目标存在时先把现有文件复制为 `<file>.bak`（覆盖式，同一文件 .bak 最多一个，恒为上一份完好数据）；读取经 `AtomicFile.readJson` 兜底：主文件 parse/IO 失败时尝试 `.bak`，成功则从 .bak 恢复并立即用 `writeNoBackup` 写回主文件修复现场——**恢复写回必须跳过写前备份**，否则损坏的主文件会覆盖唯一的好 .bak；主与 .bak 均失败才走原降级（重建/空名单/回退默认+告警）。**版本不符不尝试 .bak**（.bak 同版本也会不符，恢复无意义，保持重建+告警）。NeoForge 的 TOML 配置由 NightConfig 生态自管（坑 #12），不纳入本机制。Fabric 配置 IO 失败从"中断启动"改为"告警回退默认"（与 NeoForge reload 语义对齐）。实现位置：`AtomicFile.write/writeNoBackup/readJson`、`QuotaEngine.loadOrCreate`、`ManagedBanStore.load`、`FabricConfig.load`；测试 55 → 64（新增 `AtomicFileTest` 6 个 + 引擎/管理名单恢复测试 3 个）
 28. **额度百分比阈值提示（坑 #28）**：额度达到窗口上限百分比时提示玩家（**每窗口独立计算**，仅瞬态内存不落盘）。触发档位严格为 15/30/50/65/75/80/85/90/95/98（引擎 `ALERT_PERCENTS` 表，改档须用户确认）；严重度 15~30 低（§a 浅绿）/50~75 中（§e 黄）/80~98 高（§c 红）。**触发语义**：每窗口每档只提示一次；档位上升跨过新档时**逐档**生成（一次 +33% 会发 15、30 两条）；额度重置/滑出后档位回落，重新涨回再触发；**首见（登录/重连/服务器重启后首个 tick）只初始化当前档位不触发**，避免补发历史档位刷屏（`AlertState.initialized`）；豁免玩家不提示且清状态（`alertStates.remove`）。架构：引擎 `TickResult` 增加 `List<WindowAlert>` 字段（`none(List<WindowAlert>)` 工厂，`ban` 保持无 alerts——BAN tick 不发提示，ban 消息已充分说明），壳层 `handlePlayerTick` 逐条 `sendSystemMessage`。消息：差异内容整体按严重度色、窗口名与百分比字段 §b 浅蓝覆盖；固定尾部白色含 `/chunkplan check`（§a 浅绿）与**超链接"点击此处查看详细计费规则"**——点击事件 `RUN_COMMAND "/chunkplan rules"`（本项目首个 ClickEvent），`/chunkplan rules` 子命令无权限要求，渲染 5 条计费规则 + 结尾注意，数值取管理员配置（`String.valueOf` 保留 1.0 / 0.05 / 2.0x 原样）。双端 `ChunkPlanMessages.quotaAlertMessage`（返回 Component）/`rulesMessage` 逐字同步；测试 64 → 72（`QuotaEngineTest` 增 8 个：逐档触发/严重度映射/窗口独立/首见不刷屏/reset 重触发/跨档逐条/豁免清状态/BAN 无提示）
 29. **check 未满行档位化（坑 #29）**：`/chunkplan check`（与登录欢迎共用）未满时不再固定显示"未满，可正常探索"，改为**档位词 + 微调句子**：**充足（0≤pct<50，§a）/ 中等（50≤pct<75，§e）/ 不足（≥75，§c）**——用户三轮修正定稿的**连续百分比区间**（达到 50 即中等、达到 75 即不足；75 档归不足区，与坑 #28 alert 严重度分段[75 为中]无关，check 档位词按 percent 区间独立判断）。档位判定：**跨窗口取当前百分比最高档位**，现算跟随当前状态（额度滑出/重置自动回落显示"充足"，不保留触发历史，与 alertStates 解耦）。架构：`QuotaStatus` record 增加 `worstAlert` 字段（`quotaStatus()` 唯一构造点复用 `currentLevel()` 逐线算档位取最高；无档 null），双端 `ChunkPlanMessages.checkStatusText` 未满分支按 `worstAlert().percent()` 区间渲染（签名不变，调用点零改动，欢迎消息同样显示档位词）；满线"已耗尽"分支优先。测试 72 → 76（`QuotaEngineTest` 增 4 个：无档 null/档位-百分边界 15-30-50-62.5-75-87.5-100/跨窗口取最高/滑出回落）
 30. **指令控制具体配置（坑 #30，纯英文命令族）**：
-    - **按档位分桶记账（数据模型 v2）**：`QuotaConfig.Line` 增加 `tier`（1~4，分桶键，窗口时长跨档重叠不能反推）；`PlayerQuotaData` 由单一共享 `minuteBuckets` 改为 `tierBuckets`（tier -> epochMinute -> 点数），每次消费计入所有启用档位。`resetSpend(UUID, Set<Integer>)` 单档重置；`clearTierSpendForAll(tier)` 关闭窗口时清空该档所有玩家记录（在线内存 + 离线文件逐个改写，重开从 0 起）。**Dto v2 迁移**：v1 共享桶无法无损拆分，升级保留 explored、丢弃消费桶（日志告警）；`VERSION=1→2`
+    - **按档位分桶记账（数据模型 v2，坑 #40 起升级为 v3 固定周期）**：`QuotaConfig.Line` 增加 `tier`（1~4，分桶键，窗口时长跨档重叠不能反推）；`PlayerQuotaData` 由单一共享 `minuteBuckets` 改为 `tierBuckets`（tier -> epochMinute -> 点数），每次消费计入所有启用档位。`resetSpend(UUID, Set<Integer>)` 单档重置；`clearTierSpendForAll(tier)` 关闭窗口时清空该档所有玩家记录（在线内存 + 离线文件逐个改写，重开从 0 起）。**Dto v2 迁移**：v1 共享桶无法无损拆分，升级保留 explored、丢弃消费桶（日志告警）；`VERSION=1→2`
     - **命令（双端 QuotaCommands 逐字同步）**：`config window <tier1..tier4|all> <on|off>`（off 需 confirm，清空该窗口记录）/ `config windowTime <tier1..tier4> <预置时长>`（tab 补全，未启用报错，时间差不补偿，离线在线一致滑动推导）/ `config windowLimit <tier1..tier4> <数值>`（1.00~999999999.99，调低需 confirm）/ `config highSpeedMultiplier <数值>`（1.00~1000.00）；数值允许整数或 ≤2 位小数（common `NumericParser`，FORMAT/RANGE 分错误文案）；`help`（权限 2，教学 config 与 reset）；`reset <目标> [tier1..tier4|all]`（@a/@e 全部在线、@s 自身、@p 最近、@r 随机、名字/UUID 离线可用；选未启用档位报错，all 忽略；提示"将重置 N 名玩家/玩家名 的 X 额度限制"，X 用 `windowName`"5小时内"或"全部"）
     - **confirm 泛化（单槽 + 60s + 超链接）**：`PendingReset` 泛化为 sealed `PendingAction`（Reset/DisableWindow tier0=全部/LowerLimit），单槽新动作覆盖旧动作（无队列），过期即失效；提示尾部追加 `ChunkPlanMessages.confirmLink` 超链接（ClickEvent RUN_COMMAND "/chunkplan confirm"）
     - **每 tick 判满**：`isAllLinesExceeded` 从"仅区块变化路径"扩展到无变化路径——降额度/改窗口/启新线后 1 tick 内在线超限玩家被踢（原地不动也生效）
@@ -188,6 +187,12 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **平台差异（不四端同步）**：NeoForge 21.1 `unloadConfig` 只移除 watcher 从不写回、`ModConfig` 无 save()（文件即事实源），Fabric 为 mod 自有 JSON 无平台配置层——同款命令代码在其它三端重启保留（用户实测一致），故本修复**仅 Forge 端**；NeoForge 21.1 的 `ConfigValue.set` 语义也不同（不落盘），勿照搬
     - **「单窗口刷新连坐全窗口」排查结论**：common 逐行核查（tier 键控分桶 / 窗口无状态现算 / 清理按 tier 独立）确认**不存在**该代码路径；Forge 端观察到的「所有窗口一起变」是坑 #39 的表现形式（整个文件被关服写回默认，4 档同时回退默认值），修复后应消失
     - 坑 #12 提示扩展：Forge 端「运行中手改文件不 reload 即关服」仍会被关服 save 覆盖（spec 未同步到文件新值），需停服修改或改后 reload
+
+40. **额度线改为固定周期重置（坑 #40，2026-08-21，数据格式 v3）**：用户实测暴露旧滚动窗口缺陷——恢复时间只保证"最早消费桶滑出"，若该桶金额小于超出量，玩家到提示时刻重进仍被拒、恢复时间逐分钟后移（22:06 满 → 提示 22:07 → 到点只重置个位数又被踢 → 提示 22:08）。用户拍板改为**固定周期**：
+    - **语义**：每档 tier(1~4) 独立维护 `{cycleStartMillis, spent}`；首次消费锚定周期起点（`now/60000*60000` 对齐整分钟——恢复时间恒落整分，与文案 HH:mm 精确一致）；周期终点 = 起点 + **当前配置**窗口长（现算，`config windowTime` 改动立即影响进行中周期：缩短即提前清零解封，由 scanBans 30s 内自动执行；与坑 #30"当场生效"哲学一致）；到点**整窗清零**（等价 `/chunkplan reset`），与累计多少无关。判满仍 OR 语义（任一满即拒，坑 #25）；恢复时间 = 各满线周期终点的最晚者，"您最早可于 X 再次进入服务器"精确兑现
+    - **实现**：`PlayerQuotaData` v3（`tiers: Map<Integer,TierCycle>` 替代 v2 分钟桶；API `recordSpend`/`expireIfNeeded`/`effectiveSpent`/`cycleStartMillis`——读路径纯读不清、记账前惰性过期重锚，过期数据残留文件无害因所有读取按时间现算）；`QuotaEngine.recoveryMillis(data)` 删 firstKey/firstBucketAtOrAfter 逻辑；`cleanupExpiredBuckets` 删除（每档 O(1) 无需清理）。**壳层四端 + fabric-multi shared + GuiStatus 协议零改动**（公共接口 `clearTierSpendForAll`/`saveAll` 签名不变，`LineStatus` 字段形状不变）
+    - **迁移**：`VERSION=3`；v1/v2 玩家数据升级保留 explored、丢弃消费记录（滚动窗口分钟桶无法映射为固定周期，与 v1→v2 先例一致，加载时告警）；`clearTierSpendForAll` 离线改写门禁只处理 v3（旧版留待玩家下次加载时迁移）；升级瞬间正在封禁的玩家随消费清零被 scanBans 自动解封
+    - **测试**：common 107 → 115（新增 `partialSlideDoesNotShiftRecovery` 用户场景回归 / `windowTimeShortenAffectsOngoingCycle` / `resetClearsAnchorAndReAnchors` / v2 迁移；`banClearsWhenWindowSlides`→`banClearsFullyAtCycleEnd`、`recoveryConsidersEarliestBucketAcrossMinutes`→`recoveryUsesLatestFullLineCycleEnd` 改写）。**测试写时钟注意**：TestClock 起点位于某分钟的第 40 秒，锚点对齐整分后短窗口（60s）的剩余周期只有 20s——跨分钟推进时钟需用长窗口配置，否则提前过期重锚
 
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
