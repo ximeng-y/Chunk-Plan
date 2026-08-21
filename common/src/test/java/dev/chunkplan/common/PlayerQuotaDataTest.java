@@ -2,7 +2,6 @@ package dev.chunkplan.common;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Map;
@@ -22,9 +21,10 @@ class PlayerQuotaDataTest {
         p.markExplored("minecraft:overworld", chunk(1, 2));
         p.markExplored("minecraft:overworld", chunk(3, -4));
         p.markExplored("minecraft:the_nether", chunk(-5, 6));
-        p.addSpend(1, 1000L, 1.0);
-        p.addSpend(1, 1000L, 0.5);
-        p.addSpend(1, 1001L, 0.05);
+        // 首消锚定整分钟（1000min），同周期内两笔消费累计
+        p.recordSpend(1, 1000L * 60000 + 30000, 1.0);
+        p.recordSpend(1, 1000L * 60000 + 40000, 0.5);
+        p.recordSpend(2, 1000L * 60000 + 45000, 0.05);
 
         String json = GsonHolder.GSON.toJson(p.toDto());
         PlayerQuotaData back = PlayerQuotaData.fromDto(
@@ -36,96 +36,143 @@ class PlayerQuotaDataTest {
         assertTrue(back.isExplored("minecraft:the_nether", chunk(-5, 6)));
         assertFalse(back.isExplored("minecraft:the_nether", chunk(0, 0)));
 
-        long now = 1001L * 60000 + 30000;
-        assertEquals(1.55, back.spendInWindow(1, now, 3600), 1e-9);
+        long now = 1000L * 60000 + 50000; // 周期内（窗口 3600s 未到点）
+        assertEquals(1.5, back.effectiveSpent(1, now, 3600), 1e-9);
+        assertEquals(0.05, back.effectiveSpent(2, now, 3600), 1e-9);
+        assertEquals(1000L * 60000, back.cycleStartMillis(1));
     }
 
     @Test
-    void windowBoundary() {
+    void recordSpendAnchorsAtMinuteFloor() {
         PlayerQuotaData p = new PlayerQuotaData();
-        // 桶 100 消费 1.0，桶 101 消费 2.0；now=101.5min 时刻，窗口 60s
-        p.addSpend(1, 100, 1.0);
-        p.addSpend(1, 101, 2.0);
-        long nowMillis = 101L * 60000 + 30000; // 101.5 分钟
-        // 窗口 (100.5min, 101.5min] -> 只含桶 101
-        assertEquals(2.0, p.spendInWindow(1, nowMillis, 60), 1e-9);
-        // 窗口 120s -> (100.5min, 101.5min] 同样只含桶 101？(101.5-2)min=99.5 -> 含桶 100、101
-        assertEquals(3.0, p.spendInWindow(1, nowMillis, 120), 1e-9);
+        // 首消在 100.5 分钟 -> 锚定到 100 分钟整
+        p.recordSpend(1, 100L * 60000 + 30000, 1.0);
+        assertEquals(100L * 60000, p.cycleStartMillis(1));
+        // 同周期后续消费不改锚点
+        p.recordSpend(1, 102L * 60000 + 10000, 2.0);
+        assertEquals(100L * 60000, p.cycleStartMillis(1));
+        assertEquals(3.0, p.effectiveSpent(1, 102L * 60000 + 20000, 3600), 1e-9);
     }
 
     @Test
-    void cleanupOldBuckets() {
+    void cycleBoundaryFullReset() {
         PlayerQuotaData p = new PlayerQuotaData();
-        p.addSpend(1, 100, 1.0);
-        p.addSpend(1, 200, 2.0);
-        assertTrue(p.cleanupBucketsBefore(1, 150));
-        assertEquals(2.0, p.spendInWindow(1, 200L * 60000 + 1000, 3600), 1e-9);
-        assertFalse(p.cleanupBucketsBefore(1, 150)); // 已清理，无需再清理
+        p.recordSpend(1, 100L * 60000 + 30000, 5.0); // 锚定 100min，窗口 60s
+        long end = 101L * 60000;                     // 周期终点 = 101min 整
+        // 终点前 1ms 仍计入；到达终点即整窗清零（与消费多少无关）
+        assertEquals(5.0, p.effectiveSpent(1, end - 1, 60), 1e-9);
+        assertEquals(0.0, p.effectiveSpent(1, end, 60), 1e-9);
+    }
+
+    @Test
+    void expireIfNeededResetsAndReanchors() {
+        PlayerQuotaData p = new PlayerQuotaData();
+        p.recordSpend(1, 100L * 60000 + 30000, 5.0); // 锚定 100min，窗口 60s
+        long end = 101L * 60000;
+        assertFalse(p.expireIfNeeded(1, end - 1, 60)); // 未到期不清
+        assertTrue(p.expireIfNeeded(1, end, 60));      // 到期整窗清零
+        assertEquals(-1, p.cycleStartMillis(1));
+        assertEquals(0.0, p.effectiveSpent(1, end, 60), 1e-9);
+        // 清零后再次消费重新锚定完整周期
+        p.recordSpend(1, end + 30000, 1.0);
+        assertEquals(end, p.cycleStartMillis(1)); // (end+30s) 所在分钟 = 101min
+        assertEquals(1.0, p.effectiveSpent(1, end + 30000, 60), 1e-9);
+    }
+
+    @Test
+    void effectiveSpentIsPureReadAfterExpiry() {
+        PlayerQuotaData p = new PlayerQuotaData();
+        p.recordSpend(1, 100L * 60000, 5.0);
+        p.clearDirty();
+        long end = 101L * 60000;
+        assertEquals(0.0, p.effectiveSpent(1, end, 60), 1e-9); // 过期视为 0
+        assertEquals(100L * 60000, p.cycleStartMillis(1));     // 纯读：状态未被清除
+        assertFalse(p.isDirty());                              // 纯读不置脏
     }
 
     @Test
     void fromDtoToleratesNulls() {
         PlayerQuotaData p = PlayerQuotaData.fromDto(new PlayerQuotaData.Dto());
         assertFalse(p.isExplored("x", chunk(0, 0)));
-        assertEquals(0.0, p.spendInWindow(1, System.currentTimeMillis(), 60), 1e-9);
+        assertEquals(0.0, p.effectiveSpent(1, System.currentTimeMillis(), 60), 1e-9);
+        assertEquals(-1, p.cycleStartMillis(1));
     }
 
     @Test
     void toJsonStructure() {
         PlayerQuotaData p = new PlayerQuotaData();
         p.markExplored("minecraft:overworld", chunk(1, 2));
-        p.addSpend(1, 1000, 3.5);
+        p.recordSpend(1, 1000L * 60000, 3.5);
         String json = GsonHolder.GSON.toJson(p.toDto());
         Map<?, ?> parsed = GsonHolder.GSON.fromJson(json, Map.class);
-        assertEquals(2, ((Number) parsed.get("version")).intValue());
+        assertEquals(3, ((Number) parsed.get("version")).intValue());
         assertTrue(parsed.containsKey("explored"));
-        assertTrue(parsed.containsKey("tierBuckets"));
+        assertTrue(parsed.containsKey("tiers"));
         // explored 为按行对象结构：{"minecraft:overworld":{"2":[[1,1]]}}
         Map<?, ?> explored = (Map<?, ?>) parsed.get("explored");
         Map<?, ?> rows = (Map<?, ?>) explored.get("minecraft:overworld");
         assertTrue(rows.containsKey("2"));
+        // tiers 为档位 -> {cycleStartMillis, spent}
+        Map<?, ?> tiers = (Map<?, ?>) parsed.get("tiers");
+        Map<?, ?> tier1 = (Map<?, ?>) tiers.get("1");
+        assertEquals(1000L * 60000, ((Number) tier1.get("cycleStartMillis")).longValue());
+        assertEquals(3.5, (Double) tier1.get("spent"), 1e-9);
     }
 
-    // ---------- 坑 #30：按档位分桶 / 单档清空 / v1 迁移 ----------
+    // ---------- 坑 #30/#40：按档位独立 / 单档清空 / v1、v2 迁移 ----------
 
     @Test
-    void perTierBucketsIndependent() {
+    void perTierCyclesIndependent() {
         PlayerQuotaData p = new PlayerQuotaData();
-        p.addSpend(1, 100, 1.0);
-        p.addSpend(1, 100, 0.5);
-        p.addSpend(2, 100, 0.2);
-        long now = 100L * 60000 + 30000;
-        assertEquals(1.5, p.spendInWindow(1, now, 3600), 1e-9);
-        assertEquals(0.2, p.spendInWindow(2, now, 3600), 1e-9);
-        assertEquals(0.0, p.spendInWindow(3, now, 3600), 1e-9); // 无该档位桶
-        assertNull(p.firstBucketAtOrAfter(3, 100));              // 无该档位桶
-        assertEquals(100L, p.firstBucketAtOrAfter(1, 100));
-        assertEquals(100L, p.firstBucketAtOrAfter(2, 100));
+        p.recordSpend(1, 100L * 60000 + 30000, 1.0);
+        p.recordSpend(1, 100L * 60000 + 30000, 0.5);
+        p.recordSpend(2, 100L * 60000 + 30000, 0.2);
+        long now = 100L * 60000 + 40000;
+        assertEquals(1.5, p.effectiveSpent(1, now, 3600), 1e-9);
+        assertEquals(0.2, p.effectiveSpent(2, now, 3600), 1e-9);
+        assertEquals(0.0, p.effectiveSpent(3, now, 3600), 1e-9); // 无该档位记录
+        assertEquals(-1, p.cycleStartMillis(3));                 // 无该档位记录
+        assertEquals(100L * 60000, p.cycleStartMillis(1));
+        assertEquals(100L * 60000, p.cycleStartMillis(2));
     }
 
     @Test
     void clearTierSpendOnlyClearsThatTier() {
         PlayerQuotaData p = new PlayerQuotaData();
-        p.addSpend(1, 100, 1.0);
-        p.addSpend(2, 100, 2.0);
+        p.recordSpend(1, 100L * 60000, 1.0);
+        p.recordSpend(2, 100L * 60000, 2.0);
         assertTrue(p.clearTierSpend(1));
         long now = 100L * 60000 + 30000;
-        assertEquals(0.0, p.spendInWindow(1, now, 3600), 1e-9);
-        assertEquals(2.0, p.spendInWindow(2, now, 3600), 1e-9);
+        assertEquals(0.0, p.effectiveSpent(1, now, 3600), 1e-9);
+        assertEquals(-1, p.cycleStartMillis(1)); // 锚点一并清除，下次消费重新锚定
+        assertEquals(2.0, p.effectiveSpent(2, now, 3600), 1e-9);
         assertFalse(p.clearTierSpend(1)); // 已空：不置脏
     }
 
     @Test
     void v1LegacyBucketsDroppedOnLoad() {
-        // v1 共享分钟桶：fromDto 有意不读取（无法无损拆分到档位），explored 保留
-        PlayerQuotaData.Dto v1 = new PlayerQuotaData.Dto();
-        v1.version = 1;
-        v1.explored = Map.of("d", Map.of("0", new int[][]{{1, 1}}));
-        v1.minuteBuckets = new java.util.TreeMap<>();
-        v1.minuteBuckets.put(100L, 5.0);
-        PlayerQuotaData p = PlayerQuotaData.fromDto(v1);
+        // v1 共享分钟桶：fromDto 有意不读取（无法映射为固定周期），explored 保留
+        String v1Json = "{\"version\":1,\"explored\":{\"d\":{\"0\":[[1,1]]}},"
+                + "\"minuteBuckets\":{\"100\":5.0}}";
+        PlayerQuotaData.Dto dto = GsonHolder.GSON.fromJson(v1Json, PlayerQuotaData.Dto.class);
+        assertEquals(1, dto.version);
+        PlayerQuotaData p = PlayerQuotaData.fromDto(dto);
         assertTrue(p.isExplored("d", chunk(1, 0)));
-        assertEquals(0.0, p.spendInWindow(1, 100L * 60000 + 30000, 3600), 1e-9);
+        assertEquals(0.0, p.effectiveSpent(1, 100L * 60000 + 30000, 3600), 1e-9);
+        assertEquals(-1, p.cycleStartMillis(1));
+    }
+
+    @Test
+    void v2LegacyBucketsDroppedOnLoad() {
+        // v2 滚动窗口分钟桶：fromDto 有意不读取（无法映射为固定周期），explored 保留
+        String v2Json = "{\"version\":2,\"explored\":{\"d\":{\"0\":[[1,1]]}},"
+                + "\"tierBuckets\":{\"1\":{\"100\":5.0}}}";
+        PlayerQuotaData.Dto dto = GsonHolder.GSON.fromJson(v2Json, PlayerQuotaData.Dto.class);
+        assertEquals(2, dto.version);
+        PlayerQuotaData p = PlayerQuotaData.fromDto(dto);
+        assertTrue(p.isExplored("d", chunk(1, 0)));
+        assertEquals(0.0, p.effectiveSpent(1, 100L * 60000 + 30000, 3600), 1e-9);
+        assertEquals(-1, p.cycleStartMillis(1));
     }
 
     @Test
@@ -219,5 +266,27 @@ class PlayerQuotaDataTest {
         // 相邻区间在加载时顺带规范化合并（[1,3] 与 [7,8] 不相邻，保持两条）
         assertEquals("[[1, 3], [7, 8]]", java.util.Arrays.deepToString(
                 p.toDto().explored.get("d").get("10")));
+    }
+
+    @Test
+    void fromDtoSkipsInvalidCycles() {
+        PlayerQuotaData.Dto dto = new PlayerQuotaData.Dto();
+        dto.tiers = Map.of(
+                1, cycle(1000L, 1.5),   // 合法
+                2, cycle(-1L, 9.9),     // 未锚定：跳过
+                5, cycle(1000L, 1.0),   // 非法档位：跳过
+                0, cycle(1000L, 1.0));  // 非法档位：跳过
+        PlayerQuotaData p = PlayerQuotaData.fromDto(dto);
+        assertEquals(1.5, p.effectiveSpent(1, 1000L + 1000, 3600), 1e-9);
+        assertEquals(-1, p.cycleStartMillis(2));
+        assertEquals(-1, p.cycleStartMillis(5));
+        assertEquals(-1, p.cycleStartMillis(0));
+    }
+
+    private static PlayerQuotaData.TierCycle cycle(long start, double spent) {
+        PlayerQuotaData.TierCycle c = new PlayerQuotaData.TierCycle();
+        c.cycleStartMillis = start;
+        c.spent = spent;
+        return c;
     }
 }

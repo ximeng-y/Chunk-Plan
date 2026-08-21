@@ -27,8 +27,8 @@ import org.slf4j.LoggerFactory;
  *       <li>speed = 上 tick 到本 tick 的三维位移（格/tick）</li>
  *       <li>基础费 = 集合内含 curChunk ? familiarEntryFee : firstEntryFee；不在集合则先加入集合</li>
  *       <li>总费 = 基础费 × (speed > 阈值 ? 倍率 : 1)</li>
- *       <li>累加进分钟桶，写独立扣费日志</li>
- *       <li>先记账后判踢：所有额度线均满 -> 返回 BAN（含恢复时间；文案由壳层按玩家语言渲染）</li>
+ *       <li>累加进各启用档位的固定周期（首消锚定起点、到点整窗清零，坑 #40），写独立扣费日志</li>
+ *       <li>先记账后判踢：任一额度线满 -> 返回 BAN（含恢复时间；文案由壳层按玩家语言渲染）</li>
  *     </ul>
  *   </li>
  *   <li>更新 prevPos/prevChunk/prevDim</li>
@@ -70,7 +70,7 @@ public final class QuotaEngine {
         }
     }
 
-    /** 单线状态：窗口/上限/已消费/下次重置时间（该线窗口内最早消费桶滑出的时刻，各线独立；无消费为 -1） */
+    /** 单线状态：窗口/上限/已消费/下次重置时间（该线当前周期终点，到点整窗清零；无消费为 -1） */
     public record LineStatus(long windowSeconds, double limit, double spent, long nextResetMillis) {
     }
 
@@ -231,7 +231,7 @@ public final class QuotaEngine {
             // 坑 #30：每 tick 仍判满——配置变更（降额度/改窗口/启用新线）导致超限时
             // 下一 tick 即踢出，原地不动也生效（保证"降低额度不会瘫痪系统、当场生效"）
             if (isAllLinesExceeded(data, now)) {
-                return TickResult.ban(recoveryMillis(data, now));
+                return TickResult.ban(recoveryMillis(data));
             }
             return TickResult.none(checkAlerts(uuid, data, now));
         }
@@ -245,10 +245,11 @@ public final class QuotaEngine {
 
         QuotaConfig cfg = config;
         double fee = base * (speed > cfg.highSpeedThreshold() ? cfg.highSpeedMultiplier() : 1.0);
-        long minute = now / 60000;
-        // 按档位分桶：每次消费计入所有启用档位（坑 #30，各窗口独立记账、互不影响）
+        // 每次消费计入所有启用档位（坑 #30 各窗口独立记账）；先惰性过期再记账：
+        // 已到周期的档整窗清零并重新锚定（固定周期语义，坑 #40）
         for (QuotaConfig.Line line : cfg.lines()) {
-            data.addSpend(line.tier(), minute, fee);
+            data.expireIfNeeded(line.tier(), now, line.windowSeconds());
+            data.recordSpend(line.tier(), now, fee);
         }
 
         if (cfg.logFeeEvents() && feeLogger != null) {
@@ -257,7 +258,7 @@ public final class QuotaEngine {
 
         // 先记账后判踢：任一额度线满 -> BAN（坑 #25：原"全部满才拒"，用户确认为单线满即拒）
         if (isAllLinesExceeded(data, now)) {
-            long until = recoveryMillis(data, now);
+            long until = recoveryMillis(data);
             return TickResult.ban(until);
         }
         return TickResult.none(checkAlerts(uuid, data, now));
@@ -281,14 +282,13 @@ public final class QuotaEngine {
         boolean any = false;
         WindowAlert worst = null;
         for (QuotaConfig.Line line : config.lines()) {
-            double spent = data.spendInWindow(line.tier(), now, line.windowSeconds());
-            // 各线独立的下次重置时间：该线窗口内最早消费桶 + 窗口长（无消费为 -1）。
-            // 与满线恢复时间同一公式；未满线也展示，便于玩家看到"该线何时滑出"（坑 #26）
+            double spent = data.effectiveSpent(line.tier(), now, line.windowSeconds());
+            // 各线独立的下次重置时间：该线当前周期终点（固定周期到点整窗清零，坑 #40）。
+            // 与满线恢复时间同一公式；未满线也展示，便于玩家看到"该线何时清零"（坑 #26）
             long nextReset = -1;
-            long firstKey = (now - line.windowSeconds() * 1000) / 60000 + 1;
-            Long earliest = data.firstBucketAtOrAfter(line.tier(), firstKey);
-            if (earliest != null) {
-                nextReset = earliest * 60000L + line.windowSeconds() * 1000L;
+            long start = data.cycleStartMillis(line.tier());
+            if (spent > 0 && start >= 0) {
+                nextReset = start + line.windowSeconds() * 1000L;
             }
             lines.add(new LineStatus(line.windowSeconds(), line.limit(), spent, nextReset));
             if (spent > line.limit()) {
@@ -300,7 +300,7 @@ public final class QuotaEngine {
                 worst = new WindowAlert(line.windowSeconds(), level, severityOf(level));
             }
         }
-        long recovery = any ? recoveryMillis(data, now) : -1;
+        long recovery = any ? recoveryMillis(data) : -1;
         return new QuotaStatus(lines, recovery, any, worst);
     }
 
@@ -364,8 +364,8 @@ public final class QuotaEngine {
                 if (dto == null) {
                     continue; // 主与 .bak 均损坏：保留原样
                 }
-                if (dto.version != PlayerQuotaData.VERSION && dto.version != 1) {
-                    continue; // 未知版本：保留原样，避免静默改写丢失未知字段（坑 #31）
+                if (dto.version != PlayerQuotaData.VERSION) {
+                    continue; // 未知/旧版本：保留原样（旧版在玩家下次加载时迁移，坑 #40）
                 }
                 PlayerQuotaData data = PlayerQuotaData.fromDto(dto);
                 data.clearTierSpend(tier);
@@ -390,9 +390,8 @@ public final class QuotaEngine {
         alertStates.remove(uuid);
     }
 
-    /** 定时/关服保存（先清理过期桶再写盘） */
+    /** 定时/关服保存（固定周期状态每档 O(1)，无需清理过期数据） */
     public void saveAll() {
-        cleanupExpiredBuckets();
         for (UUID uuid : dataByPlayer.keySet()) {
             savePlayer(uuid);
         }
@@ -410,16 +409,6 @@ public final class QuotaEngine {
             data.clearDirty();
         } catch (IOException e) {
             LOG.error("保存玩家 {} 配额数据失败", uuid, e);
-        }
-    }
-
-    /** 清理各档位早于"该档窗口 2 倍"的过期桶（各档独立清理，坑 #30） */
-    public void cleanupExpiredBuckets() {
-        for (QuotaConfig.Line line : config.lines()) {
-            long cutoffMinute = (clock.getAsLong() - line.windowSeconds() * 2000) / 60000;
-            for (PlayerQuotaData data : dataByPlayer.values()) {
-                data.cleanupBucketsBefore(line.tier(), cutoffMinute);
-            }
         }
     }
 
@@ -461,7 +450,7 @@ public final class QuotaEngine {
 
     /** 当前最高已过档位（低于 15% 为 -1） */
     private static int currentLevel(PlayerQuotaData data, QuotaConfig.Line line, long now) {
-        double pct = data.spendInWindow(line.tier(), now, line.windowSeconds()) / line.limit() * 100;
+        double pct = data.effectiveSpent(line.tier(), now, line.windowSeconds()) / line.limit() * 100;
         int level = -1;
         for (int t : ALERT_PERCENTS) {
             if (pct >= t) {
@@ -485,7 +474,7 @@ public final class QuotaEngine {
     private boolean isAllLinesExceeded(PlayerQuotaData data, long nowMillis) {
         // 坑 #25：任一额度线满即视为超限（原"全部满才拒"改为单线满即拒）
         for (QuotaConfig.Line line : config.lines()) {
-            if (data.spendInWindow(line.tier(), nowMillis, line.windowSeconds()) > line.limit()) {
+            if (data.effectiveSpent(line.tier(), nowMillis, line.windowSeconds()) > line.limit()) {
                 return true;
             }
         }
@@ -493,27 +482,26 @@ public final class QuotaEngine {
     }
 
     /**
-     * 恢复时间 = 对每条满的线取"min(有消费的分钟) + 窗口长"的最晚者，
-     * 即"何时不再有任一满线"（最早消费桶滑出窗口的时刻）。
+     * 恢复时间 = 各满线"周期起点 + 窗口长"的最晚者（固定周期语义，坑 #40）。
+     * 到该时刻所有满线的周期同时到点、整窗清零（等价 reset），承诺精确兑现——
+     * 不再有旧滚动窗口"最早桶滑出但额度仍超限"的到点二次封禁问题。
      */
-    private long recoveryMillis(PlayerQuotaData data, long nowMillis) {
+    private long recoveryMillis(PlayerQuotaData data) {
         long worst = -1;
         for (QuotaConfig.Line line : config.lines()) {
-            if (data.spendInWindow(line.tier(), nowMillis, line.windowSeconds()) <= line.limit()) {
+            if (data.effectiveSpent(line.tier(), clock.getAsLong(), line.windowSeconds()) <= line.limit()) {
                 continue;
             }
-            long firstKey = (nowMillis - line.windowSeconds() * 1000) / 60000 + 1;
-            Long earliest = data.firstBucketAtOrAfter(line.tier(), firstKey);
-            if (earliest == null) {
+            long start = data.cycleStartMillis(line.tier());
+            if (start < 0) {
                 continue;
             }
-            long rec = earliest * 60000L + line.windowSeconds() * 1000L;
-            worst = Math.max(worst, rec);
+            worst = Math.max(worst, start + line.windowSeconds() * 1000L);
         }
         return worst;
     }
 
-    /** 累计总点数：按最长窗口档位求和（仅用于日志展示；各档位桶内容相同，取最大窗口档位即可） */
+    /** 累计总点数：按最长窗口档位求和（仅用于日志展示；各档位周期内容相同，取最大窗口档位即可） */
     private double totalSpent(PlayerQuotaData data, long nowMillis) {
         QuotaConfig.Line maxLine = null;
         for (QuotaConfig.Line line : config.lines()) {
@@ -521,7 +509,7 @@ public final class QuotaEngine {
                 maxLine = line;
             }
         }
-        return maxLine == null ? 0 : data.spendInWindow(maxLine.tier(), nowMillis, maxLine.windowSeconds());
+        return maxLine == null ? 0 : data.effectiveSpent(maxLine.tier(), nowMillis, maxLine.windowSeconds());
     }
 
     private PlayerQuotaData loadOrCreate(UUID uuid) {
@@ -536,10 +524,10 @@ public final class QuotaEngine {
             if (dto.version == PlayerQuotaData.VERSION) {
                 return PlayerQuotaData.fromDto(dto);
             }
-            if (dto.version == 1) {
-                // v1 -> v2 迁移（坑 #30）：explored 终身保留；v1 共享消费桶无法无损拆分到档位，
-                // 丢弃（该玩家消费额度从 0 重新累计）
-                LOG.warn("玩家 {} 配额数据为旧版 v1，已保留探索集合，消费额度从 0 重新累计", uuid);
+            if (dto.version == 1 || dto.version == 2) {
+                // v1/v2 -> v3 迁移（坑 #40）：滚动窗口分钟桶无法映射为固定周期，
+                // 保留 explored、丢弃消费记录（该玩家消费从 0 重新累计）
+                LOG.warn("玩家 {} 配额数据为旧版 v{}，已保留探索集合，消费从 0 重新累计", uuid, dto.version);
                 return PlayerQuotaData.fromDto(dto);
             }
             LOG.warn("玩家 {} 配额数据版本不兼容（{}），将重建", uuid, dto.version);

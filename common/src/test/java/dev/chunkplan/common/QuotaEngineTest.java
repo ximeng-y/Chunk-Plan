@@ -53,7 +53,7 @@ class QuotaEngineTest {
     @BeforeEach
     void setUp() {
         clock = new TestClock();
-        // 两条短窗口线：1min/2.0 + 2min/3.0（便于测试滑动恢复）
+        // 两条短窗口线：1min/2.0 + 2min/3.0（便于测试周期恢复）
         // 阈值 1000：测试中直接大位移跨区块不受 2x 倍率干扰（高速测试单独 setConfig）
         QuotaConfig config = QuotaConfig.builder()
                 .lines(List.of(
@@ -155,7 +155,7 @@ class QuotaEngineTest {
         engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0);  // 3.0：1min 线满，2min 线未满
         var r = engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0); // 4.0：两条都满 -> BAN
         assertEquals(QuotaEngine.ResultType.BAN, r.type());
-        // 恢复时间 = 各满线恢复时间的 max = 最早消费桶(M0) + 最长满线窗口(2min)
+        // 恢复时间 = 各满线周期终点的 max = 周期起点(M0 对齐整分) + 最长满线窗口(2min)
         long m0 = clock.now / 60000;
         assertEquals(m0 * 60000L + 120_000L, r.banUntilMillis());
     }
@@ -174,7 +174,7 @@ class QuotaEngineTest {
         assertFalse(engine.quotaStatus(player).allExceeded());
         var r = engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0); // 3.0：1min 线满 -> BAN
         assertEquals(QuotaEngine.ResultType.BAN, r.type());
-        // 恢复时间 = 满线（1min 线）最早桶 M0 + 60s；2min 线未满不参与
+        // 恢复时间 = 满线（1min 线）周期终点 M0 + 60s；2min 线未满不参与
         long m0 = clock.now / 60000;
         assertEquals(m0 * 60000L + 60_000L, r.banUntilMillis());
         // 登录拦截语义：单线满同样拒绝登录
@@ -183,13 +183,34 @@ class QuotaEngineTest {
     }
 
     @Test
-    void banClearsWhenWindowSlides() {
+    void banClearsFullyAtCycleEnd() {
         allLinesFullTriggersBanWithRecoveryTime();
-        // 推进 121 秒：两条窗口均滑出，不再全满
-        clock.advanceMillis(121_000);
+        // 周期终点前不做任何滑出：tier1（1min）到点后仍被 tier2（2min）拦住
+        clock.advanceMillis(30_000);
+        assertTrue(engine.isAllLinesExceeded(player));
+        // 跨过全部周期终点：整窗清零，不再满
+        clock.advanceMillis(91_000);
         assertFalse(engine.isAllLinesExceeded(player));
         var r = engine.onPlayerTick(player, false, OVERWORLD, 80, 64, 0);
         assertEquals(QuotaEngine.ResultType.NONE, r.type());
+        // 清零是整窗式的：新周期只含本次消费 1.0，旧消费无残留
+        assertEquals(1.0, engine.quotaStatus(player).lines().get(0).spent(), 1e-9);
+    }
+
+    @Test
+    void partialSlideDoesNotShiftRecovery() {
+        // 用户实测回归（坑 #40）：旧滚动窗口下到提示的重置时间只滑出个位数、恢复时间逐分钟后移；
+        // 固定周期下周期终点前恢复时间恒定，到点一次整窗清零
+        allLinesFullTriggersBanWithRecoveryTime();
+        long recovery = engine.quotaStatus(player).recoveryMillis();
+        // 推进到 tier1（1min）周期终点之后、tier2（2min）周期终点之前：
+        // 仍被拦（tier2 未清），且恢复时间不后移（仍是 tier2 的周期终点）
+        clock.advanceMillis(30_000);
+        assertTrue(engine.isAllLinesExceeded(player));
+        assertEquals(recovery, engine.quotaStatus(player).recoveryMillis());
+        // 跨过全部周期终点：一次放行，无需反复重进
+        clock.advanceMillis(91_000);
+        assertFalse(engine.isAllLinesExceeded(player));
     }
 
     @Test
@@ -213,7 +234,7 @@ class QuotaEngineTest {
         assertTrue(engine.isAllLinesExceeded(player));
         var status = engine.quotaStatus(player);
         assertTrue(status.allExceeded());
-        // 恢复时间 = 各满线恢复时间的 max = 最早消费桶(M0) + 最长满线窗口(1h)
+        // 恢复时间 = 各满线周期终点的 max = 周期起点(M0) + 最长满线窗口(1h)
         long m0 = clock.now / 60000;
         assertEquals(m0 * 60000L + 3_600_000L, status.recoveryMillis());
     }
@@ -366,29 +387,27 @@ class QuotaEngineTest {
     }
 
     @Test
-    void recoveryConsidersEarliestBucketAcrossMinutes() {
-        // 消费分散在多个分钟桶：全满时恢复时间 = 各满线"最早消费桶+窗口"的最晚者
-        // 线：1min/1.0 + 2min/2.0
+    void recoveryUsesLatestFullLineCycleEnd() {
+        // 固定周期（坑 #40）：消费分布在哪些分钟不影响判满与恢复时间（锚点只在首消时确定）；
+        // 满线集合变化时恢复时间取各满线周期终点的最晚者
+        // 线：5min/2.0 + 10min/3.0（长窗口避免分钟对齐锚点吃掉剩余窗口）
         engine.setConfig(QuotaConfig.builder()
-                .lines(List.of(new QuotaConfig.Line(1, 60, 1.0), new QuotaConfig.Line(2, 120, 2.0)))
+                .lines(List.of(new QuotaConfig.Line(1, 300, 2.0), new QuotaConfig.Line(2, 600, 3.0)))
                 .highSpeedThreshold(1000)
                 .build(new ArrayList<>()));
         long m0 = clock.now / 60000;
         engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);   // 基准
-        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);  // M0 桶 1.0
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);  // 1.0（M0 内，锚定 M0 整分）
         clock.advanceMillis(60_000);
-        engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);  // M1 桶 1.0
-        clock.advanceMillis(60_000);
-        engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0);  // M2 桶 1.0
-        var status = engine.quotaStatus(player);
-        // 1min 线 = M2 桶 1.0（<=1.0 未满）；2min 线 = M1+M2 = 2.0（<=2.0 未满）
-        assertFalse(status.allExceeded());
-        // 再踏入：M2 桶 2.0 -> 1min 2.0>1.0 满；2min 3.0>2.0 满 -> BAN
-        var r = engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);  // 2.0（跨入下一分钟，锚点不变）
+        // 3.0：tier1 满（3>2）、tier2 恰等于上限未满 -> 只因 tier1 BAN
+        var r = engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0);
         assertEquals(QuotaEngine.ResultType.BAN, r.type());
-        // 1min 线恢复 = 窗口内最早桶 M2 + 60s = (m0+2)*60000+60000 = m0*60000+180000
-        // 2min 线恢复 = 窗口内最早桶 M1 + 120s = (m0+1)*60000+120000 = m0*60000+180000
-        assertEquals(m0 * 60000L + 180_000L, r.banUntilMillis());
+        assertEquals(m0 * 60000L + 300_000L, r.banUntilMillis());
+        // 再踏入：tier2 也满 -> 恢复时间跳到两线周期终点的最晚者（M0 + 10min）
+        var r2 = engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0);
+        assertEquals(QuotaEngine.ResultType.BAN, r2.type());
+        assertEquals(m0 * 60000L + 600_000L, r2.banUntilMillis());
     }
 
     @Test
@@ -630,8 +649,8 @@ class QuotaEngineTest {
     }
 
     @Test
-    void worstAlertFallsBackAfterWindowSlides() {
-        // 90% -> 档位 90；时钟推进使消费桶滑出 60s 窗口 -> 无档回落 null（跟随当前状态）
+    void worstAlertFallsBackAfterCycleEnd() {
+        // 90% -> 档位 90；时钟推进跨过周期终点（首消锚点 + 60s）-> 整窗清零、无档回落 null（跟随当前状态）
         setAlertConfig();
         engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
         for (int i = 1; i <= 9; i++) {
@@ -642,7 +661,7 @@ class QuotaEngineTest {
         assertNull(engine.quotaStatus(player).worstAlert());
     }
 
-    // ---------- 坑 #30：按档位分桶 / 单档重置 / 全量清档 / 每 tick 判踢 / v1 迁移 ----------
+    // ---------- 坑 #30/#40：按档位独立 / 单档重置 / 全量清档 / 每 tick 判踢 / v1、v2 迁移 ----------
 
     @Test
     void resetSpendSingleTierKeepsOtherTiers() {
@@ -657,6 +676,26 @@ class QuotaEngineTest {
         var after = engine.quotaStatus(player);
         assertEquals(0.0, after.lines().get(0).spent(), 1e-9);
         assertEquals(2.0, after.lines().get(1).spent(), 1e-9);
+    }
+
+    @Test
+    void resetClearsAnchorAndReAnchors() {
+        // reset 等价整窗清零：锚点一并清除（下次重置时间消失），下次消费重新锚定完整周期（坑 #40）
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);  // 1.0
+        assertTrue(engine.quotaStatus(player).lines().get(0).nextResetMillis() > 0);
+
+        engine.resetSpend(player);
+        assertEquals(-1, engine.quotaStatus(player).lines().get(0).nextResetMillis());
+
+        // 跨两分钟后再次消费：新周期从新锚点起算完整窗口
+        clock.advanceMillis(120_000);
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);          // 重连语义：首 tick 基准
+        var r = engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0); // 踏入区块 2：计费
+        assertEquals(QuotaEngine.ResultType.NONE, r.type());
+        long mNew = clock.now / 60000;
+        assertEquals(mNew * 60000L + 60_000L,
+                engine.quotaStatus(player).lines().get(0).nextResetMillis());
     }
 
     @Test
@@ -723,6 +762,35 @@ class QuotaEngineTest {
     }
 
     @Test
+    void windowTimeShortenAffectsOngoingCycle() {
+        // 固定周期的周期终点恒按"起点 + 当前配置窗口长"现算（坑 #40）：
+        // 缩短进行中周期的窗口时长立即生效，等效提前整窗清零解封
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(
+                        new QuotaConfig.Line(1, 3600, 3.0),
+                        new QuotaConfig.Line(2, 7200, 100.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);          // 1.0
+        engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);          // 2.0
+        engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0);          // 3.0（恰等于上限，未满）
+        var r = engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0);  // 4.0 > tier1 上限 -> BAN
+        assertEquals(QuotaEngine.ResultType.BAN, r.type());
+        long m0 = clock.now / 60000;
+        assertEquals(m0 * 60000L + 3_600_000L, r.banUntilMillis());
+        // 窗口从 1h 缩到 60s：周期终点提前到 M0+60s
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(
+                        new QuotaConfig.Line(1, 60, 3.0),
+                        new QuotaConfig.Line(2, 7200, 100.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+        clock.advanceMillis(25_000); // 测试起点在 M0 的第 40 秒：此刻已越过 M0+60s
+        assertFalse(engine.isAllLinesExceeded(player));
+    }
+
+    @Test
     void v1PlayerFileMigratesKeepingExploredDroppingSpend() throws Exception {
         // 手工构造 v1 玩家数据：explored 区块 1 + 共享分钟桶 5.0
         Files.createDirectories(tmp.resolve("players"));
@@ -742,6 +810,30 @@ class QuotaEngineTest {
                 null, new ManagedBanStore(tmp.resolve("bans.json")), clock::get);
         assertEquals(0.0, engine2.quotaStatus(player).lines().get(0).spent(), 1e-9);
         // 踏入已探索区块 1 只收熟悉费 0.05
+        engine2.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);  // 基准（区块 0）
+        engine2.onPlayerTick(player, false, OVERWORLD, 16, 64, 0); // 区块 1 已探索 -> 0.05
+        assertEquals(0.05, engine2.quotaStatus(player).lines().get(0).spent(), 1e-9);
+    }
+
+    @Test
+    void v2PlayerFileMigratesKeepingExploredDroppingSpend() throws Exception {
+        // 手工构造 v2 玩家数据：explored 区块 1 + 滚动窗口分钟桶 5.0（坑 #40：无法映射为固定周期，丢弃）
+        Files.createDirectories(tmp.resolve("players"));
+        String v2 = "{"
+                + "\"version\":2,"
+                + "\"explored\":{\"minecraft:overworld\":{\"0\":[[1,1]]}},"
+                + "\"tierBuckets\":{\"1\":{\"" + (clock.now / 60000) + "\":5.0}}"
+                + "}";
+        Files.writeString(tmp.resolve("players/" + player + ".json"), v2, StandardCharsets.UTF_8);
+
+        // 新引擎懒加载：explored 保留（熟悉费）、消费桶丢弃（从 0 起）
+        QuotaEngine engine2 = new QuotaEngine(tmp,
+                QuotaConfig.builder()
+                        .lines(List.of(new QuotaConfig.Line(1, 60, 2.0), new QuotaConfig.Line(2, 120, 3.0)))
+                        .highSpeedThreshold(1000)
+                        .build(new ArrayList<>()),
+                null, new ManagedBanStore(tmp.resolve("bans.json")), clock::get);
+        assertEquals(0.0, engine2.quotaStatus(player).lines().get(0).spent(), 1e-9);
         engine2.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);  // 基准（区块 0）
         engine2.onPlayerTick(player, false, OVERWORLD, 16, 64, 0); // 区块 1 已探索 -> 0.05
         assertEquals(0.05, engine2.quotaStatus(player).lines().get(0).spent(), 1e-9);

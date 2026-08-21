@@ -15,28 +15,36 @@ import java.util.TreeMap;
  * <ul>
  *   <li>{@code exploredByDim}：按维度分区的个人已探索区块集合（终身保留），
  *       按行（chunkZ）压缩为 [startX,endX] 区间列表，增量合并（凹口被填平自动合拢）</li>
- *   <li>{@code tierBuckets}：按档位（tier 1~4）独立的分钟桶消费记录（tier -> epochMinute -> 点数，
- *       坑 #30）。各窗口独立记账：关闭/重置单窗口只动对应档位的桶，互不影响</li>
+ *   <li>{@code tiers}：按档位（tier 1~4）独立的固定周期消费状态（坑 #40）。
+ *       每档记录周期起点（首次消费时刻，对齐整分钟）与周期内累计消费；
+ *       到达"起点 + 窗口长"时整窗清零（等价 /chunkplan reset），不做逐桶滑出</li>
  * </ul>
- * 序列化格式（v2）：
+ * 序列化格式（v3）：
  * <pre>
- * { "version":2, "explored":{"minecraft:overworld":{"10":[[5,8],[12,15]],...},...},
- *   "tierBuckets":{"1":{"123456":3.5,...},...} }
+ * { "version":3, "explored":{"minecraft:overworld":{"10":[[5,8],[12,15]],...},...},
+ *   "tiers":{"1":{"cycleStartMillis":1720000000000,"spent":3.5},...} }
  * </pre>
- * v1 的共享 {@code minuteBuckets} 无法无损拆分到档位：升级时保留 explored、丢弃消费桶（从 0 起）。
+ * v1 的共享 {@code minuteBuckets} 与 v2 的 {@code tierBuckets}（滚动窗口分钟桶）无法映射为
+ * 固定周期：升级时保留 explored、丢弃消费记录（从 0 起，坑 #40）。
  */
 public final class PlayerQuotaData {
 
-    public static final int VERSION = 2;
+    public static final int VERSION = 3;
 
     /** 行内区间（含端点）；不变量：同 z 行内不重叠、不相邻（相邻即合并） */
     record Range(int startX, int endX) {
     }
 
+    /** 单档位固定周期状态：周期起点（epoch 毫秒，分钟对齐；-1 = 从未消费）+ 周期内累计消费 */
+    public static final class TierCycle {
+        long cycleStartMillis = -1;
+        double spent;
+    }
+
     /** 维度 -> z 行号 -> 按 startX 升序的区间列表 */
     private final Map<String, Map<Integer, List<Range>>> exploredByDim = new HashMap<>();
-    /** 档位(1~4) -> 分钟桶（epochMinute -> 累计点数）；外层 TreeMap 保证序列化按档位排序 */
-    private final TreeMap<Integer, TreeMap<Long, Double>> tierBuckets = new TreeMap<>();
+    /** 档位(1~4) -> 固定周期状态；外层 TreeMap 保证序列化按档位排序 */
+    private final TreeMap<Integer, TierCycle> tiers = new TreeMap<>();
     private boolean dirty;
 
     /** 该维度该区块是否已探索（行内二分，无该行/维度返回 false） */
@@ -94,63 +102,69 @@ public final class PlayerQuotaData {
         return true;
     }
 
-    /** 消费记入指定档位的分钟桶（每次踏入按所有启用档位各记一份，坑 #30） */
-    public void addSpend(int tier, long minute, double fee) {
-        tierBuckets.computeIfAbsent(tier, k -> new TreeMap<>()).merge(minute, fee, Double::sum);
+    /**
+     * 记录一笔消费到指定档位的固定周期（坑 #40）：周期未锚定（首次消费）时以当前时刻
+     * 所在整分钟为起点；已到期的周期由引擎先调 {@link #expireIfNeeded} 清零重锚。
+     */
+    public void recordSpend(int tier, long nowMillis, double fee) {
+        TierCycle cycle = tiers.computeIfAbsent(tier, k -> new TierCycle());
+        if (cycle.cycleStartMillis < 0) {
+            // 锚点向下对齐整分钟：恢复时间恒落在整分，与文案 HH:mm 显示精确一致
+            cycle.cycleStartMillis = nowMillis / 60000 * 60000;
+        }
+        cycle.spent += fee;
         dirty = true;
     }
 
-    /** 某档位窗口 (now-window, now] 内的消费点数之和（无该档位桶返回 0） */
-    public double spendInWindow(int tier, long nowMillis, long windowSeconds) {
-        TreeMap<Long, Double> buckets = tierBuckets.get(tier);
-        if (buckets == null) {
+    /**
+     * 惰性过期：now 到达"周期起点 + 窗口长"即整窗清零（等价 reset，坑 #40），返回是否清零。
+     * 读路径无需调用（{@link #effectiveSpent} 已按时间现算），仅记账前调用以重锚新周期。
+     */
+    public boolean expireIfNeeded(int tier, long nowMillis, long windowSeconds) {
+        TierCycle cycle = tiers.get(tier);
+        if (cycle == null || cycle.cycleStartMillis < 0) {
+            return false;
+        }
+        if (nowMillis < cycle.cycleStartMillis + windowSeconds * 1000L) {
+            return false;
+        }
+        cycle.cycleStartMillis = -1;
+        cycle.spent = 0;
+        dirty = true;
+        return true;
+    }
+
+    /** 某档位当前有效消费：周期未锚定或已到期返回 0（纯读，不清状态、不置脏） */
+    public double effectiveSpent(int tier, long nowMillis, long windowSeconds) {
+        TierCycle cycle = tiers.get(tier);
+        if (cycle == null || cycle.cycleStartMillis < 0) {
             return 0;
         }
-        long nowMin = nowMillis / 60000;
-        long firstKey = (nowMillis - windowSeconds * 1000) / 60000 + 1;
-        double sum = 0;
-        for (Entry<Long, Double> e : buckets.subMap(firstKey, true, nowMin, true).entrySet()) {
-            sum += e.getValue();
+        if (nowMillis >= cycle.cycleStartMillis + windowSeconds * 1000L) {
+            return 0;
         }
-        return sum;
+        return cycle.spent;
     }
 
-    /** 某档位大于等于 minKey 的第一个有消费的分钟桶，无则 null */
-    public Long firstBucketAtOrAfter(int tier, long minKey) {
-        TreeMap<Long, Double> buckets = tierBuckets.get(tier);
-        if (buckets == null) {
-            return null;
-        }
-        Entry<Long, Double> e = buckets.ceilingEntry(minKey);
-        return e == null ? null : e.getKey();
+    /** 某档位周期起点（epoch 毫秒，分钟对齐；无记录或从未消费返回 -1）。恢复/重置时间由引擎据此推导 */
+    public long cycleStartMillis(int tier) {
+        TierCycle cycle = tiers.get(tier);
+        return cycle == null ? -1 : cycle.cycleStartMillis;
     }
 
-    /** 清空某档位消费桶（关闭窗口/单档重置用，坑 #30），返回是否发生清理 */
+    /** 清空某档位固定周期（关闭窗口/单档重置用，坑 #30/#40），返回是否发生清理；下次消费重新锚定完整周期 */
     public boolean clearTierSpend(int tier) {
-        TreeMap<Long, Double> buckets = tierBuckets.get(tier);
-        if (buckets == null || buckets.isEmpty()) {
+        if (tiers.remove(tier) == null) {
             return false;
         }
-        tierBuckets.remove(tier);
         dirty = true;
         return true;
     }
 
-    /** 删除某档位早于 cutoffMinute 的桶（清理过期数据），返回是否发生清理 */
-    public boolean cleanupBucketsBefore(int tier, long cutoffMinute) {
-        TreeMap<Long, Double> buckets = tierBuckets.get(tier);
-        if (buckets == null || buckets.isEmpty() || buckets.firstKey() >= cutoffMinute) {
-            return false;
-        }
-        buckets.headMap(cutoffMinute).clear();
-        dirty = true;
-        return true;
-    }
-
-    /** 清空全部档位消费桶（/chunkplan reset 全档位） */
+    /** 清空全部档位固定周期（/chunkplan reset 全档位） */
     public void clearSpend() {
-        if (!tierBuckets.isEmpty()) {
-            tierBuckets.clear();
+        if (!tiers.isEmpty()) {
+            tiers.clear();
             dirty = true;
         }
     }
@@ -168,10 +182,8 @@ public final class PlayerQuotaData {
     static final class Dto {
         int version = VERSION;
         Map<String, Map<String, int[][]>> explored;
-        /** v2：档位 -> 分钟桶 */
-        Map<Integer, Map<Long, Double>> tierBuckets;
-        /** v1 遗留共享桶：升级时有意不读取（无法无损拆分到档位，丢弃消费） */
-        Map<Long, Double> minuteBuckets;
+        /** v3：档位 -> 固定周期状态 */
+        Map<Integer, TierCycle> tiers;
     }
 
     public Dto toDto() {
@@ -184,8 +196,14 @@ public final class PlayerQuotaData {
                     ranges.stream().map(r -> new int[]{r.startX(), r.endX()}).toArray(int[][]::new)));
             d.explored.put(dim, out);
         });
-        d.tierBuckets = new TreeMap<>();
-        tierBuckets.forEach((tier, buckets) -> d.tierBuckets.put(tier, new LinkedHashMap<>(buckets)));
+        d.tiers = new TreeMap<>();
+        // 防御性拷贝：避免序列化期间状态被服务器线程并发修改
+        tiers.forEach((tier, c) -> {
+            TierCycle copy = new TierCycle();
+            copy.cycleStartMillis = c.cycleStartMillis;
+            copy.spent = c.spent;
+            d.tiers.put(tier, copy);
+        });
         return d;
     }
 
@@ -221,21 +239,21 @@ public final class PlayerQuotaData {
                 }
             }
         }
-        if (dto.tierBuckets != null) {
-            for (Entry<Integer, Map<Long, Double>> tierEntry : dto.tierBuckets.entrySet()) {
-                Integer tier = tierEntry.getKey();
-                Map<Long, Double> buckets = tierEntry.getValue();
-                if (tier == null || tier < 1 || tier > 4 || buckets == null) {
-                    continue; // 非法档位/空桶跳过
+        if (dto.tiers != null) {
+            for (Entry<Integer, TierCycle> e : dto.tiers.entrySet()) {
+                Integer tier = e.getKey();
+                TierCycle cycle = e.getValue();
+                // 非法档位/空条目/未锚定周期跳过（未锚定即无有效消费）
+                if (tier == null || tier < 1 || tier > 4 || cycle == null || cycle.cycleStartMillis < 0) {
+                    continue;
                 }
-                for (Entry<Long, Double> e : buckets.entrySet()) {
-                    if (e.getKey() != null && e.getValue() != null) {
-                        p.tierBuckets.computeIfAbsent(tier, k -> new TreeMap<>()).put(e.getKey(), e.getValue());
-                    }
-                }
+                TierCycle copy = new TierCycle();
+                copy.cycleStartMillis = cycle.cycleStartMillis;
+                copy.spent = Math.max(0, cycle.spent);
+                p.tiers.put(tier, copy);
             }
         }
-        // v1 legacy minuteBuckets 有意不读取：见类注释（迁移语义：explored 保留、消费丢弃）
+        // v1 minuteBuckets / v2 tierBuckets 有意不读取：见类注释（迁移语义：explored 保留、消费丢弃）
         return p;
     }
 }
