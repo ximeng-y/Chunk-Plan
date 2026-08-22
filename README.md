@@ -259,7 +259,7 @@ Billing window mechanism:
 
 - When the quota limit refreshes, the player's ban will be **automatically lifted** by the server.
 
-![英文踢出公告](https://raw.githubusercontent.com/ximeng-y/Chunk-Plan/main/photos/英文踢出.png)
+![英文踢出公告](https://raw.githubusercontent.com/ximeng-y/Chunk-Plan/main/photos/english-kick-notice.png)
 
 
 
