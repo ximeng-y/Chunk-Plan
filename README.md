@@ -107,6 +107,10 @@
 - 当玩家在客户端安装此mod时，按K键（默认）即可开启GUI界面，查看自己的用量情况，等效于`/chunkplan check`命令
 - 当管理员打开GUI界面时，还可以使用可视化的管理界面，等效于`/chunkplan config`系列命令
 
+![中文 GUI 用量页](https://raw.githubusercontent.com/ximeng-y/Chunk-Plan/main/photos/Chinese_GUI_1.png)
+
+![中文 GUI 管理页](https://raw.githubusercontent.com/ximeng-y/Chunk-Plan/main/photos/Chinese_GUI_2.png)
+
 
 
 ## 授权与支持
@@ -271,6 +275,10 @@ Billing window mechanism:
 
 - When this mod is installed on the client, players can press K (default) to open the GUI and view their quota usage, equivalent to the `/chunkplan check` command;
 - When an admin opens the GUI, they also get access to a visual admin interface, equivalent to the `/chunkplan config` command set.
+
+![English GUI usage page](https://raw.githubusercontent.com/ximeng-y/Chunk-Plan/main/photos/English_GUI_1.png)
+
+![English GUI admin page](https://raw.githubusercontent.com/ximeng-y/Chunk-Plan/main/photos/English_GUI_2.png)
 
 
 
