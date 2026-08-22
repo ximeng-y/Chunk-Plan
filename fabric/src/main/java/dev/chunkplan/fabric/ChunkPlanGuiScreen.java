@@ -1,6 +1,8 @@
 package dev.chunkplan.fabric;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 import dev.chunkplan.common.GuiStatus;
 import dev.chunkplan.common.NumericParser;
@@ -12,6 +14,7 @@ import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
+import net.minecraft.util.FormattedCharSequence;
 
 /**
  * ChunkPlan 客户端 GUI（Fabric 1.21.1，纯原版 Screen 手绘，零 mixin、零第三方 GUI 库）。
@@ -35,6 +38,10 @@ public final class ChunkPlanGuiScreen extends Screen {
     private static final int COL_RED = 0xFFFF5555;
     private static final int COL_ACCENT = 0xFF55FFFF;
     private static final int COL_PANEL = 0xE0303030;
+    /** 补全建议框每行高度 */
+    private static final int SUGGEST_ROW_H = 12;
+    /** 补全建议最多行数（显示在输入框下方，防小窗口溢出） */
+    private static final int SUGGEST_MAX = 6;
 
     private GuiStatus status;
     private boolean waiting;
@@ -46,6 +53,8 @@ public final class ChunkPlanGuiScreen extends Screen {
     private Component confirmText;
     private int yesX, yesY, yesW, yesH;
     private int noX, noY, noW, noH;
+    /** 需确认的批量命令（「设置」点击后暂存，确认弹窗点「确认」后先派发再补 /chunkplan confirm） */
+    private List<String> pendingBatch;
 
     // 管理页控件
     private final Button[] tierToggle = new Button[4];
@@ -59,7 +68,20 @@ public final class ChunkPlanGuiScreen extends Screen {
     private EditBox resetTarget;
     private int resetTier; // 0 = all，1..4
 
-    // 用户输入保留（跨状态刷新重建不丢字）；命令派发后清空以便回显服务端确认值
+    // 档位行「设置」待应用状态（本地先改、点「设置」才派发命令；重建后按服务端值比对回落）
+    private final boolean[] pendingEnabledSet = new boolean[4];
+    private final boolean[] pendingEnabled = new boolean[4];
+    private final String[] pendingWindow = new String[4];
+    /** 管理页有未保存的档位更改（红字提示）；保存后置为「已保存」灰字 */
+    private boolean dirtyTier;
+    private boolean savedShown;
+
+    // 重置目标自动补全（仅在线玩家名；每次打开界面不显示，输入后才出现）
+    private List<String> resetSuggestions = List.of();
+    private int resetSelected = -1;
+    private int resetTargetX, resetTargetY, resetTargetW, resetTargetH;
+
+    // 用户输入保留（跨状态刷新重建不丢字）；命令生效后回显服务端确认值
     private final String[] savedLimit = new String[4];
     private String savedMult;
     private String savedNewFee;
@@ -125,36 +147,54 @@ public final class ChunkPlanGuiScreen extends Screen {
 
         for (int i = 0; i < 4; i++) {
             int tier = i + 1;
-            boolean enabled = tierEnabled(tier);
             QuotaTiers.Tier rt = rawTier(tier);
             String curWindow = rt == null ? "" : rt.window();
             double curLimit = rt == null ? 0 : rt.limit();
+            final int idx = i;
+
+            // 重建时按服务端值比对回落：已生效的「待应用」状态在此消费，界面回到服务端真相
+            if (pendingEnabledSet[idx] && pendingEnabled[idx] == tierEnabled(tier)) {
+                pendingEnabledSet[idx] = false;
+            }
+            if (pendingWindow[idx] != null && pendingWindow[idx].equals(curWindow)) {
+                pendingWindow[idx] = null;
+            }
+            if (savedLimit[idx] != null) {
+                NumericParser.Parsed p = NumericParser.parseLimit(savedLimit[idx]);
+                if (p.isOk() && Double.compare(p.value(), curLimit) == 0) {
+                    savedLimit[idx] = null; // 服务端已确认该值，回显格式化结果
+                }
+            }
+
+            boolean effOn = effEnabled(tier);
             int ry = 36 + i * rowH;
 
             int tx = left + 96;
             tierToggle[i] = addButton(tx, ry, 52, 20,
-                    enabled ? Component.translatable("gui.chunkplan.enabled")
+                    effOn ? Component.translatable("gui.chunkplan.enabled")
                             : Component.translatable("gui.chunkplan.disabled"),
-                    b -> toggleTier(tier, !enabled));
+                    b -> toggleTier(tier));
 
             int wx = tx + 58;
+            String win = pendingWindow[idx] != null ? pendingWindow[idx] : curWindow;
             tierWindow[i] = addButton(wx, ry, 74, 20,
-                    Component.literal(curWindow.isEmpty() ? "—" : curWindow),
+                    Component.literal(win.isEmpty() ? "—" : win),
                     b -> cycleWindow(tier));
-            tierWindow[i].active = enabled;
+            tierWindow[i].active = effOn;
 
             int lx = wx + 80;
-            final int idx = i;
             tierLimit[idx] = new EditBox(font, lx, ry, 56, 20, Component.empty());
             tierLimit[idx].setValue(savedLimit[idx] != null ? savedLimit[idx] : fmtLimit(curLimit));
-            tierLimit[idx].setResponder(v -> savedLimit[idx] = v);
+            tierLimit[idx].setResponder(v -> {
+                savedLimit[idx] = v.trim().isEmpty() ? null : v; // 清空视为无更改，重建回显服务端值
+                markTierDirty();
+            });
             addRenderableWidget(tierLimit[idx]);
-            tierLimit[idx].active = enabled;
+            tierLimit[idx].active = effOn;
 
             int sx = lx + 62;
             tierLimitSet[i] = addButton(sx, ry, 42, 20,
-                    Component.translatable("gui.chunkplan.set"), b -> setLimit(tier));
-            tierLimitSet[i].active = enabled;
+                    Component.translatable("gui.chunkplan.set"), b -> applyTier(tier));
         }
 
         int gy = 36 + 4 * rowH + 6;
@@ -191,13 +231,15 @@ public final class ChunkPlanGuiScreen extends Screen {
                         .append(ebd ? Component.translatable("gui.chunkplan.on")
                                 : Component.translatable("gui.chunkplan.off")),
                 b -> setExemptDefault(!ebd));
-        addButton(left + 206, gy, 56, 20, Component.translatable("gui.chunkplan.reload"),
-                b -> sendCommand("chunkplan reload"));
         gy += 28;
         resetTarget = new EditBox(font, left + 96, gy, 74, 20, Component.empty());
-        resetTarget.setValue(savedResetTarget != null ? savedResetTarget : "@a");
+        resetTarget.setValue(savedResetTarget != null ? savedResetTarget : "");
         resetTarget.setResponder(v -> savedResetTarget = v);
         addRenderableWidget(resetTarget);
+        resetTargetX = resetTarget.getX();
+        resetTargetY = resetTarget.getY();
+        resetTargetW = resetTarget.getWidth();
+        resetTargetH = resetTarget.getHeight();
         resetTierCycle = addButton(left + 176, gy, 52, 20,
                 Component.literal(resetTierName()), b -> cycleResetTier());
         addButton(left + 234, gy, 56, 20, Component.translatable("gui.chunkplan.reset"),
@@ -220,6 +262,12 @@ public final class ChunkPlanGuiScreen extends Screen {
         return t != null && t.enabled();
     }
 
+    /** 当前展示值：优先「待应用」，否则服务端值 */
+    private boolean effEnabled(int tier) {
+        int i = tier - 1;
+        return pendingEnabledSet[i] ? pendingEnabled[i] : tierEnabled(tier);
+    }
+
     private static String fmtLimit(double v) {
         if (v == Math.floor(v) && !Double.isInfinite(v)) {
             return String.valueOf((long) v);
@@ -231,43 +279,95 @@ public final class ChunkPlanGuiScreen extends Screen {
         return String.valueOf(v);
     }
 
-    private void toggleTier(int tier, boolean enable) {
-        if (!enable) {
-            sendCommand("chunkplan config window tier" + tier + " off");
-            showConfirm(Component.translatable("gui.chunkplan.confirm.disable_tier", tier));
+    private void markTierDirty() {
+        this.dirtyTier = true;
+    }
+
+    /** 保存后：清未保存标记并显示灰字「设置已保存」 */
+    private void markSaved() {
+        this.dirtyTier = false;
+        this.savedShown = true;
+    }
+
+    /** 档位行「设置」：收集待应用更改，统一派发；关窗口/调低额度需确认 */
+    private void applyTier(int tier) {
+        int i = tier - 1;
+        boolean curOn = tierEnabled(tier);
+        boolean effOn = effEnabled(tier);
+        boolean enableChanged = pendingEnabledSet[i] && pendingEnabled[i] != curOn;
+        QuotaTiers.Tier t = rawTier(tier);
+        String curWindow = t == null ? "" : t.window();
+        double curLimit = t == null ? 0 : t.limit();
+        List<String> cmds = new ArrayList<>();
+        boolean needConfirm = false;
+        Component confirmMsg = Component.empty();
+
+        if (!effOn) {
+            if (enableChanged) {
+                cmds.add("chunkplan config window tier" + tier + " off");
+                needConfirm = true;
+                confirmMsg = Component.translatable("gui.chunkplan.confirm.disable_tier", tier);
+            }
         } else {
-            sendCommand("chunkplan config window tier" + tier + " on");
+            // 开启/保持开启：先启用（服务端要求窗口开启后才能改时长/上限），再改其余项
+            if (enableChanged) {
+                cmds.add("chunkplan config window tier" + tier + " on");
+            }
+            String pw = pendingWindow[i];
+            if (pw != null && !pw.equals(curWindow)) {
+                cmds.add("chunkplan config windowTime tier" + tier + " " + pw);
+            }
+            String raw = tierLimit[tier - 1].getValue().trim();
+            if (!raw.isEmpty()) {
+                NumericParser.Parsed p = NumericParser.parseLimit(raw);
+                if (p.isOk() && Double.compare(p.value(), curLimit) != 0) {
+                    cmds.add("chunkplan config windowLimit tier" + tier + " " + raw);
+                    if (p.value() < curLimit) {
+                        needConfirm = true;
+                        confirmMsg = Component.translatable("gui.chunkplan.confirm.lower_tier", tier);
+                    }
+                }
+            }
         }
+
+        if (cmds.isEmpty()) {
+            this.dirtyTier = false; // 无实际更改：清未保存标记但不显示「已保存」
+            return;
+        }
+        if (needConfirm) {
+            this.pendingBatch = cmds;
+            showConfirm(confirmMsg);
+        } else {
+            cmds.forEach(this::sendCommand);
+            markSaved();
+        }
+    }
+
+    private void toggleTier(int tier) {
+        int i = tier - 1;
+        boolean next = !effEnabled(tier);
+        pendingEnabledSet[i] = true;
+        pendingEnabled[i] = next;
+        tierToggle[i].setMessage(next ? Component.translatable("gui.chunkplan.enabled")
+                : Component.translatable("gui.chunkplan.disabled"));
+        tierWindow[i].active = next;
+        tierLimit[i].active = next;
+        markTierDirty();
     }
 
     private void cycleWindow(int tier) {
+        int i = tier - 1;
         QuotaTiers.Tier t = rawTier(tier);
-        if (t == null) {
-            return;
-        }
         List<String> presets = presets(tier);
-        int idx = presets.indexOf(t.window());
-        String next = presets.get((idx + 1) % presets.size());
-        sendCommand("chunkplan config windowTime tier" + tier + " " + next);
-    }
-
-    private void setLimit(int tier) {
-        String raw = tierLimit[tier - 1].getValue().trim();
-        if (raw.isEmpty()) {
+        String cur = pendingWindow[i] != null ? pendingWindow[i] : (t == null ? null : t.window());
+        if (presets.isEmpty() || cur == null) {
             return;
         }
-        NumericParser.Parsed p = NumericParser.parseLimit(raw);
-        if (!p.isOk()) {
-            return; // 非法数值：不发送，交由玩家修正
-        }
-        QuotaTiers.Tier t = rawTier(tier);
-        if (t != null && p.value() < t.limit()) {
-            sendCommand("chunkplan config windowLimit tier" + tier + " " + raw);
-            showConfirm(Component.translatable("gui.chunkplan.confirm.lower_tier", tier));
-        } else {
-            sendCommand("chunkplan config windowLimit tier" + tier + " " + raw);
-        }
-        savedLimit[tier - 1] = null; // 派发后回读服务端确认值，不再保留输入
+        int idx = presets.indexOf(cur);
+        String next = presets.get((idx < 0 ? 0 : (idx + 1) % presets.size()));
+        pendingWindow[i] = next;
+        tierWindow[i].setMessage(Component.literal(next));
+        markTierDirty();
     }
 
     private void setMultiplier() {
@@ -341,6 +441,71 @@ public final class ChunkPlanGuiScreen extends Screen {
         };
     }
 
+    // ---------- 重置目标自动补全（仅在线玩家名） ----------
+
+    private void refreshResetSuggestions() {
+        if (page != 1 || resetTarget == null || !resetTarget.isFocused()) {
+            resetSuggestions = List.of();
+            return;
+        }
+        String val = resetTarget.getValue().trim();
+        if (val.isEmpty()) {
+            resetSuggestions = List.of();
+            return;
+        }
+        String lower = val.toLowerCase(Locale.ROOT);
+        resetSuggestions = onlinePlayerNames().stream()
+                .filter(n -> n.toLowerCase(Locale.ROOT).startsWith(lower) && !n.equals(val))
+                .sorted(String.CASE_INSENSITIVE_ORDER)
+                .limit(SUGGEST_MAX)
+                .toList();
+        if (resetSelected >= resetSuggestions.size()) {
+            resetSelected = resetSuggestions.isEmpty() ? -1 : resetSuggestions.size() - 1;
+        }
+    }
+
+    private List<String> onlinePlayerNames() {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null || mc.player.connection == null) {
+            return List.of();
+        }
+        return mc.player.connection.getOnlinePlayers().stream()
+                .map(p -> p.getProfile().getName())
+                .filter(n -> n != null)
+                .toList();
+    }
+
+    private void acceptResetSuggestion(int idx) {
+        if (idx < 0 || idx >= resetSuggestions.size()) {
+            return;
+        }
+        String name = resetSuggestions.get(idx);
+        resetTarget.setValue(name);
+        resetTarget.moveCursorToEnd(true);
+        resetSuggestions = List.of();
+        resetSelected = -1;
+    }
+
+    private void renderResetSuggestions(GuiGraphics g, int mouseX, int mouseY) {
+        if (page != 1 || resetSuggestions.isEmpty()) {
+            return;
+        }
+        int sx = resetTargetX;
+        int sy = resetTargetY + resetTargetH + 2;
+        int sW = Math.max(resetTargetW + 30, 120);
+        int sH = resetSuggestions.size() * SUGGEST_ROW_H;
+        g.fill(sx, sy, sx + sW, sy + sH, 0xF0101010);
+        g.fill(sx, sy, sx + sW, sy + 1, 0xFFFFFFFF);
+        for (int i = 0; i < resetSuggestions.size(); i++) {
+            int rowY = sy + i * SUGGEST_ROW_H;
+            boolean hover = mouseX >= sx && mouseX < sx + sW && mouseY >= rowY && mouseY < rowY + SUGGEST_ROW_H;
+            if (hover || i == resetSelected) {
+                g.fill(sx + 1, rowY, sx + sW - 1, rowY + SUGGEST_ROW_H, 0xA0606060);
+            }
+            g.drawString(font, Component.literal(resetSuggestions.get(i)), sx + 6, rowY + 2, COL_TEXT);
+        }
+    }
+
     // ---------- 状态接收 ----------
 
     public void onStatus(GuiStatus s) {
@@ -362,6 +527,7 @@ public final class ChunkPlanGuiScreen extends Screen {
     }
 
     private void showConfirm(Component message) {
+        this.pendingBatch = null; // 槽位只服务当前确认动作，防旧批残留被误派发
         this.pendingConfirm = true;
         this.confirmText = Component.empty().append(message)
                 .append(Component.translatable("gui.chunkplan.confirm.hint"));
@@ -379,6 +545,10 @@ public final class ChunkPlanGuiScreen extends Screen {
             renderAdmin(g);
         }
         super.render(g, mouseX, mouseY, partialTick);
+        if (page == 1) {
+            refreshResetSuggestions();
+            renderResetSuggestions(g, mouseX, mouseY);
+        }
         if (pendingConfirm) {
             renderConfirm(g);
         }
@@ -467,24 +637,39 @@ public final class ChunkPlanGuiScreen extends Screen {
             int ry = 36 + i * 26;
             g.drawString(font, Component.literal("tier" + (i + 1)), x, ry + 6, COL_TEXT);
         }
+        // 档位区下方提示：调整后有未保存更改（红）/ 保存成功（灰），仅本次打开期间显示
+        int hintY = 36 + 4 * 26 - 4;
+        if (dirtyTier) {
+            g.drawString(font, Component.translatable("gui.chunkplan.unsaved"), x, hintY, COL_RED);
+        } else if (savedShown) {
+            g.drawString(font, Component.translatable("gui.chunkplan.saved"), x, hintY, COL_GRAY);
+        }
         int gy = 36 + 4 * 26 + 6;
         g.drawString(font, Component.translatable("gui.chunkplan.all_windows"), x, gy + 6, COL_TEXT);
         g.drawString(font, Component.translatable("gui.chunkplan.fee_new"), x, gy + 34, COL_TEXT);
         g.drawString(font, Component.translatable("gui.chunkplan.fee_explored"), x, gy + 62, COL_TEXT);
         g.drawString(font, Component.translatable("gui.chunkplan.speed_mult"), x, gy + 90, COL_TEXT);
         g.drawString(font, Component.translatable("gui.chunkplan.reset_quota"), x, gy + 146, COL_TEXT);
+        g.drawString(font, Component.translatable("gui.chunkplan.reset_hint"), x + 96, gy + 168, COL_GRAY);
     }
 
     private void renderConfirm(GuiGraphics g) {
         g.fill(0, 0, width, height, 0x80000000);
         int w = Math.min(width - 20, 320);
-        int h = 88;
+        Component text = confirmText == null ? Component.empty() : confirmText;
+        // 自动换行：按可用宽度拆行，弹窗高度随行数增长（用户反馈过单行溢出换行错误）
+        List<FormattedCharSequence> lines = font.split(text, w - 16);
+        int h = Math.max(88, 58 + Math.max(1, lines.size()) * font.lineHeight);
         int bx = (width - w) / 2;
         int by = (height - h) / 2;
         g.fill(bx, by, bx + w, by + h, COL_PANEL);
         g.fill(bx, by, bx + w, by + 1, 0xFFFFFFFF);
         g.drawString(font, Component.translatable("gui.chunkplan.confirm.title"), bx + 8, by + 8, COL_ACCENT);
-        g.drawString(font, confirmText == null ? Component.empty() : confirmText, bx + 8, by + 28, COL_TEXT);
+        int ty = by + 28;
+        for (FormattedCharSequence line : lines) {
+            g.drawString(font, line, bx + 8, ty, COL_TEXT);
+            ty += font.lineHeight;
+        }
         int btnY = by + h - 24;
         noX = bx + w - 118;
         noY = btnY;
@@ -516,15 +701,39 @@ public final class ChunkPlanGuiScreen extends Screen {
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
         if (pendingConfirm) {
             if (inRect(mouseX, mouseY, yesX, yesY, yesW, yesH)) {
-                sendCommand("chunkplan confirm");
+                if (pendingBatch != null) {
+                    // 批量命令需确认：先派发（服务端据此注册待确认动作），再补 /chunkplan confirm 执行
+                    pendingBatch.forEach(this::sendCommand);
+                    sendCommand("chunkplan confirm");
+                    pendingBatch = null;
+                    markSaved();
+                } else {
+                    sendCommand("chunkplan confirm");
+                }
                 pendingConfirm = false;
                 return true;
             }
             if (inRect(mouseX, mouseY, noX, noY, noW, noH)) {
                 pendingConfirm = false;
+                pendingBatch = null;
                 return true;
             }
             return true; // 弹窗期间拦截底层点击
+        }
+        if (!resetSuggestions.isEmpty()) {
+            for (int i = 0; i < resetSuggestions.size(); i++) {
+                if (inRect(mouseX, mouseY, resetTargetX, resetTargetY + resetTargetH + 2 + i * SUGGEST_ROW_H,
+                        Math.max(resetTargetW + 30, 120), SUGGEST_ROW_H)) {
+                    acceptResetSuggestion(i);
+                    return true;
+                }
+            }
+            // 点击建议列表之外的区域：失焦隐藏建议（点击输入框内不处理，交还 super 聚焦）
+            if (!inRect(mouseX, mouseY, resetTargetX, resetTargetY, resetTargetW, resetTargetH)) {
+                resetTarget.setFocused(false);
+                resetSuggestions = List.of();
+                resetSelected = -1;
+            }
         }
         return super.mouseClicked(mouseX, mouseY, button);
     }
@@ -534,6 +743,30 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (pendingConfirm && keyCode == 256) { // ESC 取消确认而非关闭界面
             pendingConfirm = false;
             return true;
+        }
+        if (!resetSuggestions.isEmpty()) {
+            switch (keyCode) {
+                case org.lwjgl.glfw.GLFW.GLFW_KEY_UP -> {
+                    resetSelected = (resetSelected <= 0 ? resetSuggestions.size() : resetSelected) - 1;
+                    return true;
+                }
+                case org.lwjgl.glfw.GLFW.GLFW_KEY_DOWN -> {
+                    resetSelected = (resetSelected + 1) % resetSuggestions.size();
+                    return true;
+                }
+                case org.lwjgl.glfw.GLFW.GLFW_KEY_ENTER, org.lwjgl.glfw.GLFW.GLFW_KEY_TAB -> {
+                    acceptResetSuggestion(Math.max(resetSelected, 0));
+                    return true;
+                }
+                case org.lwjgl.glfw.GLFW.GLFW_KEY_ESCAPE -> {
+                    resetSuggestions = List.of();
+                    resetSelected = -1;
+                    return true;
+                }
+                default -> {
+                    // 其他按键透传（继续输入时实时刷新建议）
+                }
+            }
         }
         return super.keyPressed(keyCode, scanCode, modifiers);
     }

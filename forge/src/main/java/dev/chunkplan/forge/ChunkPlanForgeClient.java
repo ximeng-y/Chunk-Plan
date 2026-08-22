@@ -42,7 +42,8 @@ public final class ChunkPlanForgeClient {
             if (event.phase != TickEvent.Phase.END) {
                 return;
             }
-            if (OPEN_GUI.consumeClick()) {
+            // 未连接服务器（主菜单/世界选择页）不打开界面：sendRequest 会因空连接崩溃
+            if (OPEN_GUI.consumeClick() && Minecraft.getInstance().getConnection() != null) {
                 Minecraft.getInstance().setScreen(new ChunkPlanGuiScreen());
             }
         }
@@ -56,13 +57,20 @@ public final class ChunkPlanForgeClient {
         }
     }
 
-    /** 向服务端请求状态（打开界面时调用） */
+    /** 向服务端请求状态（打开界面时调用；界面打开期间断线再点刷新也会走此路径，
+     *  未连接直接放弃——sendToServer 对空连接 NPE） */
     public static void sendRequest() {
+        if (Minecraft.getInstance().getConnection() == null) {
+            return;
+        }
         ChunkPlanNetwork.CHANNEL.sendToServer(new ChunkPlanNetwork.GuiRequestPayload(GuiStatus.PROTOCOL_VERSION));
     }
 
-    /** 向服务端发送 GUI 操作命令串 */
+    /** 向服务端发送 GUI 操作命令串（未连接直接放弃，防 NPE） */
     public static void sendCommand(String command) {
+        if (Minecraft.getInstance().getConnection() == null) {
+            return;
+        }
         ChunkPlanNetwork.CHANNEL.sendToServer(new ChunkPlanNetwork.GuiCommandPayload(command));
     }
 }

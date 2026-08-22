@@ -29,7 +29,8 @@ public final class ChunkPlanFabricClient implements ClientModInitializer {
                 (payload, context) -> onStatus(payload.status()));
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            if (openGui.consumeClick()) {
+            // 未连接服务器（主菜单/世界选择页）不打开界面：sendRequest 会抛 IllegalStateException
+            if (openGui.consumeClick() && Minecraft.getInstance().getConnection() != null) {
                 Minecraft.getInstance().setScreen(new ChunkPlanGuiScreen());
             }
         });
@@ -43,13 +44,20 @@ public final class ChunkPlanFabricClient implements ClientModInitializer {
         }
     }
 
-    /** 向服务端请求状态（打开界面时调用） */
+    /** 向服务端请求状态（打开界面时调用；界面打开期间断线再点刷新也会走此路径，
+     *  未连接直接放弃——ClientPlayNetworking.send 对空连接抛 IllegalStateException） */
     public static void sendRequest() {
+        if (Minecraft.getInstance().getConnection() == null) {
+            return;
+        }
         ClientPlayNetworking.send(new ChunkPlanNetwork.GuiRequestPayload(GuiStatus.PROTOCOL_VERSION));
     }
 
-    /** 向服务端发送 GUI 操作命令串 */
+    /** 向服务端发送 GUI 操作命令串（未连接直接放弃，防 IllegalStateException） */
     public static void sendCommand(String command) {
+        if (Minecraft.getInstance().getConnection() == null) {
+            return;
+        }
         ClientPlayNetworking.send(new ChunkPlanNetwork.GuiCommandPayload(command));
     }
 }
