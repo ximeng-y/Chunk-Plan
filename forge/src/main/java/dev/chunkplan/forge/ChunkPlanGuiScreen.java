@@ -496,11 +496,15 @@ public final class ChunkPlanGuiScreen extends Screen {
             return;
         }
         int sx = resetTargetX;
-        int sy = resetTargetY + resetTargetH + 2;
         int sW = Math.max(resetTargetW + 30, 120);
         int sH = resetSuggestions.size() * SUGGEST_ROW_H;
+        // 在输入框上方弹出：下方是「支持使用@a目标选择器」提示行，避免两者重叠
+        int sy = resetTargetY - sH - 2;
         g.fill(sx, sy, sx + sW, sy + sH, 0xFF000000);
         g.fill(sx, sy, sx + sW, sy + 1, 0xFFFFFFFF);
+        g.fill(sx, sy + sH - 1, sx + sW, sy + sH, 0xFFFFFFFF);
+        g.fill(sx, sy, sx + 1, sy + sH, 0xFFFFFFFF);
+        g.fill(sx + sW - 1, sy, sx + sW, sy + sH, 0xFFFFFFFF);
         for (int i = 0; i < resetSuggestions.size(); i++) {
             int rowY = sy + i * SUGGEST_ROW_H;
             boolean hover = mouseX >= sx && mouseX < sx + sW && mouseY >= rowY && mouseY < rowY + SUGGEST_ROW_H;
@@ -729,8 +733,10 @@ public final class ChunkPlanGuiScreen extends Screen {
             return true; // 弹窗期间拦截底层点击
         }
         if (!resetSuggestions.isEmpty()) {
+            int sH = resetSuggestions.size() * SUGGEST_ROW_H;
+            int paneY = resetTargetY - sH - 2;
             for (int i = 0; i < resetSuggestions.size(); i++) {
-                if (inRect(mouseX, mouseY, resetTargetX, resetTargetY + resetTargetH + 2 + i * SUGGEST_ROW_H,
+                if (inRect(mouseX, mouseY, resetTargetX, paneY + i * SUGGEST_ROW_H,
                         Math.max(resetTargetW + 30, 120), SUGGEST_ROW_H)) {
                     acceptResetSuggestion(i);
                     return true;
