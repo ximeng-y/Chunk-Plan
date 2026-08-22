@@ -55,6 +55,8 @@ public final class ChunkPlanGuiScreen extends Screen {
     private int noX, noY, noW, noH;
     /** 需确认的批量命令（「设置」点击后暂存，确认弹窗点「确认」后先派发再补 /chunkplan confirm） */
     private List<String> pendingBatch;
+    /** 批量命令对应档位（0 = 无档位，如重置/全部关闭）；已保存提示按档位显示 */
+    private int pendingBatchTier;
 
     // 管理页控件
     private final Button[] tierToggle = new Button[4];
@@ -72,9 +74,9 @@ public final class ChunkPlanGuiScreen extends Screen {
     private final boolean[] pendingEnabledSet = new boolean[4];
     private final boolean[] pendingEnabled = new boolean[4];
     private final String[] pendingWindow = new String[4];
-    /** 管理页有未保存的档位更改（红字提示）；保存后置为「已保存」灰字 */
-    private boolean dirtyTier;
-    private boolean savedShown;
+    /** 每档各自未保存（红字）/ 已保存（灰字）提示，仅本次打开期间显示 */
+    private final boolean[] tierDirty = new boolean[4];
+    private final boolean[] tierSavedShown = new boolean[4];
 
     // 重置目标自动补全（仅在线玩家名；每次打开界面不显示，输入后才出现）
     private List<String> resetSuggestions = List.of();
@@ -143,7 +145,7 @@ public final class ChunkPlanGuiScreen extends Screen {
             return;
         }
         int left = 12;
-        int rowH = 26;
+        int rowH = 32;
 
         for (int i = 0; i < 4; i++) {
             int tier = i + 1;
@@ -187,7 +189,7 @@ public final class ChunkPlanGuiScreen extends Screen {
             tierLimit[idx].setValue(savedLimit[idx] != null ? savedLimit[idx] : fmtLimit(curLimit));
             tierLimit[idx].setResponder(v -> {
                 savedLimit[idx] = v.trim().isEmpty() ? null : v; // 清空视为无更改，重建回显服务端值
-                markTierDirty();
+                markTierDirty(tier);
             });
             addRenderableWidget(tierLimit[idx]);
             tierLimit[idx].active = effOn;
@@ -279,14 +281,15 @@ public final class ChunkPlanGuiScreen extends Screen {
         return String.valueOf(v);
     }
 
-    private void markTierDirty() {
-        this.dirtyTier = true;
+    /** 栏位发生待应用更改：该档红字提示 */
+    private void markTierDirty(int tier) {
+        this.tierDirty[tier - 1] = true;
     }
 
-    /** 保存后：清未保存标记并显示灰字「设置已保存」 */
-    private void markSaved() {
-        this.dirtyTier = false;
-        this.savedShown = true;
+    /** 保存后：清该档未保存标记并显示灰字「设置已保存」 */
+    private void markSaved(int tier) {
+        this.tierDirty[tier - 1] = false;
+        this.tierSavedShown[tier - 1] = true;
     }
 
     /** 档位行「设置」：收集待应用更改，统一派发；关窗口/调低额度需确认 */
@@ -331,15 +334,16 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
 
         if (cmds.isEmpty()) {
-            this.dirtyTier = false; // 无实际更改：清未保存标记但不显示「已保存」
+            this.tierDirty[tier - 1] = false; // 无实际更改：清该档未保存标记但不显示「已保存」
             return;
         }
         if (needConfirm) {
-            this.pendingBatch = cmds;
             showConfirm(confirmMsg);
+            this.pendingBatch = cmds; // showConfirm 会清槽位，必须在其后挂载；确认后统一派发并补 confirm
+            this.pendingBatchTier = tier;
         } else {
             cmds.forEach(this::sendCommand);
-            markSaved();
+            markSaved(tier);
         }
     }
 
@@ -352,7 +356,7 @@ public final class ChunkPlanGuiScreen extends Screen {
                 : Component.translatable("gui.chunkplan.disabled"));
         tierWindow[i].active = next;
         tierLimit[i].active = next;
-        markTierDirty();
+        markTierDirty(tier);
     }
 
     private void cycleWindow(int tier) {
@@ -367,7 +371,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         String next = presets.get((idx < 0 ? 0 : (idx + 1) % presets.size()));
         pendingWindow[i] = next;
         tierWindow[i].setMessage(Component.literal(next));
-        markTierDirty();
+        markTierDirty(tier);
     }
 
     private void setMultiplier() {
@@ -403,8 +407,9 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     private void allWindows(boolean enable) {
         if (!enable) {
-            sendCommand("chunkplan config window all off");
+            // 与档位行一致延迟派发：取消确认时不残留服务端待确认动作
             showConfirm(Component.translatable("gui.chunkplan.confirm.disable_all"));
+            this.pendingBatch = List.of("chunkplan config window all off");
         } else {
             sendCommand("chunkplan config window all on");
         }
@@ -427,8 +432,8 @@ public final class ChunkPlanGuiScreen extends Screen {
             return;
         }
         String cmd = "chunkplan reset " + target + (resetTier == 0 ? "" : " " + resetTierName());
-        sendCommand(cmd);
         showConfirm(Component.translatable("gui.chunkplan.confirm.reset", target));
+        this.pendingBatch = List.of(cmd);
     }
 
     private static List<String> presets(int tier) {
@@ -494,13 +499,13 @@ public final class ChunkPlanGuiScreen extends Screen {
         int sy = resetTargetY + resetTargetH + 2;
         int sW = Math.max(resetTargetW + 30, 120);
         int sH = resetSuggestions.size() * SUGGEST_ROW_H;
-        g.fill(sx, sy, sx + sW, sy + sH, 0xF0101010);
+        g.fill(sx, sy, sx + sW, sy + sH, 0xFF000000);
         g.fill(sx, sy, sx + sW, sy + 1, 0xFFFFFFFF);
         for (int i = 0; i < resetSuggestions.size(); i++) {
             int rowY = sy + i * SUGGEST_ROW_H;
             boolean hover = mouseX >= sx && mouseX < sx + sW && mouseY >= rowY && mouseY < rowY + SUGGEST_ROW_H;
             if (hover || i == resetSelected) {
-                g.fill(sx + 1, rowY, sx + sW - 1, rowY + SUGGEST_ROW_H, 0xA0606060);
+                g.fill(sx + 1, rowY, sx + sW - 1, rowY + SUGGEST_ROW_H, 0xFF606060);
             }
             g.drawString(font, Component.literal(resetSuggestions.get(i)), sx + 6, rowY + 2, COL_TEXT);
         }
@@ -528,6 +533,7 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     private void showConfirm(Component message) {
         this.pendingBatch = null; // 槽位只服务当前确认动作，防旧批残留被误派发
+        this.pendingBatchTier = 0;
         this.pendingConfirm = true;
         this.confirmText = Component.empty().append(message)
                 .append(Component.translatable("gui.chunkplan.confirm.hint"));
@@ -634,17 +640,16 @@ public final class ChunkPlanGuiScreen extends Screen {
             return;
         }
         for (int i = 0; i < 4; i++) {
-            int ry = 36 + i * 26;
+            int ry = 36 + i * 32;
             g.drawString(font, Component.literal("tier" + (i + 1)), x, ry + 6, COL_TEXT);
+            // 每档独立提示：未保存红 / 已保存灰；仅本次打开期间显示
+            if (tierDirty[i]) {
+                g.drawString(font, Component.translatable("gui.chunkplan.unsaved"), x, ry + 22, COL_RED);
+            } else if (tierSavedShown[i]) {
+                g.drawString(font, Component.translatable("gui.chunkplan.saved"), x, ry + 22, COL_GRAY);
+            }
         }
-        // 档位区下方提示：调整后有未保存更改（红）/ 保存成功（灰），仅本次打开期间显示
-        int hintY = 36 + 4 * 26 - 4;
-        if (dirtyTier) {
-            g.drawString(font, Component.translatable("gui.chunkplan.unsaved"), x, hintY, COL_RED);
-        } else if (savedShown) {
-            g.drawString(font, Component.translatable("gui.chunkplan.saved"), x, hintY, COL_GRAY);
-        }
-        int gy = 36 + 4 * 26 + 6;
+        int gy = 36 + 4 * 32 + 6;
         g.drawString(font, Component.translatable("gui.chunkplan.all_windows"), x, gy + 6, COL_TEXT);
         g.drawString(font, Component.translatable("gui.chunkplan.fee_new"), x, gy + 34, COL_TEXT);
         g.drawString(font, Component.translatable("gui.chunkplan.fee_explored"), x, gy + 62, COL_TEXT);
@@ -706,8 +711,11 @@ public final class ChunkPlanGuiScreen extends Screen {
                     // 批量命令需确认：先派发（服务端据此注册待确认动作），再补 /chunkplan confirm 执行
                     pendingBatch.forEach(this::sendCommand);
                     sendCommand("chunkplan confirm");
+                    if (pendingBatchTier > 0) {
+                        markSaved(pendingBatchTier);
+                    }
                     pendingBatch = null;
-                    markSaved();
+                    pendingBatchTier = 0;
                 } else {
                     sendCommand("chunkplan confirm");
                 }
@@ -743,6 +751,8 @@ public final class ChunkPlanGuiScreen extends Screen {
     public boolean keyPressed(net.minecraft.client.input.KeyEvent event) {
         if (pendingConfirm && event.key() == org.lwjgl.glfw.GLFW.GLFW_KEY_ESCAPE) { // ESC 取消确认而非关闭界面
             pendingConfirm = false;
+            pendingBatch = null;
+            pendingBatchTier = 0;
             return true;
         }
         if (!resetSuggestions.isEmpty()) {
