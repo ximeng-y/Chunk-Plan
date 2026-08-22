@@ -194,6 +194,13 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **迁移**：`VERSION=3`；v1/v2 玩家数据升级保留 explored、丢弃消费记录（滚动窗口分钟桶无法映射为固定周期，与 v1→v2 先例一致，加载时告警）；`clearTierSpendForAll` 离线改写门禁只处理 v3（旧版留待玩家下次加载时迁移）；升级瞬间正在封禁的玩家随消费清零被 scanBans 自动解封
     - **测试**：common 107 → 115（新增 `partialSlideDoesNotShiftRecovery` 用户场景回归 / `windowTimeShortenAffectsOngoingCycle` / `resetClearsAnchorAndReAnchors` / v2 迁移；`banClearsWhenWindowSlides`→`banClearsFullyAtCycleEnd`、`recoveryConsidersEarliestBucketAcrossMinutes`→`recoveryUsesLatestFullLineCycleEnd` 改写）。**测试写时钟注意**：TestClock 起点位于某分钟的第 40 秒，锚点对齐整分后短窗口（60s）的剩余周期只有 20s——跨分钟推进时钟需用长窗口配置，否则提前过期重锚
 
+41. **GUI 背景模糊后处理重复调用（坑 #41，2026-08-22 用户实机暴露）**：ChunkPlanGuiScreen 曾既显式调用背景又调 `super.*`——分代差异（javap 实证）：
+    - **1.21.1 世代（neoforge/fabric 1.21.1）**：`Screen.render` 本身 = `renderBackground`（含 `processBlurEffect` 模糊后处理）+ renderables 循环；旧代码显式 `renderBackground` 后再 `super.render` 等于**每帧执行两次模糊**，第二次采样到当前帧刚画的内容 → 用量页整页模糊、管理页左列标签以幽灵重影残留背景（用户截图实证）。修复：`super.render` 前置（背景+控件先、页面内容后——布局经核查无重叠），**内容画在控件之上**
+    - **1.21.11/26.x**：`Screen.render`/`extractRenderState` 只剩 renderables 循环，背景移到**入口 wrapper**（`renderWithTooltipAndSubtitles`/`extractRenderStateWithTooltipAndSubtitles`，先背景后 render）+ 分层（`nextStratum`）——**screen 内显式调用背景即重复**，vanilla 屏幕（如 ChatScreen）均不自调；修复=删除显式调用
+    - **forge 1.20.1**：Screen.render 只遍历 renderables、无背景 wrapper（1.20.1 无模糊，renderBackground 只是渐变暗幕+Forge 事件），显式调用唯一正确，**保持原样**
+    - 自查口诀：javap `Screen.render` 开头是 `invokevirtual renderBackground`（1.21.1 世）还是直接遍历 `renderables`（1.20.1/1.21.11/26.x）；带 `renderWithTooltip[AndSubtitles]` 的 wrapper 仅 1.21.11/26.x 存在
+    - 测试与模拟验证均无法覆盖（GUI 渲染被环境阻断，坑 #11）→ 该 bug 六端 GUI 首次实机才暴露；`renderables` 在原版是 private（NeoForge 的 public 来自其 AccessTransformer）
+
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
 - 各端配置结构保持一致（TOML 与 JSON 字段一一对应；forge 与 neoforge 的 TOML 键完全相同）
