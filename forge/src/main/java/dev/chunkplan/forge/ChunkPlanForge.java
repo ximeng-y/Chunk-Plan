@@ -71,13 +71,15 @@ public final class ChunkPlanForge {
     public static final class GameEvents {
 
         /**
-         * 待发登录欢迎的玩家 -> 兜底截止 tick（坑 #38）。
+         * 登录待决动作（闸门 BAN / 登录欢迎）-> 兜底截止 tick（坑 #38）。
          * 1.20.1 无配置阶段：客户端的 client_information 包（含 locale）必然晚于登录事件到达，
          * 首个 tick 未必已收到（高延迟连接可能落在第 3~4 tick）。故按"语言已上报或超过兜底
-         * 截止 tick"择一发送——{@code ServerPlayer.language} 初值为 "en_us"（字节码实证），
-         * 值发生变化即证明客户端已上报；纯英文客户端不会变化，由兜底 tick 正常发出英文欢迎。
+         * 截止 tick"择一执行——{@code ServerPlayer.language} 初值为 "en_us"（字节码实证），
+         * 值发生变化即证明客户端已上报；纯英文客户端不会变化，由兜底 tick 正常发出英文文案。
+         * 登录闸门 BAN（额度已满拒绝进服）与欢迎共用此延迟：闸门若在登录事件当场执行，
+         * 公告必然取初值 en_us 渲染（玩家实机截图实证单人中英文公告错误），故同样等语言就绪。
          */
-        private static final Map<UUID, Integer> WELCOME_PENDING = new HashMap<>();
+        private static final Map<UUID, Integer> LOGIN_PENDING = new HashMap<>();
 
         /** 登录欢迎兜底等待（tick）：1 秒，覆盖高延迟连接的 client_information 往返 */
         private static final int WELCOME_GRACE_TICKS = 20;
@@ -130,12 +132,18 @@ public final class ChunkPlanForge {
         /** 计费核心（事件与 mock 遍历共用） */
         static void handlePlayerTick(ServerPlayer player) {
             try {
-                // 登录欢迎延迟发送：语言已上报或已过兜底 tick 才发（坑 #38）
-                Integer deadline = WELCOME_PENDING.get(player.getUUID());
+                // 登录待决（闸门 BAN / 欢迎）：语言已上报或已过兜底 tick 才落地（坑 #38）
+                Integer deadline = LOGIN_PENDING.get(player.getUUID());
                 if (deadline != null) {
                     boolean languageReported = !DEFAULT_LANGUAGE.equals(player.getLanguage());
                     if (languageReported || player.server.getTickCount() >= deadline) {
-                        WELCOME_PENDING.remove(player.getUUID());
+                        LOGIN_PENDING.remove(player.getUUID());
+                        if (engine.isAllLinesExceeded(player.getUUID())) {
+                            // 登录闸门：额度仍满，以玩家语言渲染公告拦截（此刻语言必然已上报）
+                            QuotaEngine.QuotaStatus status = engine.quotaStatus(player.getUUID());
+                            applyBan(player, status.recoveryMillis());
+                            return;
+                        }
                         sendLoginWelcome(player);
                     }
                 }
@@ -145,6 +153,12 @@ public final class ChunkPlanForge {
                         player.level().dimension().location().toString(),
                         player.getX(), player.getY(), player.getZ());
                 if (result.type() == QuotaEngine.ResultType.BAN) {
+                    // 待决期间语言可能仍未就绪：引擎每 tick 判满（坑 #30）会先于闸门返回 BAN，
+                    // 此刻落地公告又是英文（坑 #38 同源时序）——暂不落地；引擎无状态变化，
+                    // 后续 tick 会重判满，由闸门在语言就绪后统一执行
+                    if (LOGIN_PENDING.containsKey(player.getUUID())) {
+                        return;
+                    }
                     applyBan(player, result.banUntilMillis());
                 } else {
                     // 额度百分比阈值提示（坑 #28）：逐条发送；tick 时 client_information 已到达，语言正确
@@ -167,15 +181,11 @@ public final class ChunkPlanForge {
                 return;
             }
             try {
-                // 兜底检查：额度全满则拒绝登录（已探索集合与消费桶跨重启持久化）
-                if (eng.isAllLinesExceeded(player.getUUID())) {
-                    QuotaEngine.QuotaStatus status = eng.quotaStatus(player.getUUID());
-                    applyBan(player, status.recoveryMillis());
-                } else {
-                    // 登录欢迎（坑 #24）：自动 check 状态 + 提示语；语言延迟到已上报或兜底 tick 渲染
-                    WELCOME_PENDING.put(player.getUUID(),
-                            player.server.getTickCount() + WELCOME_GRACE_TICKS);
-                }
+                // 登录闸门（额度全满拒绝进服）与登录欢迎统一登记待决：1.20.1 无配置阶段，
+                // 登录事件时 client_information（含 locale）必然未到（语言恒为初值 en_us），
+                // 公告与欢迎都按玩家语言渲染，落地延迟到语言已上报或兜底 tick（见 handlePlayerTick）
+                LOGIN_PENDING.put(player.getUUID(),
+                        player.server.getTickCount() + WELCOME_GRACE_TICKS);
             } catch (Exception e) {
                 LOG.error("玩家 {} 登录检查异常", player.getGameProfile().getName(), e);
             }
@@ -200,7 +210,7 @@ public final class ChunkPlanForge {
             if (eng == null || !(event.getEntity() instanceof ServerPlayer player)) {
                 return;
             }
-            WELCOME_PENDING.remove(player.getUUID());
+            LOGIN_PENDING.remove(player.getUUID());
             eng.onPlayerDisconnect(player.getUUID());
             ChunkPlanNetwork.onPlayerDisconnect(player.getUUID());
         }

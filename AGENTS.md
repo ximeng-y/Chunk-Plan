@@ -201,6 +201,8 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - 自查口诀：javap `Screen.render` 开头是 `invokevirtual renderBackground`（1.21.1 世）还是直接遍历 `renderables`（1.20.1/1.21.11/26.x）；带 `renderWithTooltip[AndSubtitles]` 的 wrapper 仅 1.21.11/26.x 存在
     - 测试与模拟验证均无法覆盖（GUI 渲染被环境阻断，坑 #11）→ 该 bug 六端 GUI 首次实机才暴露；`renderables` 在原版是 private（NeoForge 的 public 来自其 AccessTransformer）
 
+42. **Forge 登录闸门公告语言时序（坑 #42，2026-08-22 用户实机暴露）**：1.20.1 无配置阶段，`PlayerLoggedInEvent` 触发时 client_information（locale）必然未到（客户端收到 login 包后才发），`player.getLanguage()` 恒为初值 `en_us` → 登录闸门（额度已满拒绝进服）当场 `applyBan` 渲染英文公告并写入 UserBanList 条目，此后每次重连/重启进服原版 ban gate 都显示存储的英文公告（单人与多人同病；**1.21.1+ 不受影响**——配置阶段保证 JOIN 前语言就绪，实测 neoforge/fabric-multi 1.21.11 闸门公告均正确）。修复：`WELCOME_PENDING` 扩展为 `LOGIN_PENDING`，登录事件只登记待决；闸门 BAN 与欢迎统一延迟到"语言已上报或 20 tick 兜底"在 `handlePlayerTick` 落地；引擎每 tick 判满（坑 #30）可能在语言就绪前先返回 BAN，待决期间暂不落地（引擎无状态变化、后续 tick 重判满），杜绝英文漏网。代价：超限玩家进服后最多延迟约 1 秒被踢（与欢迎同一宽限）。仅 forge 端改动，属 Forge 时序差异不纳入镜像同步（同坑 #38 欢迎逻辑）。**mineflayer 验证陷阱**：其 settings 插件在进 play 后会用默认 `en_US` **再发一次** settings 包覆盖配置阶段的 zh_CN（原版客户端双阶段均发真实语言）——用 mineflayer 验证 1.21.1+ 的语言渲染必须同时设 `bot.settings.locale`；仅配置阶段 `write('settings')` 只够测欢迎（首 tick 早于覆盖包），游戏内踢出等后续渲染会被打回英文造成假阳性。三端 mineflayer 全链路实测：forge/neoforge/fabric-multi 1.21.11 游戏内踢出与登录闸门公告均中文。
+
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
 - 各端配置结构保持一致（TOML 与 JSON 字段一一对应；forge 与 neoforge 的 TOML 键完全相同）
