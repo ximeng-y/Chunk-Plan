@@ -459,10 +459,12 @@ public final class ChunkPlanGuiScreen extends Screen {
             return;
         }
         String lower = val.toLowerCase(Locale.ROOT);
+        // 下拉在输入框下方展开：行数按窗口剩余高度动态限制，防小窗口溢出屏外
+        int maxRows = Math.max(1, (height - (resetTargetY + resetTargetH + 2) - 6) / SUGGEST_ROW_H);
         resetSuggestions = onlinePlayerNames().stream()
                 .filter(n -> n.toLowerCase(Locale.ROOT).startsWith(lower) && !n.equals(val))
                 .sorted(String.CASE_INSENSITIVE_ORDER)
-                .limit(SUGGEST_MAX)
+                .limit(Math.min(SUGGEST_MAX, maxRows))
                 .toList();
         if (resetSelected >= resetSuggestions.size()) {
             resetSelected = resetSuggestions.isEmpty() ? -1 : resetSuggestions.size() - 1;
@@ -498,8 +500,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         int sx = resetTargetX;
         int sW = Math.max(resetTargetW + 30, 120);
         int sH = resetSuggestions.size() * SUGGEST_ROW_H;
-        // 在输入框上方弹出：下方是「支持使用@a目标选择器」提示行，避免两者重叠
-        int sy = resetTargetY - sH - 2;
+        int sy = resetTargetY + resetTargetH + 2;
         g.fill(sx, sy, sx + sW, sy + sH, 0xFF000000);
         g.fill(sx, sy, sx + sW, sy + 1, 0xFFFFFFFF);
         g.fill(sx, sy + sH - 1, sx + sW, sy + sH, 0xFFFFFFFF);
@@ -659,7 +660,9 @@ public final class ChunkPlanGuiScreen extends Screen {
         g.text(font, Component.translatable("gui.chunkplan.fee_explored"), x, gy + 62, COL_TEXT);
         g.text(font, Component.translatable("gui.chunkplan.speed_mult"), x, gy + 90, COL_TEXT);
         g.text(font, Component.translatable("gui.chunkplan.reset_quota"), x, gy + 146, COL_TEXT);
-        g.text(font, Component.translatable("gui.chunkplan.reset_hint"), x + 96, gy + 168, COL_GRAY);
+        if (resetSuggestions.isEmpty()) { // 下拉弹出期间提示行被遮挡，收起后恢复
+            g.text(font, Component.translatable("gui.chunkplan.reset_hint"), x + 96, gy + 168, COL_GRAY);
+        }
     }
 
     private void renderConfirm(GuiGraphicsExtractor g) {
@@ -735,7 +738,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         if (!resetSuggestions.isEmpty()) {
             int sH = resetSuggestions.size() * SUGGEST_ROW_H;
-            int paneY = resetTargetY - sH - 2;
+            int paneY = resetTargetY + resetTargetH + 2;
             for (int i = 0; i < resetSuggestions.size(); i++) {
                 if (inRect(event.x(), event.y(), resetTargetX, paneY + i * SUGGEST_ROW_H,
                         Math.max(resetTargetW + 30, 120), SUGGEST_ROW_H)) {
