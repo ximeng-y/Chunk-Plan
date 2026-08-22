@@ -97,10 +97,15 @@
 #### 管理员控制
 
 - 本模组允许，且默认开启**管理员计费豁免**机制——开启后，管理员的区块探索不再计费；
-
 - 本模组的自定义功能均可通过`/chunkplan config`命令进行实时控制；
-
 - 管理员可使用`/chunkplan reset`命令为某名玩家/全部玩家**重置探索额度**，且可选择重置所有/重置单个窗口。
+
+
+
+#### 客户端GUI
+
+- 当玩家在客户端安装此mod时，按K键（默认）即可开启GUI界面，查看自己的用量情况，等效于`/chunkplan check`命令
+- 当管理员打开GUI界面时，还可以使用可视化的管理界面，等效于`/chunkplan config`系列命令
 
 
 
@@ -149,8 +154,6 @@
 
 
 ### 功能计划
-
-- 计划新增可视化GUI界面，玩家可选择在自己的客户端安装以实现可视化配置、额度查询等功能；
 
 - 计划新增虚拟“额度重置卡”功能，管理员可向玩家发放重置卡，玩家可自由控制自己的额度重置时机。
 
@@ -226,7 +229,7 @@ Billing window mechanism:
 
 - **Parallel billing:** a player's consumption applies to **all windows at the same time**;
 
-- **Independent refresh:** each billing window resets according to its configured refresh time;
+- **Independent refresh:** each billing window clears according to its configured refresh time — timing starts from the window's first consumption after the refresh, and when the time arrives, the whole window resets to zero (equivalent to an admin reset), instead of individual charges expiring on a rolling basis;
 
 - **Individual configuration:** the on/off state, refresh time, and exploration quota of each billing window can be customized.
 
@@ -259,10 +262,15 @@ Billing window mechanism:
 #### Administrator Control
 
 - This mod allows, and enables by default, the **admin billing exemption** mechanism — when enabled, admins' chunk exploration is no longer billed;
-
 - All customization features of this mod can be controlled in real time via the `/chunkplan config` command;
-
 - Admins can use the `/chunkplan reset` command to **reset the exploration quota** of a player or all players, and can choose to reset all windows or a single window.
+
+
+
+#### Client GUI
+
+- When this mod is installed on the client, players can press K (default) to open the GUI and view their quota usage, equivalent to the `/chunkplan check` command;
+- When an admin opens the GUI, they also get access to a visual admin interface, equivalent to the `/chunkplan config` command set.
 
 
 
@@ -311,8 +319,6 @@ If you need migration to a version not in the plan, you can also submit an issue
 
 
 ### Feature Plans
-
-- We plan to add a visual GUI interface. Players can choose to install it on their client for visual configuration, quota query, and other features;
 
 - We plan to add a virtual "quota reset card" feature. Admins can issue reset cards to players, and players can freely control when their quota is reset.
 
