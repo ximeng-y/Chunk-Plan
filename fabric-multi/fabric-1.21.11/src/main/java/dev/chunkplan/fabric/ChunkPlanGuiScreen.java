@@ -548,7 +548,8 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     @Override
     public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
-        renderBackground(g, mouseX, mouseY, partialTick);
+        // 背景由渲染入口 renderWithTooltipAndSubtitles 在调用本方法前统一绘制，此处不得重复调用
+        // （重复调用会让模糊后处理再次采样当前帧已画内容，出现整页模糊/幽灵重影）
         g.fill(0, 32, width, 33, 0xFF555555);
         if (page == 0) {
             renderUsage(g);

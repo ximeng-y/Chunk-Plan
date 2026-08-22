@@ -548,14 +548,15 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     @Override
     public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
-        renderBackground(g, mouseX, mouseY, partialTick);
+        // 1.21.1 的 Screen.render 会先调用 renderBackground（模糊后处理），只能在页面内容之前执行一次；
+        // 先显式 renderBackground 再 super.render 会触发第二次模糊，把当前帧刚画的内容模糊进背景
+        super.render(g, mouseX, mouseY, partialTick);
         g.fill(0, 32, width, 33, 0xFF555555);
         if (page == 0) {
             renderUsage(g);
         } else {
             renderAdmin(g);
         }
-        super.render(g, mouseX, mouseY, partialTick);
         if (page == 1) {
             refreshResetSuggestions();
             renderResetSuggestions(g, mouseX, mouseY);
