@@ -37,6 +37,7 @@ fabric-multi/ Fabric 多版本独立构建（1.21.11/26.1.2/26.2，坑 #33）：
 | 持久化 | `world/chunkplan/players/<uuid>.json` 每玩家一文件，定期（5min）+ 离线 + 关服落盘，原子写 |
 | 配置 | 数值全部可配；**不做指令配置**（唯一例外：`/chunkplan config exemptByDefault [true|false]`，gamerule 风格，无参查询/带参设置并原子写回配置文件，反馈不显示文件路径）；`/chunkplan check|reset <player>|confirm|reload`（reset/confirm/reload 权限 2；reset 需 confirm 二次确认） |
 | 登录欢迎 | 进服（未被额度拦截）自动发送一次 check 状态 + `查询额度请使用 /chunkplan check 命令` 提示，按玩家客户端语言；客户端可视化入口行二期再加 |
+| 预设 | 四档额度线快照（12 值；费率/倍率/豁免保持全局）；`default` = 全局配置的别名（活的）；存储 `<world>/chunkplan/presets.json`；`/chunkplan preset list|save|delete|apply|player`（详见坑 #44） |
 | 日志 | 扣费事件写独立 `logs/chunkplan.log`，不污染默认日志 |
 
 ## 计费与额度线算法（common/QuotaEngine，防实现偏差）
@@ -205,9 +206,20 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
 
 43. **管理员豁免文案与语义统一（坑 #43，2026-08-22 用户 Fabric GUI 实测暴露）**：exemptByDefault 的用户可见文案曾用「管理员计费 / Admin billing」——`exemptByDefault=true` 实为**默认豁免管理员**（管理员不扣费），旧标签字面与行为相反（toggle 开=管理员不用付费，旧文案「管理员计费：开」正好读反）。修复统一为「管理员豁免 / Admin exemption」：6 份 lang（`gui.chunkplan.admin_billing` **key 名保留不动**，仅值改豁免——key 是内部标识且资源包可能覆盖旧 key）+ 4 份 `ChunkPlanMessages.helpMessage`（「开关管理员计费」→「开关管理员豁免」、"Toggle admin billing" → "Toggle admin exemption"，含行内注释）；README「管理员计费豁免机制」语义正确（计费豁免=a 豁免 b）未动。教训：用户可见文案按**配置语义**命名（豁免），勿按字段名（exemptByDefault / billing）望文生义；GUI 与 /chunkplan help 是同一概念的两处呈现，核对文案须一起查
 
+44. **配置预设系统（坑 #44，2026-09-12，issue #1、#2）**：命名额度线快照 + 按玩家分配，解决"多套计费方案切换/个别玩家特殊限制"。
+    - **预设内容拍板为仅四档额度线 12 值**（tier1~4 各 enabled/window/limit；用户拍板）——费率/高速倍率/阈值/豁免/周期保持全局（费率按玩家区分被否决）；`PresetStore.Preset = (name, List<QuotaTiers.Tier> tiers)` 恒 4 项含禁用档（保存时 readRawTiers 原值保留，应用/重启用时还原）。**`default` 不是存储条目**，是全局配置文件当前值的别名（活的）——"对全体玩家生效"即全局配置本身
+    - **存储** `<world>/chunkplan/presets.json`（引擎构造时自建 `PresetStore(dataDir/presets.json)`，壳层零接线）：`{"version":1,"presets":{名:{"tiers":[{enabled,window,limit}×4]}},"assignments":{uuid:名}}`；AtomicFile 写前备份 + readJson .bak 兜底（坑 #27）；名称 `[A-Za-z0-9_-]{1,32}`；档位合法性**复用 toLines 校验**（warnings 非空即拒绝——防应用时静默回退）；变更即时落盘（ManagedBanStore 先例）；指向缺失预设的分配载入时丢弃
+    - **引擎按玩家有效配置**：`QuotaEngine.playerOverrides`（uuid→QuotaConfig）+ `effectiveConfig(uuid)`；override 的额度线来自预设（toLines），其余字段抄当前全局（`setConfig` 全量重建，全局改费率对覆盖玩家同样生效）。**引擎内针对某玩家的额度线/费率读取必须走 effectiveConfig**（onPlayerTick/quotaStatus/isAllLinesExceeded/checkAlerts/recoveryMillis/totalSpent 已切）；`isExempt` 仍读全局（豁免与覆盖正交，豁免优先）。override 变更（assign/clear/delete/save 同名覆盖）须 `alertStates.remove(uuid)`（lastLevels 按 lines 下标对齐，预设线数可能不同——与坑 #30 同因，单测 `setPlayerPresetClearsAlertStateToAvoidIndexMismatch` 回归：2 线→3 线不清则 AIOOBE）。玩家数据 v3 不动（tiers 按 tier 键分桶天然兼容预设切换，消费记录跨预设保留、窗口现算）
+    - **命令族**（权限 2，四端 QuotaCommands 同步）：`preset list`（default 摘要 + 各预设）、`preset save <名>`（readRawTiers 快照，同名覆盖时刷新使用中玩家的 override）、`preset delete <名>`（default 不可删；返回解除分配数并清对应 override/alertState）、`preset apply <名>`（**恒需 confirm**，PendingAction.ApplyPreset；执行=12 个 write 调用写回配置文件 + loadAndApplyConfig + 对 enabled→disabled 档 clearTierSpendForAll（坑 #30 语义）+ 结果零线则立即 scanBans（坑 #31））、`preset player <目标> [名|default]`（greedyString 同 reset 模式，@a/@e/@p/@r/@s/名字/UUID 离线可用；缺省名=查询分配；default=清除覆盖；**补全按词数分阶段第 3 词起空建议**，坑 #35 同款）。`preset player` 变更后通知在线目标（复用 reset 通知模式）
+    - **check/welcome 显示来源**：`QuotaStatus` 增加 `presetName` 字段（null=跟随全局不显示），checkStatusText 增「当前应用预设：X」行；GUI 用量页同步显示（`GuiStatus.playerPreset`）
+    - **GUI（GuiStatus v2，PROTOCOL_VERSION 1→2）**：新增 `presets`（仅管理员下发，与 tiers 同策略）+ `playerPreset`（全体下发，空串编解码归一 null）；管理页底部新增预设区 3 行（循环选择→应用到全体/删除、名称+保存、目标+分配/恢复默认）——apply 走现有确认弹窗+批量派发+补 confirm，**delete 无服务端 confirm 流故新增 `pendingSkipConfirm` 标志跳过补发**（否则聊天报"无待确认操作"）；预设名 EditBox 客户端预校验同正则；**补全机制统一**：原 reset 下拉改为 `activeSuggestBox()`（resetTarget/presetTarget 聚焦者共用 resetSuggestions/suggestOwner 一套状态）。语言键 +11（preset_* ×9 + confirm.apply_preset/delete_preset）×12 份
+    - **镜像范围**：QuotaCommands/ChunkPlanMessages 四端逐字同步（API 差异行除外）；GuiScreen 六端、ChunkPlanNetwork 六端（buildGuiStatus 加 presetNames/playerPreset）、GuiStatus/common 单份；lang 12 份
+    - **验证**：common 137 → 138+ 新增（PresetStoreTest 10 个 + QuotaEngineTest 预设 12 个 + GuiStatus v2 roundtrip）；根构建 + fabric-multi 构建全绿；neoforge rcon 冒烟全链路（list/save/覆盖保存/非法名拒绝/default 保护/apply confirm 写回/apply 关档清记录语义、player 分配-查询-恢复默认、mock tp 计费按预设上限 1.0 踢出——ban 公告恢复时间=锚点+预设窗口 5h 精确、delete 解分配、恢复全局上限后 scanBans 30s 自动解封、presets.json + .bak 落盘）。冒烟中 check 离线玩家名显示 0.0 为**坑 #9 usercache 陈旧同名条目**（非本功能缺陷），精确 UUID 复验 2.0/1.0 超限正确
+
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
 - 各端配置结构保持一致（TOML 与 JSON 字段一一对应；forge 与 neoforge 的 TOML 键完全相同）
 - 各端 `DevCommands`/`QuotaCommands`/`applyBan`/`scanBans` 逐字重复（架构决定无法下沉 common）→ **改一处必须同步其余各处**（四处：neoforge、fabric/1.21.1、fabric-multi/shared、forge/1.20.1，坑 #33/#38；API 差异行除外）。`ChunkPlanMessages` 在 forge 端与 neoforge 端**除 package 行外逐字一致**（无版本相关 API），改文案后可用 `diff <(tail -n +2 …neoforge/ChunkPlanMessages.java) <(tail -n +2 …forge/ChunkPlanMessages.java)` 自检
+- 客户端 GUI 类同样是逐字镜像：`ChunkPlanGuiScreen` **六端**（neoforge、fabric/1.21.1、forge/1.20.1、fabric-multi 三版本）、`ChunkPlanNetwork` 六端（shared 无 Network），改 GUI 逻辑必须六处同步；GUI 相关 lang 键 `gui.chunkplan.*` 需同步 **12 份**（6 端 × en_us/zh_cn）。版本差异行（26.x `GuiGraphicsExtractor`/`g.text`/事件签名、forge `renderBackground` 位置、`moveCursorToEnd` 无参）不属于同步范围（坑 #41/#44）
 - MC 版本范围：neoforge 与 fabric 1.21.1 仅 1.21.1；forge 仅 1.20.1（坑 #38）；fabric-multi 额外支持 1.21.11/26.1.2/26.2（坑 #33），不得再放宽到未测试版本
 - 不做：mixin、客户端内容、指令式配置；26.x 迁移只适配壳层（fabric 侧已落地为 fabric-multi，neoforge 与 forge 各自单版本）
