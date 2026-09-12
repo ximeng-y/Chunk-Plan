@@ -57,6 +57,8 @@ public final class ChunkPlanGuiScreen extends Screen {
     private List<String> pendingBatch;
     /** 批量命令对应档位（0 = 无档位，如重置/全部关闭）；已保存提示按档位显示 */
     private int pendingBatchTier;
+    /** 批量命令是否跳过补发 confirm（预设删除无服务端确认流，补发只会报"无待确认操作"） */
+    private boolean pendingSkipConfirm;
 
     // 管理页控件
     private final Button[] tierToggle = new Button[4];
@@ -69,6 +71,10 @@ public final class ChunkPlanGuiScreen extends Screen {
     private Button resetTierCycle;
     private EditBox resetTarget;
     private int resetTier; // 0 = all，1..4
+    // 预设区控件（issue #1、#2）
+    private Button presetCycle;
+    private EditBox presetNameEdit;
+    private EditBox presetTarget;
 
     // 档位行「设置」待应用状态（本地先改、点「设置」才派发命令；重建后按服务端值比对回落）
     private final boolean[] pendingEnabledSet = new boolean[4];
@@ -78,17 +84,24 @@ public final class ChunkPlanGuiScreen extends Screen {
     private final boolean[] tierDirty = new boolean[4];
     private final boolean[] tierSavedShown = new boolean[4];
 
-    // 重置目标自动补全（仅在线玩家名；每次打开界面不显示，输入后才出现）
+    // 重置目标自动补全（仅在线玩家名；每次打开界面不显示，输入后才出现；
+    // 补全机制为"当前聚焦的补全输入框"统一服务：resetTarget 或 presetTarget）
     private List<String> resetSuggestions = List.of();
     private int resetSelected = -1;
     private int resetTargetX, resetTargetY, resetTargetW, resetTargetH;
+    private EditBox suggestOwner;
 
+    // 预设区状态（issue #1、#2）
+    /** 当前选中预设名（跨重建保留；null/不在列表时显示首个） */
+    private String selectedPreset;
     // 用户输入保留（跨状态刷新重建不丢字）；命令生效后回显服务端确认值
     private final String[] savedLimit = new String[4];
     private String savedMult;
     private String savedNewFee;
     private String savedFamiliarFee;
     private String savedResetTarget;
+    private String savedPresetName;
+    private String savedPresetTarget;
 
     public ChunkPlanGuiScreen() {
         super(Component.literal("ChunkPlan"));
@@ -246,6 +259,33 @@ public final class ChunkPlanGuiScreen extends Screen {
                 Component.literal(resetTierName()), b -> cycleResetTier());
         addButton(left + 234, gy, 56, 20, Component.translatable("gui.chunkplan.reset"),
                 b -> doReset());
+
+        // ---------- 预设区（issue #1、#2） ----------
+        gy += 28;
+        // 行 1：循环选择预设 → 应用到全体（写全局配置，需确认）/ 删除（本地确认，无服务端 confirm 流）
+        presetCycle = addButton(left + 96, gy, 84, 20, Component.literal(selectedPresetName()), b -> cyclePreset());
+        addButton(left + 186, gy, 66, 20, Component.translatable("gui.chunkplan.preset_apply"),
+                b -> applyPresetAll());
+        addButton(left + 258, gy, 52, 20, Component.translatable("gui.chunkplan.preset_delete"),
+                b -> deletePreset());
+        gy += 28;
+        // 行 2：把当前全局配置保存为预设（名称客户端预校验，服务端权威）
+        presetNameEdit = new EditBox(font, left + 96, gy, 74, 20, Component.empty());
+        presetNameEdit.setValue(savedPresetName != null ? savedPresetName : "");
+        presetNameEdit.setResponder(v -> savedPresetName = v);
+        addRenderableWidget(presetNameEdit);
+        addButton(left + 176, gy, 52, 20, Component.translatable("gui.chunkplan.preset_save"),
+                b -> savePreset());
+        gy += 28;
+        // 行 3：按玩家应用/恢复默认（目标默认在线玩家补全；预设名取行 1 当前选中）
+        presetTarget = new EditBox(font, left + 96, gy, 74, 20, Component.empty());
+        presetTarget.setValue(savedPresetTarget != null ? savedPresetTarget : "");
+        presetTarget.setResponder(v -> savedPresetTarget = v);
+        addRenderableWidget(presetTarget);
+        addButton(left + 176, gy, 52, 20, Component.translatable("gui.chunkplan.preset_assign"),
+                b -> assignPreset());
+        addButton(left + 234, gy, 56, 20, Component.translatable("gui.chunkplan.preset_clear"),
+                b -> clearPresetAssign());
     }
 
     private Button addButton(int x, int y, int w, int h, Component msg, Button.OnPress onPress) {
@@ -436,6 +476,89 @@ public final class ChunkPlanGuiScreen extends Screen {
         this.pendingBatch = List.of(cmd);
     }
 
+    // ---------- 预设区（issue #1、#2） ----------
+
+    /** 预设名列表（仅管理员请求时服务端下发；非空才有预设可用） */
+    private List<String> presetNames() {
+        return status == null || status.presets() == null ? List.of() : status.presets();
+    }
+
+    /** 当前选中预设（选中项已被删除/不存在时回落首个；列表空返回 null） */
+    private String currentPresetOrNull() {
+        List<String> names = presetNames();
+        if (names.isEmpty()) {
+            return null;
+        }
+        int idx = names.indexOf(selectedPreset);
+        return names.get(idx >= 0 ? idx : 0);
+    }
+
+    private String selectedPresetName() {
+        String cur = currentPresetOrNull();
+        return cur == null ? "—" : cur;
+    }
+
+    private void cyclePreset() {
+        List<String> names = presetNames();
+        if (names.isEmpty()) {
+            return;
+        }
+        int idx = names.indexOf(selectedPreset);
+        selectedPreset = names.get((idx + 1) % names.size());
+        if (presetCycle != null) {
+            presetCycle.setMessage(Component.literal(selectedPresetName()));
+        }
+    }
+
+    /** 应用当前选中预设到全体（写全局配置）：服务端 apply 需 confirm，走批量派发 + 补 confirm */
+    private void applyPresetAll() {
+        String name = currentPresetOrNull();
+        if (name == null) {
+            return;
+        }
+        showConfirm(Component.translatable("gui.chunkplan.confirm.apply_preset", name));
+        this.pendingBatch = List.of("chunkplan preset apply " + name);
+    }
+
+    /** 删除当前选中预设：服务端无 confirm 流，本地弹窗确认后直接派发（跳过补发 confirm） */
+    private void deletePreset() {
+        String name = currentPresetOrNull();
+        if (name == null) {
+            return;
+        }
+        showConfirm(Component.translatable("gui.chunkplan.confirm.delete_preset", name));
+        this.pendingBatch = List.of("chunkplan preset delete " + name);
+        this.pendingSkipConfirm = true;
+    }
+
+    private void savePreset() {
+        String name = presetNameEdit.getValue().trim();
+        // 与服务端 PresetStore.NAME_PATTERN 同规则：客户端预校验防误发，服务端权威
+        if (!name.matches("[A-Za-z0-9_-]{1,32}")) {
+            return;
+        }
+        sendCommand("chunkplan preset save " + name);
+        // 保留名称输入：管理员常在微调配置后同名覆盖保存
+    }
+
+    private void assignPreset() {
+        String target = presetTarget.getValue().trim();
+        String name = currentPresetOrNull();
+        if (target.isEmpty() || name == null) {
+            return;
+        }
+        sendCommand("chunkplan preset player " + target + " " + name);
+        // 保留目标输入：便于对多名玩家连续分配
+    }
+
+    private void clearPresetAssign() {
+        String target = presetTarget.getValue().trim();
+        if (target.isEmpty()) {
+            return;
+        }
+        sendCommand("chunkplan preset player " + target + " default");
+    }
+
     private static List<String> presets(int tier) {
         return switch (tier) {
             case 1 -> QuotaTiers.TIER1_WINDOWS;
@@ -446,18 +569,40 @@ public final class ChunkPlanGuiScreen extends Screen {
         };
     }
 
-    // ---------- 重置目标自动补全（仅在线玩家名） ----------
+    // ---------- 目标自动补全（仅在线玩家名；resetTarget 与 presetTarget 共用一套机制） ----------
+
+    /** 当前应展示补全的输入框（管理页中聚焦的那个；无则返回 null） */
+    private EditBox activeSuggestBox() {
+        if (page != 1) {
+            return null;
+        }
+        if (resetTarget != null && resetTarget.isFocused()) {
+            return resetTarget;
+        }
+        if (presetTarget != null && presetTarget.isFocused()) {
+            return presetTarget;
+        }
+        return null;
+    }
 
     private void refreshResetSuggestions() {
-        if (page != 1 || resetTarget == null || !resetTarget.isFocused()) {
+        EditBox box = activeSuggestBox();
+        if (box == null) {
             resetSuggestions = List.of();
+            suggestOwner = null;
             return;
         }
-        String val = resetTarget.getValue().trim();
+        String val = box.getValue().trim();
         if (val.isEmpty()) {
             resetSuggestions = List.of();
+            suggestOwner = null;
             return;
         }
+        suggestOwner = box;
+        resetTargetX = box.getX();
+        resetTargetY = box.getY();
+        resetTargetW = box.getWidth();
+        resetTargetH = box.getHeight();
         String lower = val.toLowerCase(Locale.ROOT);
         // 下拉在输入框下方展开：行数按窗口剩余高度动态限制，防小窗口溢出屏外
         int maxRows = Math.max(1, (height - (resetTargetY + resetTargetH + 2) - 6) / SUGGEST_ROW_H);
@@ -483,13 +628,14 @@ public final class ChunkPlanGuiScreen extends Screen {
     }
 
     private void acceptResetSuggestion(int idx) {
-        if (idx < 0 || idx >= resetSuggestions.size()) {
+        if (idx < 0 || idx >= resetSuggestions.size() || suggestOwner == null) {
             return;
         }
         String name = resetSuggestions.get(idx);
-        resetTarget.setValue(name);
-        resetTarget.moveCursorToEnd(true);
+        suggestOwner.setValue(name);
+        suggestOwner.moveCursorToEnd(true);
         resetSuggestions = List.of();
+        suggestOwner = null;
         resetSelected = -1;
     }
 
@@ -539,6 +685,7 @@ public final class ChunkPlanGuiScreen extends Screen {
     private void showConfirm(Component message) {
         this.pendingBatch = null; // 槽位只服务当前确认动作，防旧批残留被误派发
         this.pendingBatchTier = 0;
+        this.pendingSkipConfirm = false;
         this.pendingConfirm = true;
         this.confirmText = Component.empty().append(message)
                 .append(Component.translatable("gui.chunkplan.confirm.hint"));
@@ -625,6 +772,11 @@ public final class ChunkPlanGuiScreen extends Screen {
                 g.drawString(font, word, x, y, wc);
             }
         }
+        // 按玩家预设覆盖（issue #2）：显示额度规则来源（null = 跟随全局 default，不显示）
+        if (s.playerPreset() != null) {
+            y += 12;
+            g.drawString(font, Component.translatable("gui.chunkplan.preset_current", s.playerPreset()), x, y, COL_ACCENT);
+        }
         // 计费规则（所有玩家可见，等价 /chunkplan rules）
         y += 18;
         g.drawString(font, Component.translatable("gui.chunkplan.rules_title"), x, y, COL_ACCENT);
@@ -661,8 +813,12 @@ public final class ChunkPlanGuiScreen extends Screen {
         g.drawString(font, Component.translatable("gui.chunkplan.fee_explored"), x, gy + 62, COL_TEXT);
         g.drawString(font, Component.translatable("gui.chunkplan.speed_mult"), x, gy + 90, COL_TEXT);
         g.drawString(font, Component.translatable("gui.chunkplan.reset_quota"), x, gy + 146, COL_TEXT);
-        if (resetSuggestions.isEmpty()) { // 下拉弹出期间提示行被遮挡，收起后恢复
-            g.drawString(font, Component.translatable("gui.chunkplan.reset_hint"), x + 96, gy + 168, COL_GRAY);
+        // 预设区标签（行 1 选择/应用/删除、行 2 保存、行 3 按玩家分配）
+        g.drawString(font, Component.translatable("gui.chunkplan.preset_title"), x, gy + 174, COL_TEXT);
+        g.drawString(font, Component.translatable("gui.chunkplan.preset_save_label"), x, gy + 202, COL_TEXT);
+        g.drawString(font, Component.translatable("gui.chunkplan.preset_assign_label"), x, gy + 230, COL_TEXT);
+        if (resetSuggestions.isEmpty()) { // 下拉弹出期间提示行被遮挡，收起后恢复（移至重置行右侧，下方为预设区）
+            g.drawString(font, Component.translatable("gui.chunkplan.reset_hint"), x + 296, gy + 152, COL_GRAY);
         }
     }
 
@@ -718,12 +874,15 @@ public final class ChunkPlanGuiScreen extends Screen {
                 if (pendingBatch != null) {
                     // 批量命令需确认：先派发（服务端据此注册待确认动作），再补 /chunkplan confirm 执行
                     pendingBatch.forEach(this::sendCommand);
-                    sendCommand("chunkplan confirm");
+                    if (!pendingSkipConfirm) {
+                        sendCommand("chunkplan confirm");
+                    }
                     if (pendingBatchTier > 0) {
                         markSaved(pendingBatchTier);
                     }
                     pendingBatch = null;
                     pendingBatchTier = 0;
+                    pendingSkipConfirm = false;
                 } else {
                     sendCommand("chunkplan confirm");
                 }
@@ -733,6 +892,7 @@ public final class ChunkPlanGuiScreen extends Screen {
             if (inRect(event.x(), event.y(), noX, noY, noW, noH)) {
                 pendingConfirm = false;
                 pendingBatch = null;
+                pendingSkipConfirm = false;
                 return true;
             }
             return true; // 弹窗期间拦截底层点击
@@ -748,9 +908,12 @@ public final class ChunkPlanGuiScreen extends Screen {
                 }
             }
             // 点击建议列表之外的区域：失焦隐藏建议（点击输入框内不处理，交还 super 聚焦）
-            if (!inRect(event.x(), event.y(), resetTargetX, resetTargetY, resetTargetW, resetTargetH)) {
-                resetTarget.setFocused(false);
+            if (suggestOwner != null
+                    && !inRect(event.x(), event.y(), suggestOwner.getX(), suggestOwner.getY(),
+                            suggestOwner.getWidth(), suggestOwner.getHeight())) {
+                suggestOwner.setFocused(false);
                 resetSuggestions = List.of();
+                suggestOwner = null;
                 resetSelected = -1;
             }
         }
@@ -781,6 +944,7 @@ public final class ChunkPlanGuiScreen extends Screen {
                 }
                 case org.lwjgl.glfw.GLFW.GLFW_KEY_ESCAPE -> {
                     resetSuggestions = List.of();
+                    suggestOwner = null;
                     resetSelected = -1;
                     return true;
                 }

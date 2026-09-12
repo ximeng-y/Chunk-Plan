@@ -25,7 +25,8 @@ class GuiStatusTest {
                 List.of(
                         new QuotaEngine.LineStatus(5 * 3600, 500.0, 250.0, 1234567890000L),
                         new QuotaEngine.LineStatus(24 * 3600, 2000.0, 900.5, 1234567890000L)),
-                false, -1, 50);
+                false, -1, 50,
+                List.of("pvp", "relax"), "pvp");
     }
 
     @Test
@@ -46,6 +47,31 @@ class GuiStatusTest {
         assertEquals(original.allExceeded(), decoded.allExceeded());
         assertEquals(original.recoveryMillis(), decoded.recoveryMillis());
         assertEquals(original.worstPercent(), decoded.worstPercent());
+        assertEquals(original.presets(), decoded.presets());
+        assertEquals(original.playerPreset(), decoded.playerPreset());
+    }
+
+    @Test
+    void v2PresetFieldsRoundTrip() {
+        // v2 新增字段：presets 列表 + playerPreset（null = default，编解码归一空串）
+        GuiStatus withNull = new GuiStatus(1.0, 0.05, 0.5, 2.0,
+                false, false, false, false,
+                List.of(new QuotaTiers.Tier(false, "5h", 500.0)),
+                List.of(), true, 999L, -1,
+                List.of(), null);
+        GuiStatus d = GuiStatus.decode(withNull.encode());
+        assertNotNull(d);
+        assertTrue(d.presets().isEmpty());
+        assertNull(d.playerPreset());
+
+        GuiStatus withNames = new GuiStatus(1.0, 0.05, 0.5, 2.0,
+                true, false, true, true,
+                List.of(), List.of(), false, -1, -1,
+                List.of("pvp", "relax"), "pvp");
+        GuiStatus d2 = GuiStatus.decode(withNames.encode());
+        assertNotNull(d2);
+        assertEquals(List.of("pvp", "relax"), d2.presets());
+        assertEquals("pvp", d2.playerPreset());
     }
 
     @Test
@@ -85,7 +111,8 @@ class GuiStatusTest {
         GuiStatus s = new GuiStatus(1.0, 0.05, 0.5, 2.0,
                 false, false, false, false,
                 List.of(new QuotaTiers.Tier(false, "5h", 500.0)),
-                List.of(), true, 999L, -1);
+                List.of(), true, 999L, -1,
+                List.of(), null);
         GuiStatus d = GuiStatus.decode(s.encode());
         assertNotNull(d);
         assertTrue(d.lines().isEmpty());

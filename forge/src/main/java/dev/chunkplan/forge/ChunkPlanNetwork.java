@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import dev.chunkplan.common.GuiStatus;
+import dev.chunkplan.common.PresetStore;
 import dev.chunkplan.common.QuotaConfig;
 import dev.chunkplan.common.QuotaEngine;
 import net.minecraft.network.FriendlyByteBuf;
@@ -190,11 +191,16 @@ public final class ChunkPlanNetwork {
         boolean isExempt = eng.isExempt(uuid, isAdmin);
         boolean inList = cfg.exemptPlayers().contains(uuid);
         int worst = qs.worstAlert() == null ? -1 : qs.worstAlert().percent();
+        // 预设（issue #1、#2）：预设名列表仅管理员下发；当前玩家预设对全体下发（null = default）
+        List<String> presetNames = isAdmin
+                ? eng.getPresetStore().all().stream().map(PresetStore.Preset::name).toList()
+                : List.of();
         return new GuiStatus(
                 cfg.firstEntryFee(), cfg.familiarEntryFee(), cfg.highSpeedThreshold(), cfg.highSpeedMultiplier(),
                 cfg.exemptByDefault(), isExempt, inList, isAdmin,
                 isAdmin ? ForgeConfig.readRawTiers(resolveConfigFile(player)) : List.of(),
-                qs.lines(), qs.allExceeded(), qs.recoveryMillis(), worst);
+                qs.lines(), qs.allExceeded(), qs.recoveryMillis(), worst,
+                presetNames, eng.getPlayerPresetName(uuid));
     }
 
     /** 实际生效的配置文件（坑 #38）：存档级 serverconfig 唯一位置，config/ 仅作异常时序兜底 */

@@ -19,8 +19,10 @@ import java.util.List;
  * <p>字段说明：
  * <ul>
  *   <li>{@code tiers}：四档原始配置（含禁用档的窗口/上限，供管理页展示与编辑；来源配置文件而非引擎 active lines）</li>
- *   <li>{@code lines}：引擎当前激活额度线状态（复用 {@link QuotaEngine.LineStatus}）</li>
+ *   <li>{@code lines}：引擎当前激活额度线状态（复用 {@link QuotaEngine.LineStatus}，已按玩家预设覆盖解析，issue #2）</li>
  *   <li>{@code worstPercent}：跨窗口当前最高档位百分比（-1 = 无档，坑 #29 档位词显示用）</li>
+ *   <li>{@code presets}：预设名列表（v2，issue #1；仅管理员请求填充，与 tiers 同策略）</li>
+ *   <li>{@code playerPreset}：请求玩家当前预设名（v2，issue #2；null = 跟随全局 default）</li>
  * </ul>
  */
 public record GuiStatus(
@@ -36,10 +38,12 @@ public record GuiStatus(
         List<QuotaEngine.LineStatus> lines,
         boolean allExceeded,
         long recoveryMillis,
-        int worstPercent) {
+        int worstPercent,
+        List<String> presets,
+        String playerPreset) {
 
-    /** 协议版本：两端不一致时 decode 返回 null（客户端提示升级） */
-    public static final int PROTOCOL_VERSION = 1;
+    /** 协议版本：两端不一致时 decode 返回 null（客户端提示升级）；v2 增加预设字段（issue #1、#2） */
+    public static final int PROTOCOL_VERSION = 2;
 
     /** 序列化为字节数组（DataOutputStream，纯 Java） */
     public byte[] encode() {
@@ -75,6 +79,14 @@ public record GuiStatus(
             out.writeBoolean(allExceeded);
             out.writeLong(recoveryMillis);
             out.writeInt(worstPercent);
+            // v2（issue #1、#2）：预设名列表 + 当前玩家预设
+            out.writeInt(presets == null ? 0 : presets.size());
+            if (presets != null) {
+                for (String p : presets) {
+                    out.writeUTF(p == null ? "" : p);
+                }
+            }
+            out.writeUTF(playerPreset == null ? "" : playerPreset);
             out.flush();
             return bos.toByteArray();
         } catch (IOException e) {
@@ -120,9 +132,23 @@ public record GuiStatus(
             boolean allExceeded = in.readBoolean();
             long recovery = in.readLong();
             int worst = in.readInt();
+            // v2（issue #1、#2）：预设名列表 + 当前玩家预设（playerPreset 空串归一为 null = default）
+            int presetCount = in.readInt();
+            if (presetCount < 0 || presetCount > 64) {
+                return null;
+            }
+            List<String> presets = new ArrayList<>(presetCount);
+            for (int i = 0; i < presetCount; i++) {
+                String name = in.readUTF();
+                if (name != null && !name.isEmpty()) {
+                    presets.add(name);
+                }
+            }
+            String playerPreset = in.readUTF();
             return new GuiStatus(first, familiar, threshold, multiplier,
                     exemptByDefault, isExempt, inExemptList, isAdmin,
-                    List.copyOf(tiers), List.copyOf(lines), allExceeded, recovery, worst);
+                    List.copyOf(tiers), List.copyOf(lines), allExceeded, recovery, worst,
+                    List.copyOf(presets), playerPreset.isEmpty() ? null : playerPreset);
         } catch (IOException | RuntimeException e) {
             return null; // 截断/损坏/版本不符：安全回退
         }
