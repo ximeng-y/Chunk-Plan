@@ -265,7 +265,7 @@ public final class ChunkPlanMessages {
      */
     public static String helpMessage(boolean zh) {
         if (zh) {
-            // 坑 #32：标签措辞（调整计费窗口开关/刷新时长/额度上限/高速移动倍率/开关管理员计费），
+            // 坑 #32：标签措辞（调整计费窗口开关/刷新时长/额度上限/高速移动倍率/开关管理员豁免），
             // 管道参数加空格（<true | false> 等，纯展示，不影响实际输入）
             return "§e--- ChunkPlan 管理员帮助 ---\n"
                     + "§f查询：§a/chunkplan check [玩家]\n"
@@ -276,7 +276,7 @@ public final class ChunkPlanMessages {
                     + "§f高速移动倍率：§a/chunkplan config highSpeedMultiplier <数值>§f（1.00~1000.00）\n"
                     + "§f新区块费用：§a/chunkplan config firstEntryFee <数值>§f（0.00~999999999.99）\n"
                     + "§f旧区块费用：§a/chunkplan config familiarEntryFee <数值>§f（0.00~999999999.99）\n"
-                    + "§f开关管理员计费：§a/chunkplan config exemptByDefault <true | false>\n"
+                    + "§f开关管理员豁免：§a/chunkplan config exemptByDefault <true | false>\n"
                     + "§f重载配置：§a/chunkplan reload\n"
                     + "§7数值允许整数或最多 2 位小数；所有修改写入配置文件并立即生效";
         }
@@ -289,7 +289,7 @@ public final class ChunkPlanMessages {
                 + "§fHigh-speed movement multiplier: §a/chunkplan config highSpeedMultiplier <number>§f (1.00~1000.00)\n"
                 + "§fNew chunk fee: §a/chunkplan config firstEntryFee <number>§f (0.00~999999999.99)\n"
                 + "§fExplored chunk fee: §a/chunkplan config familiarEntryFee <number>§f (0.00~999999999.99)\n"
-                + "§fToggle admin billing: §a/chunkplan config exemptByDefault <true | false>\n"
+                + "§fToggle admin exemption: §a/chunkplan config exemptByDefault <true | false>\n"
                 + "§fReload: §a/chunkplan reload\n"
                 + "§7Numbers may be integers or up to 2 decimals; all changes are written to the config file and take effect immediately";
     }

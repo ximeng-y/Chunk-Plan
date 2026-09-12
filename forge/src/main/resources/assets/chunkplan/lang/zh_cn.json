@@ -1,7 +1,7 @@
 {
   "key.chunkplan.open_gui": "打开探索额度界面",
   "gui.chunkplan.adequate": "额度充足，可正常探索",
-  "gui.chunkplan.admin_billing": "管理员计费",
+  "gui.chunkplan.admin_billing": "管理员豁免",
   "gui.chunkplan.all_off": "全部关闭",
   "gui.chunkplan.all_on": "全部开启",
   "gui.chunkplan.all_windows": "全部窗口",

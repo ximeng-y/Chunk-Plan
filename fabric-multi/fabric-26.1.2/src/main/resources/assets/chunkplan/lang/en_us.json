@@ -1,7 +1,7 @@
 {
   "key.chunkplan.open_gui": "Open Exploration Quota GUI",
   "gui.chunkplan.adequate": "Plenty of quota",
-  "gui.chunkplan.admin_billing": "Admin billing",
+  "gui.chunkplan.admin_billing": "Admin exemption",
   "gui.chunkplan.all_off": "All off",
   "gui.chunkplan.all_on": "All on",
   "gui.chunkplan.all_windows": "All windows",
