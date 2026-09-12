@@ -178,6 +178,10 @@ public final class ChunkPlanMessages {
                 }
             }
         }
+        // 按玩家预设覆盖（issue #2）：显示额度规则来源（null = 跟随全局 default，不显示）
+        if (status.presetName() != null) {
+            sb.append(zh ? "\n§7  当前应用预设：§b" : "\n§7  Active preset: §b").append(status.presetName());
+        }
         // 豁免状态提示（坑 #21：OP 默认豁免是设计语义，显式告知避免误判为故障；金色强调）
         if (isExempt) {
             if (zh) {
@@ -277,6 +281,9 @@ public final class ChunkPlanMessages {
                     + "§f新区块费用：§a/chunkplan config firstEntryFee <数值>§f（0.00~999999999.99）\n"
                     + "§f旧区块费用：§a/chunkplan config familiarEntryFee <数值>§f（0.00~999999999.99）\n"
                     + "§f开关管理员豁免：§a/chunkplan config exemptByDefault <true | false>\n"
+                    + "§f预设：§a/chunkplan preset list | save <名称> | delete <名称>§f，save 将当前配置存为预设（存储在服务端）\n"
+                    + "§f应用预设到全体：§a/chunkplan preset apply <名称>§f，写入全局配置，需确认\n"
+                    + "§f按玩家应用预设：§a/chunkplan preset player <玩家 | @a> [名称 | default]§f，缺省名称时查询当前分配\n"
                     + "§f重载配置：§a/chunkplan reload\n"
                     + "§7数值允许整数或最多 2 位小数；所有修改写入配置文件并立即生效";
         }
@@ -290,6 +297,9 @@ public final class ChunkPlanMessages {
                 + "§fNew chunk fee: §a/chunkplan config firstEntryFee <number>§f (0.00~999999999.99)\n"
                 + "§fExplored chunk fee: §a/chunkplan config familiarEntryFee <number>§f (0.00~999999999.99)\n"
                 + "§fToggle admin exemption: §a/chunkplan config exemptByDefault <true | false>\n"
+                + "§fPresets: §a/chunkplan preset list | save <name> | delete <name>§f - save stores the current config as a preset (stored server-side)\n"
+                + "§fApply a preset to everyone: §a/chunkplan preset apply <name>§f - writes the global config (needs confirmation)\n"
+                + "§fApply a preset per player: §a/chunkplan preset player <player | @a> [name | default]§f - omit the name to query the current assignment\n"
                 + "§fReload: §a/chunkplan reload\n"
                 + "§7Numbers may be integers or up to 2 decimals; all changes are written to the config file and take effect immediately";
     }
