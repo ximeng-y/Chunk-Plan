@@ -283,6 +283,12 @@ public final class QuotaEngine {
         return presetStore.assignment(uuid);
     }
 
+    /** 玩家最后所在维度（v4 lastDim；独立模式 check 离线玩家展示用；无记录返回 null） */
+    public String lastDimOf(UUID uuid) {
+        PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
+        return data.lastDim();
+    }
+
     /**
      * 保存（或同名覆盖）预设；成功后刷新正在使用该预设的玩家覆盖（同名覆盖即改其生效值）。
      * 校验失败（名称/档位非法）返回 false。

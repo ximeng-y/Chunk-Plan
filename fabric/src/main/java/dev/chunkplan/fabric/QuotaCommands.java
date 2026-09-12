@@ -66,6 +66,13 @@ public final class QuotaCommands {
         record ApplyPreset(String name, long expireMillis) implements PendingAction {
         }
 
+        /** 关闭维度窗口（issue #3，tier=0 表示该维度全部窗口；清空该维度该窗口所有玩家记录） */
+        record DisableDimWindow(String dim, int tier, long expireMillis) implements PendingAction {
+        }
+
+        /** 调低维度额度上限（issue #3）：维度 + 档位 + 新值原文（可能引发在线玩家无警告踢出） */
+        record LowerDimLimit(String dim, int tier, String rawValue, long expireMillis) implements PendingAction {
+        }
     }
 
     private QuotaCommands() {
@@ -126,7 +133,54 @@ public final class QuotaCommands {
                         .then(Commands.literal("familiarEntryFee")
                                 .requires(s -> s.hasPermission(2))
                                 .then(Commands.argument("number", StringArgumentType.word())
-                                        .executes(ctx -> configFamiliarEntryFee(ctx)))))
+                                        .executes(ctx -> configFamiliarEntryFee(ctx))))
+                        .then(Commands.literal("dimensionMode")
+                                .requires(s -> s.hasPermission(2))
+                                .then(Commands.argument("mode", StringArgumentType.word())
+                                        .suggests(QuotaCommands::suggestDimensionMode)
+                                        .executes(ctx -> configDimensionMode(ctx))))
+                        .then(Commands.literal("dimension")
+                                .requires(s -> s.hasPermission(2))
+                                .then(Commands.argument("dim", net.minecraft.commands.arguments.ResourceLocationArgument.id())
+                                        .suggests(QuotaCommands::suggestDimensionKeys)
+                                        .then(Commands.literal("billing")
+                                                .then(Commands.argument("state", StringArgumentType.word())
+                                                        .suggests(QuotaCommands::suggestOnOff)
+                                                        .executes(ctx -> configDimBilling(ctx))))
+                                        .then(Commands.literal("spawn")
+                                                .then(Commands.argument("x", StringArgumentType.word())
+                                                        .then(Commands.argument("y", StringArgumentType.word())
+                                                                .then(Commands.argument("z", StringArgumentType.word())
+                                                                        .executes(ctx -> configDimSpawn(ctx))))))
+                                        .then(Commands.literal("window")
+                                                .then(Commands.argument("tier", StringArgumentType.word())
+                                                        .suggests(QuotaCommands::suggestTiers)
+                                                        .then(Commands.argument("state", StringArgumentType.word())
+                                                                .suggests(QuotaCommands::suggestOnOff)
+                                                                .executes(ctx -> configDimWindow(ctx)))))
+                                        .then(Commands.literal("windowTime")
+                                                .then(Commands.argument("tier", StringArgumentType.word())
+                                                        .suggests(QuotaCommands::suggestTiersNoAll)
+                                                        .then(Commands.argument("window", StringArgumentType.word())
+                                                                .suggests(QuotaCommands::suggestWindowPresets)
+                                                                .executes(ctx -> configDimWindowTime(ctx)))))
+                                        .then(Commands.literal("windowLimit")
+                                                .then(Commands.argument("tier", StringArgumentType.word())
+                                                        .suggests(QuotaCommands::suggestTiersNoAll)
+                                                        .then(Commands.argument("number", StringArgumentType.word())
+                                                                .executes(ctx -> configDimWindowLimit(ctx)))))))
+                        .then(Commands.literal("redirect")
+                                .requires(s -> s.hasPermission(2))
+                                .then(Commands.argument("state", StringArgumentType.word())
+                                        .suggests(QuotaCommands::suggestOnOff)
+                                        .executes(ctx -> configRedirect(ctx))))
+                        .then(Commands.literal("redirectTarget")
+                                .requires(s -> s.hasPermission(2))
+                                .then(Commands.argument("slot", StringArgumentType.word())
+                                        .suggests(QuotaCommands::suggestRedirectSlots)
+                                        .then(Commands.argument("dim", net.minecraft.commands.arguments.ResourceLocationArgument.id())
+                                                .suggests(QuotaCommands::suggestRedirectTargetValues)
+                                                .executes(ctx -> configRedirectTarget(ctx))))))
                 .then(Commands.literal("preset")
                         .then(Commands.literal("list")
                                 .requires(s -> s.hasPermission(2))
@@ -166,7 +220,9 @@ public final class QuotaCommands {
                     "Specify a player from console: /chunkplan check <player>")));
             return 0;
         }
-        sendStatus(ctx, player.getUUID(), player.getGameProfile().getName(), true, player.hasPermissions(2));
+        String dimKey = ChunkPlanFabric.engine != null && ChunkPlanFabric.engine.isIndependentMode()
+                ? player.level().dimension().location().toString() : null;
+        sendStatus(ctx, player.getUUID(), player.getGameProfile().getName(), true, player.hasPermissions(2), dimKey);
         return 1;
     }
 
@@ -177,12 +233,27 @@ public final class QuotaCommands {
             return 0;
         }
         // 目标在线：权限状态可取；离线玩家 OP 状态不可查，仅判豁免名单（不误报 OP 豁免）
+        QuotaEngine eng = ChunkPlanFabric.engine;
         ServerPlayer online = DevCommands.findByUuid(ctx.getSource().getServer(), profile.getId());
-        sendStatus(ctx, profile.getId(), profileName(profile), false, online != null && online.hasPermissions(2));
+        // 独立模式（issue #3）：仅展示目标玩家当前维度用量；离线玩家取最后在线维度
+        String dimKey = null;
+        if (eng != null && eng.isIndependentMode()) {
+            dimKey = online != null
+                    ? online.level().dimension().location().toString()
+                    : eng.lastDimOf(profile.getId());
+            if (dimKey == null) {
+                ctx.getSource().sendFailure(Component.literal(t(ctx,
+                        "维度独立模式下暂无该玩家的维度记录",
+                        "Per-dimension mode: no dimension record for this player yet")));
+                return 0;
+            }
+        }
+        sendStatus(ctx, profile.getId(), profileName(profile), false, online != null && online.hasPermissions(2), dimKey);
         return 1;
     }
 
-    private static void sendStatus(CommandContext<CommandSourceStack> ctx, UUID uuid, String name, boolean self, boolean isOp) {
+    private static void sendStatus(CommandContext<CommandSourceStack> ctx, UUID uuid, String name, boolean self,
+                                   boolean isOp, String dimKey) {
         QuotaEngine eng = ChunkPlanFabric.engine;
         if (eng == null) {
             ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
@@ -191,8 +262,9 @@ public final class QuotaCommands {
         boolean zh = isZh(ctx);
         // 豁免判定在命令侧：查他人时离线玩家权限不可查，仅判豁免名单（坑 #21 语义）
         boolean inList = eng.getConfig().exemptPlayers().contains(uuid);
-        String text = ChunkPlanMessages.checkStatusText(name, eng.quotaStatus(uuid), self, zh,
-                eng.isExempt(uuid, isOp), inList);
+        QuotaEngine.QuotaStatus status = dimKey == null ? eng.quotaStatus(uuid) : eng.quotaStatus(uuid, dimKey);
+        String text = ChunkPlanMessages.checkStatusText(name, status, self, zh,
+                eng.isExempt(uuid, isOp), inList, dimKey);
         ctx.getSource().sendSuccess(() -> Component.literal(text), false);
     }
 
@@ -229,7 +301,8 @@ public final class QuotaCommands {
         }
         String targetArg = parts[0];
         String tierArg = parts.length == 2 ? parts[1] : null;
-        // 窗口参数：缺省 = all（全部档位）；显式选择未启用档位无效（坑 #30）
+        // 窗口参数：缺省 = all（全部档位）；显式选择未启用档位无效（坑 #30）；
+        // 独立模式各维度窗口互不相同，按"启用任意处即可清"放行（reset 清全部维度，issue #3）
         Set<Integer> tiers = null;
         if (tierArg != null) {
             if (!tierArg.equals("all")) {
@@ -240,7 +313,7 @@ public final class QuotaCommands {
                             "Unknown tier: " + tierArg + " (tier1~tier4 or all)")));
                     return 0;
                 }
-                if (findLine(eng, tier) == null) {
+                if (!eng.isIndependentMode() && findLine(eng, tier) == null) {
                     ctx.getSource().sendFailure(Component.literal(t(ctx,
                             "该窗口未启用（tier" + tier + "），无需重置",
                             "This window is not enabled (tier" + tier + "), nothing to reset")));
@@ -265,6 +338,10 @@ public final class QuotaCommands {
         if (tiers == null) {
             zhScope = "全部";
             enScope = "all windows";
+        } else if (eng.isIndependentMode()) {
+            // 独立模式各维度窗口互不相同：范围以档位身份表述（tierN）
+            zhScope = "tier" + tiers.iterator().next();
+            enScope = "tier" + tiers.iterator().next();
         } else {
             long winSec = findLine(eng, tiers.iterator().next()).windowSeconds();
             zhScope = ChunkPlanMessages.windowName(winSec, true);
@@ -312,6 +389,10 @@ public final class QuotaCommands {
             if (r.tiers() == null) {
                 zhScope = "全部";
                 enScope = "all windows";
+            } else if (eng.isIndependentMode()) {
+                // 独立模式各维度窗口互不相同：范围以档位身份表述（issue #3）
+                zhScope = "tier" + r.tiers().iterator().next();
+                enScope = "tier" + r.tiers().iterator().next();
             } else {
                 int t = r.tiers().iterator().next();
                 QuotaConfig.Line ln = findLine(eng, t);
@@ -404,6 +485,48 @@ public final class QuotaCommands {
                 return 0;
             }
         }
+        if (req instanceof PendingAction.LowerDimLimit l) {
+            // 调低维度额度上限（issue #3）：改写该维度四档快照中对应档的 limit
+            List<QuotaTiers.Tier> tiers = eng.getDimensionStore().tiers(l.dim());
+            if (tiers == null || tiers.size() != 4) {
+                ctx.getSource().sendFailure(Component.literal(t(ctx,
+                        "§c维度配置已失效，详见服务端日志",
+                        "§cDimension config is no longer valid; see server log for details")));
+                return 0;
+            }
+            List<QuotaTiers.Tier> updated = new ArrayList<>(4);
+            for (int i = 0; i < 4; i++) {
+                QuotaTiers.Tier t = tiers.get(i);
+                updated.add(new QuotaTiers.Tier(t.enabled(), t.window(),
+                        i + 1 == l.tier() ? Double.parseDouble(l.rawValue()) : t.limit()));
+            }
+            if (!eng.setDimensionTiers(l.dim(), updated)) {
+                ctx.getSource().sendFailure(Component.literal(t(ctx,
+                        "§c写入维度配置失败（档位校验未通过）",
+                        "§cFailed to write dimension config (tier validation failed)")));
+                return 0;
+            }
+            String win = windowLabelOf(tiers.get(l.tier() - 1).window(), zh);
+            ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                    "§a已调整维度 " + l.dim() + " 的 " + win + " 额度为 §b" + l.rawValue() + "§a",
+                    "§aAdjusted the " + win + " limit of dimension " + l.dim() + " to §b" + l.rawValue() + "§a")), true);
+            return 1;
+        }
+        if (req instanceof PendingAction.DisableDimWindow d) {
+            // 关闭维度窗口（issue #3）：清空该维度该窗口所有玩家记录，重开从 0 起（坑 #30 语义）
+            if (d.tier() == 0) {
+                eng.clearDimSpendForAll(d.dim(), null);
+            } else {
+                eng.clearDimSpendForAll(d.dim(), Set.of(d.tier()));
+            }
+            String tierName = d.tier() == 0
+                    ? (zh ? "全部窗口" : "all windows")
+                    : (zh ? "窗口 tier" + d.tier() : "window tier" + d.tier());
+            ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                    "§a已关闭维度 " + d.dim() + " 的 " + tierName + "（该维度该窗口所有玩家记录已清空）",
+                    "§aDisabled " + tierName + " of dimension " + d.dim() + " (records cleared for all players)")), true);
+            return 1;
+        }
         if (req instanceof PendingAction.ApplyPreset a) {
             // 应用预设到全体（issue #1）：把预设 12 值写回配置文件 + loadAndApplyConfig 热生效
             PresetStore.Preset p = eng.getPresetStore().get(a.name());
@@ -462,6 +585,13 @@ public final class QuotaCommands {
         }
         String tierArg = StringArgumentType.getString(ctx, "tier");
         String stateArg = StringArgumentType.getString(ctx, "state");
+        if (eng.isIndependentMode()) {
+            // 维度独立模式（issue #3）：全局额度线不生效，指令层面同步阻止调整（用户拍板）
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c维度独立模式下全局额度线不生效，请使用 /chunkplan config dimension <维度> window ... 命令族",
+                    "§cGlobal quota lines are inactive in per-dimension mode; use /chunkplan config dimension <dim> window ...")));
+            return 0;
+        }
         if (!stateArg.equals("on") && !stateArg.equals("off")) {
             ctx.getSource().sendFailure(Component.literal(t(ctx, "开关参数需为 on 或 off", "State must be on or off")));
             return 0;
@@ -546,6 +676,13 @@ public final class QuotaCommands {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
                     "tier" + tier + " 可选窗口: " + String.join(" / ", presets),
                     "Valid windows for tier" + tier + ": " + String.join(" / ", presets))));
+            return 0;
+        }
+        if (eng.isIndependentMode()) {
+            // 维度独立模式（issue #3）：全局额度线不生效，指令层面同步阻止调整
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c维度独立模式下全局额度线不生效，请使用 /chunkplan config dimension <维度> windowTime ... 命令族",
+                    "§cGlobal quota lines are inactive in per-dimension mode; use /chunkplan config dimension <dim> windowTime ...")));
             return 0;
         }
         if (findLine(eng, tier) == null) {
@@ -687,6 +824,13 @@ public final class QuotaCommands {
                     "未知层级（可选 tier1~tier4）", "Unknown tier (tier1~tier4)")));
             return 0;
         }
+        if (eng.isIndependentMode()) {
+            // 维度独立模式（issue #3）：全局额度线不生效，指令层面同步阻止调整
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c维度独立模式下全局额度线不生效，请使用 /chunkplan config dimension <维度> windowLimit ... 命令族",
+                    "§cGlobal quota lines are inactive in per-dimension mode; use /chunkplan config dimension <dim> windowLimit ...")));
+            return 0;
+        }
         String raw = StringArgumentType.getString(ctx, "number");
         NumericParser.Parsed p = NumericParser.parseLimit(raw);
         if (!p.isOk()) {
@@ -733,6 +877,434 @@ public final class QuotaCommands {
                     "§c写入配置失败，详见服务端日志",
                     "§cFailed to write config; see server log for details")));
             return 0;
+        }
+    }
+
+    // ---------- 维度计费命令族（issue #3） ----------
+
+    /** /chunkplan config dimensionMode <shared|independent>：切换维度计费模式（独立模式前置校验全部 live 维度落地坐标） */
+    private static int configDimensionMode(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        String mode = StringArgumentType.getString(ctx, "mode");
+        if (!mode.equals("shared") && !mode.equals("independent")) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "模式需为 shared（共享全局额度线）或 independent（每维度独立）",
+                    "Mode must be shared (global quota lines) or independent (per-dimension)")));
+            return 0;
+        }
+        List<String> liveDims = ChunkPlanFabric.liveDims(ctx.getSource().getServer());
+        List<String> missing = eng.setDimensionMode(mode, liveDims);
+        if (!missing.isEmpty()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c无法启用维度独立计费，以下维度缺少合法落地坐标（先用 /chunkplan config dimension <维度> spawn <x> <y> <z> 配置）：§f"
+                            + String.join("、", missing),
+                    "§cCannot enable per-dimension billing; these dimensions lack valid landing coordinates (set with /chunkplan config dimension <dim> spawn <x> <y> <z>): §f"
+                            + String.join(", ", missing))));
+            return 0;
+        }
+        ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                mode.equals("independent")
+                        ? "§a已切换到维度独立计费（各维度额度线已用当前全局配置初始化；全局 window/preset apply 已停用）"
+                        : "§a已切换到共享计费（全局额度线与预设恢复生效；维度配置保留）",
+                mode.equals("independent")
+                        ? "§aSwitched to per-dimension billing (each dimension initialized from the current global config; global window/preset apply are now inactive)"
+                        : "§aSwitched to shared billing (global quota lines and presets are back; dimension configs kept)")), true);
+        return 1;
+    }
+
+    /** 校验维度参数：必须在世界 live 维度列表中（动态 getAllLevels，防手滑写错 key） */
+    private static String requireLiveDim(CommandContext<CommandSourceStack> ctx, QuotaEngine eng, String dim) {
+        if (!ChunkPlanFabric.liveDims(ctx.getSource().getServer()).contains(dim)) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "未知维度: " + dim + "（维度列表来自服务器动态读取，含 mod 注册维度）",
+                    "Unknown dimension: " + dim + " (dimensions are read live from the server, including mod-registered ones)")));
+            return null;
+        }
+        return dim;
+    }
+
+    /** /chunkplan config dimension <dim> billing <on|off>：维度计费开关（两种模式通用，关 = 不计费可自由进入） */
+    private static int configDimBilling(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        String dim = requireLiveDim(ctx, eng, net.minecraft.commands.arguments.ResourceLocationArgument.getId(ctx, "dim").toString());
+        if (dim == null) {
+            return 0;
+        }
+        String stateArg = StringArgumentType.getString(ctx, "state");
+        if (!stateArg.equals("on") && !stateArg.equals("off")) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "开关参数需为 on 或 off", "State must be on or off")));
+            return 0;
+        }
+        boolean enable = stateArg.equals("on");
+        eng.setDimensionBilling(dim, enable);
+        ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                enable ? "§a已开启维度 " + dim + " 的计费" : "§a已关闭维度 " + dim + " 的计费（该维度不计费、可自由进入）",
+                enable ? "§aEnabled billing for dimension " + dim
+                       : "§aDisabled billing for dimension " + dim + " (not billed, free to explore)")), true);
+        return 1;
+    }
+
+    /** /chunkplan config dimension <dim> spawn <x> <y> <z>：设置默认落地坐标（/tp 数据规范校验） */
+    private static int configDimSpawn(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        String dim = requireLiveDim(ctx, eng, net.minecraft.commands.arguments.ResourceLocationArgument.getId(ctx, "dim").toString());
+        if (dim == null) {
+            return 0;
+        }
+        double x;
+        double y;
+        double z;
+        try {
+            x = Double.parseDouble(StringArgumentType.getString(ctx, "x"));
+            y = Double.parseDouble(StringArgumentType.getString(ctx, "y"));
+            z = Double.parseDouble(StringArgumentType.getString(ctx, "z"));
+        } catch (NumberFormatException e) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c坐标需为数字（同 /tp 数据规范，x/z ∈ ±30000000，y ∈ [-2048, 4096]）",
+                    "§cCoordinates must be numbers (same spec as /tp; x/z within ±30000000, y within [-2048, 4096])")));
+            return 0;
+        }
+        if (!eng.setDimensionSpawn(dim, x, y, z)) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c坐标非法：x/z ∈ ±30000000，y ∈ [-2048, 4096]",
+                    "§cInvalid coordinates: x/z within ±30000000, y within [-2048, 4096]")));
+            return 0;
+        }
+        ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                "§a已设置维度 " + dim + " 的默认落地坐标：§b" + x + ", " + y + ", " + z,
+                "§aSet the landing coordinates of dimension " + dim + " to §b" + x + ", " + y + ", " + z)), true);
+        return 1;
+    }
+
+    /** /chunkplan config dimension <dim> window <tier|all> <on|off>：维度窗口开关（仅独立模式；off 清该维度记录需 confirm） */
+    private static int configDimWindow(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        String dim = requireLiveDim(ctx, eng, net.minecraft.commands.arguments.ResourceLocationArgument.getId(ctx, "dim").toString());
+        if (dim == null) {
+            return 0;
+        }
+        if (!eng.isIndependentMode()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c维度 window 命令仅在维度独立模式下可用；共享模式请使用 /chunkplan config window ...",
+                    "§cThe dimension window command is only available in per-dimension mode; use /chunkplan config window ... in shared mode")));
+            return 0;
+        }
+        List<QuotaTiers.Tier> tiers = eng.getDimensionStore().tiers(dim);
+        if (tiers == null || tiers.size() != 4) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c该维度额度线尚未初始化（切换到独立模式时会自动初始化）",
+                    "§cQuota lines of this dimension are not initialized yet (they are initialized when switching to per-dimension mode)")));
+            return 0;
+        }
+        String tierArg = StringArgumentType.getString(ctx, "tier");
+        String stateArg = StringArgumentType.getString(ctx, "state");
+        if (!stateArg.equals("on") && !stateArg.equals("off")) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "开关参数需为 on 或 off", "State must be on or off")));
+            return 0;
+        }
+        boolean enable = stateArg.equals("on");
+        boolean all = tierArg.equals("all");
+        int tier = all ? 0 : parseTier(tierArg);
+        if (!all && tier < 0) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "未知层级: " + tierArg + "（可选 tier1~tier4 或 all）",
+                    "Unknown tier: " + tierArg + " (tier1~tier4 or all)")));
+            return 0;
+        }
+        boolean zh = isZh(ctx);
+        if (enable) {
+            // 开启不清空记录：沿用该维度既有的窗口/上限原值
+            List<QuotaTiers.Tier> updated = new ArrayList<>(4);
+            for (int i = 0; i < 4; i++) {
+                QuotaTiers.Tier t = tiers.get(i);
+                updated.add(new QuotaTiers.Tier(all || i + 1 == tier || t.enabled(), t.window(), t.limit()));
+            }
+            if (!eng.setDimensionTiers(dim, updated)) {
+                ctx.getSource().sendFailure(Component.literal(t(ctx,
+                        "§c写入维度配置失败（档位校验未通过）",
+                        "§cFailed to write dimension config (tier validation failed)")));
+                return 0;
+            }
+            String tierName = all ? (zh ? "全部窗口" : "all windows") : "tier" + tier;
+            ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                    "§a已开启维度 " + dim + " 的 " + tierName,
+                    "§aEnabled " + tierName + " of dimension " + dim)), true);
+            return 1;
+        }
+        // 关闭：清空该维度该窗口所有玩家记录 -> confirm
+        pending = new PendingAction.DisableDimWindow(dim, tier, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS);
+        String tierName = all ? (zh ? "全部窗口" : "all windows") : "tier" + tier;
+        Component msg = Component.literal(t(ctx,
+                "§a将关闭维度 " + dim + " 的 " + tierName + "，并清空该维度该窗口所有玩家的记录，",
+                "§aThis will disable " + tierName + " of dimension " + dim + " and clear all players' records for it, "))
+                .append(ChunkPlanMessages.confirmLink(zh));
+        ctx.getSource().sendSuccess(() -> msg, true);
+        return 1;
+    }
+
+    /** /chunkplan config dimension <dim> windowTime <tier> <预设时长>：调整维度窗口时长（仅独立模式） */
+    private static int configDimWindowTime(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        String dim = requireLiveDim(ctx, eng, net.minecraft.commands.arguments.ResourceLocationArgument.getId(ctx, "dim").toString());
+        if (dim == null) {
+            return 0;
+        }
+        if (!eng.isIndependentMode()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c维度 windowTime 命令仅在维度独立模式下可用；共享模式请使用 /chunkplan config windowTime ...",
+                    "§cThe dimension windowTime command is only available in per-dimension mode; use /chunkplan config windowTime ... in shared mode")));
+            return 0;
+        }
+        List<QuotaTiers.Tier> tiers = eng.getDimensionStore().tiers(dim);
+        if (tiers == null || tiers.size() != 4) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c该维度额度线尚未初始化（切换到独立模式时会自动初始化）",
+                    "§cQuota lines of this dimension are not initialized yet (they are initialized when switching to per-dimension mode)")));
+            return 0;
+        }
+        int tier = parseTier(StringArgumentType.getString(ctx, "tier"));
+        if (tier < 0) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "未知层级（可选 tier1~tier4）", "Unknown tier (tier1~tier4)")));
+            return 0;
+        }
+        String windowArg = StringArgumentType.getString(ctx, "window");
+        List<String> presets = presetsOf(tier);
+        if (!presets.contains(windowArg)) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "tier" + tier + " 可选窗口: " + String.join(" / ", presets),
+                    "Valid windows for tier" + tier + ": " + String.join(" / ", presets))));
+            return 0;
+        }
+        if (!tiers.get(tier - 1).enabled()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "该窗口未启用，请先使用 /chunkplan config dimension " + dim + " window tier" + tier + " on 开启",
+                    "This window is not enabled. Enable it first with /chunkplan config dimension " + dim + " window tier" + tier + " on")));
+            return 0;
+        }
+        List<QuotaTiers.Tier> updated = new ArrayList<>(4);
+        for (int i = 0; i < 4; i++) {
+            QuotaTiers.Tier t = tiers.get(i);
+            updated.add(new QuotaTiers.Tier(t.enabled(), i + 1 == tier ? windowArg : t.window(), t.limit()));
+        }
+        if (!eng.setDimensionTiers(dim, updated)) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c写入维度配置失败（档位校验未通过）",
+                    "§cFailed to write dimension config (tier validation failed)")));
+            return 0;
+        }
+        long secs = DurationParser.parseSeconds(windowArg); // 预置值，解析必成功
+        ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                "§a已调整维度 " + dim + " 的计费窗口刷新时长为 §b" + ChunkPlanMessages.windowName(secs, true) + "§a",
+                "§aAdjusted the billing window refresh duration of dimension " + dim + " to §b"
+                        + ChunkPlanMessages.windowName(secs, false).toLowerCase() + "§a")), true);
+        return 1;
+    }
+
+    /** /chunkplan config dimension <dim> windowLimit <tier> <数值>：调整维度额度上限（仅独立模式；调低需 confirm） */
+    private static int configDimWindowLimit(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        String dim = requireLiveDim(ctx, eng, net.minecraft.commands.arguments.ResourceLocationArgument.getId(ctx, "dim").toString());
+        if (dim == null) {
+            return 0;
+        }
+        if (!eng.isIndependentMode()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c维度 windowLimit 命令仅在维度独立模式下可用；共享模式请使用 /chunkplan config windowLimit ...",
+                    "§cThe dimension windowLimit command is only available in per-dimension mode; use /chunkplan config windowLimit ... in shared mode")));
+            return 0;
+        }
+        List<QuotaTiers.Tier> tiers = eng.getDimensionStore().tiers(dim);
+        if (tiers == null || tiers.size() != 4) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c该维度额度线尚未初始化（切换到独立模式时会自动初始化）",
+                    "§cQuota lines of this dimension are not initialized yet (they are initialized when switching to per-dimension mode)")));
+            return 0;
+        }
+        int tier = parseTier(StringArgumentType.getString(ctx, "tier"));
+        if (tier < 0) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "未知层级（可选 tier1~tier4）", "Unknown tier (tier1~tier4)")));
+            return 0;
+        }
+        String raw = StringArgumentType.getString(ctx, "number");
+        NumericParser.Parsed p = NumericParser.parseLimit(raw);
+        if (!p.isOk()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c额度需为 1.00~999999999.99 的数字，最多 2 位小数",
+                    "§cLimit must be a number between 1.00 and 999999999.99 with at most 2 decimals")));
+            return 0;
+        }
+        if (!tiers.get(tier - 1).enabled()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "该窗口未启用，请先使用 /chunkplan config dimension " + dim + " window tier" + tier + " on 开启",
+                    "This window is not enabled. Enable it first with /chunkplan config dimension " + dim + " window tier" + tier + " on")));
+            return 0;
+        }
+        QuotaTiers.Tier current = tiers.get(tier - 1);
+        if (p.value() < current.limit()) {
+            // 调低：可能引发在线玩家无警告踢出 -> confirm
+            pending = new PendingAction.LowerDimLimit(dim, tier, raw, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS);
+            boolean zh = isZh(ctx);
+            String winZh = windowLabelOf(current.window(), true);
+            String winEn = windowLabelOf(current.window(), false).toLowerCase();
+            Component msg = Component.literal(t(ctx,
+                    "§a将把维度 " + dim + " 的 " + winZh + " 额度从 §b" + current.limit() + "§a 调低至 §b" + raw
+                            + "§a，可能引发部分玩家被无警告踢出，",
+                    "§aThis will lower the " + winEn + " limit of dimension " + dim + " from §b" + current.limit()
+                            + "§a to §b" + raw + "§a; some players may be kicked without warning, "))
+                    .append(ChunkPlanMessages.confirmLink(zh));
+            ctx.getSource().sendSuccess(() -> msg, true);
+            return 1;
+        }
+        List<QuotaTiers.Tier> updated = new ArrayList<>(4);
+        for (int i = 0; i < 4; i++) {
+            QuotaTiers.Tier t = tiers.get(i);
+            updated.add(new QuotaTiers.Tier(t.enabled(), t.window(), i + 1 == tier ? p.value() : t.limit()));
+        }
+        if (!eng.setDimensionTiers(dim, updated)) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c写入维度配置失败（档位校验未通过）",
+                    "§cFailed to write dimension config (tier validation failed)")));
+            return 0;
+        }
+        boolean zh = isZh(ctx);
+        ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                "§a已调整维度 " + dim + " 的 " + windowLabelOf(current.window(), zh) + " 额度为 §b" + raw + "§a",
+                "§aAdjusted the " + windowLabelOf(current.window(), zh) + " limit of dimension " + dim + " to §b" + raw + "§a")), true);
+        return 1;
+    }
+
+    /** /chunkplan config redirect <on|off>：耗尽重定向开关（仅独立模式） */
+    private static int configRedirect(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        if (!eng.isIndependentMode()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c耗尽重定向仅在维度独立模式下可用",
+                    "§cThe exhaustion redirect is only available in per-dimension mode")));
+            return 0;
+        }
+        String stateArg = StringArgumentType.getString(ctx, "state");
+        if (!stateArg.equals("on") && !stateArg.equals("off")) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "开关参数需为 on 或 off", "State must be on or off")));
+            return 0;
+        }
+        boolean enable = stateArg.equals("on");
+        eng.setRedirectOnExhaust(enable);
+        ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                enable ? "§a已开启耗尽重定向（额度耗尽的玩家将被传送到可进维度，全部不可进才封禁）"
+                       : "§a已关闭耗尽重定向（额度耗尽的玩家将被封禁）",
+                enable ? "§aEnabled the exhaustion redirect (exhausted players are teleported to an enterable dimension; banned only when none is enterable)"
+                       : "§aDisabled the exhaustion redirect (exhausted players are banned)")), true);
+        return 1;
+    }
+
+    /** /chunkplan config redirectTarget <primary|secondary|tertiary> <dim|none>：重定向槽位（仅独立模式） */
+    private static int configRedirectTarget(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        if (!eng.isIndependentMode()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c重定向槽位仅在维度独立模式下可用",
+                    "§cRedirect targets are only available in per-dimension mode")));
+            return 0;
+        }
+        String slotArg = StringArgumentType.getString(ctx, "slot");
+        int slot = switch (slotArg) {
+            case "primary" -> 0;
+            case "secondary" -> 1;
+            case "tertiary" -> 2;
+            default -> -1;
+        };
+        if (slot < 0) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "槽位需为 primary / secondary / tertiary",
+                    "Slot must be primary / secondary / tertiary")));
+            return 0;
+        }
+        String dimArg = net.minecraft.commands.arguments.ResourceLocationArgument.getId(ctx, "dim").toString();
+        String dim = null;
+        if (!dimArg.equals("none") && !dimArg.equals("minecraft:none")) {
+            dim = requireLiveDim(ctx, eng, dimArg);
+            if (dim == null) {
+                return 0;
+            }
+        }
+        eng.setRedirectTarget(slot, dim);
+        String[] slotNames = {t(ctx, "首选", "primary"), t(ctx, "次选", "secondary"), t(ctx, "备选", "tertiary")};
+        final String dimFinal = dim;
+        ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                "§a已设置" + slotNames[slot] + "维度：§b" + (dimFinal == null ? "无" : dimFinal),
+                "§aSet the " + slotNames[slot] + " redirect dimension: §b" + (dimFinal == null ? "none" : dimFinal))), true);
+        return 1;
+    }
+
+    // ---------- 维度命令补全（issue #3） ----------
+
+    private static CompletableFuture<Suggestions> suggestDimensionMode(CommandContext<CommandSourceStack> ctx, SuggestionsBuilder builder) {
+        return suggestFromList(builder, List.of("shared", "independent"));
+    }
+
+    /** 维度 key 补全：来自服务器动态 getAllLevels（含 mod 注册维度，issue #3） */
+    private static CompletableFuture<Suggestions> suggestDimensionKeys(CommandContext<CommandSourceStack> ctx, SuggestionsBuilder builder) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        List<String> dims = eng == null ? List.of()
+                : ChunkPlanFabric.liveDims(ctx.getSource().getServer());
+        return suggestFromList(builder, dims);
+    }
+
+    private static CompletableFuture<Suggestions> suggestRedirectSlots(CommandContext<CommandSourceStack> ctx, SuggestionsBuilder builder) {
+        return suggestFromList(builder, List.of("primary", "secondary", "tertiary"));
+    }
+
+    /** 重定向目标补全：live 维度 + none（清空槽位） */
+    private static CompletableFuture<Suggestions> suggestRedirectTargetValues(CommandContext<CommandSourceStack> ctx, SuggestionsBuilder builder) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        List<String> values = new ArrayList<>();
+        if (eng != null) {
+            values.addAll(ChunkPlanFabric.liveDims(ctx.getSource().getServer()));
+        }
+        values.add("none");
+        return suggestFromList(builder, values);
+    }
+
+    /** 维度窗口标签：原始写法（"5h"）转窗口名（"5小时内"）；解析失败回退原文 */
+    private static String windowLabelOf(String window, boolean zh) {
+        try {
+            return ChunkPlanMessages.windowName(DurationParser.parseSeconds(window), zh);
+        } catch (IllegalArgumentException e) {
+            return window;
         }
     }
 
@@ -828,6 +1400,13 @@ public final class QuotaCommands {
             return 0;
         }
         String name = StringArgumentType.getString(ctx, "name");
+        if (eng.isIndependentMode()) {
+            // 维度独立模式（issue #3，用户拍板）：预设仅保留玩家分配，apply 到全局被阻止（先于 default 别名检查）
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c维度独立模式下全局额度线不生效，preset apply 不可用；请用 /chunkplan preset player 按玩家分配，或 /chunkplan config dimension 按维度配置",
+                    "§cGlobal quota lines are inactive in per-dimension mode; preset apply is unavailable. Use /chunkplan preset player for per-player presets or /chunkplan config dimension for per-dimension config")));
+            return 0;
+        }
         if (name.equals("default")) {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
                     "default 即当前全局配置，无需应用",
@@ -1006,7 +1585,7 @@ public final class QuotaCommands {
         if (config.logFeeEvents()) {
             try {
                 eng.setFeeLogger(new FeeLogFile(ChunkPlanFabric.logFile));
-            } catch (java.io.IOException e) {
+            } catch (IOException e) {
                 org.slf4j.LoggerFactory.getLogger("ChunkPlan").warn("重建扣费日志失败: {}", e.getMessage());
             }
         } else {

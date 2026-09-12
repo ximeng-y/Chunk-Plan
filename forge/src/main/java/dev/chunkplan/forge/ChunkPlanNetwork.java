@@ -13,6 +13,7 @@ import dev.chunkplan.common.GuiStatus;
 import dev.chunkplan.common.PresetStore;
 import dev.chunkplan.common.QuotaConfig;
 import dev.chunkplan.common.QuotaEngine;
+import dev.chunkplan.common.QuotaTiers;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
@@ -186,8 +187,11 @@ public final class ChunkPlanNetwork {
     public static GuiStatus buildGuiStatus(QuotaEngine eng, ServerPlayer player) {
         UUID uuid = player.getUUID();
         QuotaConfig cfg = eng.getConfig();
-        QuotaEngine.QuotaStatus qs = eng.quotaStatus(uuid);
-        boolean isAdmin = player.hasPermissions(2);
+        boolean independent = eng.isIndependentMode();
+        String currentDim = player.level().dimension().location().toString();
+        List<String> liveDims = ChunkPlanForge.GameEvents.liveDims(player.getServer());
+        QuotaEngine.QuotaStatus qs = independent ? eng.quotaStatus(uuid, currentDim) : eng.quotaStatus(uuid);
+        boolean isAdmin = player.hasPermissions(2);;
         boolean isExempt = eng.isExempt(uuid, isAdmin);
         boolean inList = cfg.exemptPlayers().contains(uuid);
         int worst = qs.worstAlert() == null ? -1 : qs.worstAlert().percent();
@@ -195,12 +199,36 @@ public final class ChunkPlanNetwork {
         List<String> presetNames = isAdmin
                 ? eng.getPresetStore().all().stream().map(PresetStore.Preset::name).toList()
                 : List.of();
+        // v3（issue #3）：各维度该玩家的额度状态（用量页维度下拉，全体下发）
+        List<GuiStatus.DimLines> dimLines = new java.util.ArrayList<>();
+        for (String dim : liveDims) {
+            QuotaEngine.QuotaStatus ds = eng.quotaStatus(uuid, dim);
+            int dworst = ds.worstAlert() == null ? -1 : ds.worstAlert().percent();
+            dimLines.add(new GuiStatus.DimLines(dim, ds.lines(), ds.recoveryMillis(), dworst));
+        }
+        // v3：维度管理配置仅管理员下发；维度集合 = live 维度 ∪ store 已有条目（键去重排序）
+        GuiStatus.DimConfigStatus dimConfig = null;
+        if (isAdmin) {
+            java.util.TreeSet<String> keys = new java.util.TreeSet<>(liveDims);
+            keys.addAll(eng.getDimensionStore().configuredDimKeys());
+            List<GuiStatus.DimEntry> entries = new java.util.ArrayList<>();
+            for (String dim : keys) {
+                dev.chunkplan.common.DimensionStore.SpawnPoint sp = eng.getDimensionStore().spawn(dim);
+                List<QuotaTiers.Tier> tiers = eng.getDimensionStore().tiers(dim);
+                entries.add(new GuiStatus.DimEntry(dim, eng.getDimensionStore().isBillingEnabled(dim),
+                        sp != null, sp == null ? 0 : sp.x(), sp == null ? 0 : sp.y(), sp == null ? 0 : sp.z(),
+                        tiers == null ? List.of() : tiers));
+            }
+            dimConfig = new GuiStatus.DimConfigStatus(eng.getDimensionStore().redirectOnExhaust(),
+                    eng.getDimensionStore().redirectOrder(), entries);
+        }
         return new GuiStatus(
                 cfg.firstEntryFee(), cfg.familiarEntryFee(), cfg.highSpeedThreshold(), cfg.highSpeedMultiplier(),
                 cfg.exemptByDefault(), isExempt, inList, isAdmin,
                 isAdmin ? ForgeConfig.readRawTiers(resolveConfigFile(player)) : List.of(),
                 qs.lines(), qs.allExceeded(), qs.recoveryMillis(), worst,
-                presetNames, eng.getPlayerPresetName(uuid));
+                presetNames, eng.getPlayerPresetName(uuid),
+                independent ? 1 : 0, currentDim, liveDims, dimLines, dimConfig);
     }
 
     /** 实际生效的配置文件（坑 #38）：存档级 serverconfig 唯一位置，config/ 仅作异常时序兜底 */

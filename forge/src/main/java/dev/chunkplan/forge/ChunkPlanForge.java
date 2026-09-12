@@ -138,10 +138,18 @@ public final class ChunkPlanForge {
                     boolean languageReported = !DEFAULT_LANGUAGE.equals(player.getLanguage());
                     if (languageReported || player.server.getTickCount() >= deadline) {
                         LOGIN_PENDING.remove(player.getUUID());
-                        if (engine.isAllLinesExceeded(player.getUUID())) {
+                        if (engine.isIndependentMode()) {
+                            // 维度独立模式登录闸门（issue #3 拍板口径）：出生维度与其它维度都不可进才拦截
+                            String dimKey = player.level().dimension().location().toString();
+                            if (!engine.isDimEnterable(player.getUUID(), dimKey)
+                                    && !engine.anyDimEnterable(player.getUUID(), liveDims(player.server))) {
+                                applyBan(player, engine.earliestRecoveryAcrossDims(
+                                        player.getUUID(), liveDims(player.server)));
+                                return;
+                            }
+                        } else if (engine.isAllLinesExceeded(player.getUUID())) {
                             // 登录闸门：额度仍满，以玩家语言渲染公告拦截（此刻语言必然已上报）
-                            QuotaEngine.QuotaStatus status = engine.quotaStatus(player.getUUID());
-                            applyBan(player, status.recoveryMillis());
+                            applyBan(player, engine.quotaStatus(player.getUUID()).recoveryMillis());
                             return;
                         }
                         sendLoginWelcome(player);
@@ -151,15 +159,21 @@ public final class ChunkPlanForge {
                 boolean exempt = engine.isExempt(uuid, player.hasPermissions(2));
                 QuotaEngine.TickResult result = engine.onPlayerTick(uuid, exempt,
                         player.level().dimension().location().toString(),
-                        player.getX(), player.getY(), player.getZ());
-                if (result.type() == QuotaEngine.ResultType.BAN) {
-                    // 待决期间语言可能仍未就绪：引擎每 tick 判满（坑 #30）会先于闸门返回 BAN，
+                        player.getX(), player.getY(), player.getZ(), liveDims(player.server));
+                if (result.type() == QuotaEngine.ResultType.REDIRECT
+                        || result.type() == QuotaEngine.ResultType.BAN) {
+                    // 待决期间语言可能仍未就绪：引擎每 tick 判满（坑 #30）会先于闸门返回 BAN/REDIRECT，
                     // 此刻落地公告又是英文（坑 #38 同源时序）——暂不落地；引擎无状态变化，
                     // 后续 tick 会重判满，由闸门在语言就绪后统一执行
                     if (LOGIN_PENDING.containsKey(player.getUUID())) {
                         return;
                     }
-                    applyBan(player, result.banUntilMillis());
+                    if (result.type() == QuotaEngine.ResultType.REDIRECT) {
+                        // 维度独立模式耗尽重定向（issue #3）：还有可进维度就传送过去而非封禁
+                        applyRedirect(player, result.redirectDim());
+                    } else {
+                        applyBan(player, result.banUntilMillis());
+                    }
                 } else {
                     // 额度百分比阈值提示（坑 #28）：逐条发送；tick 时 client_information 已到达，语言正确
                     for (QuotaEngine.WindowAlert alert : result.alerts()) {
@@ -199,8 +213,12 @@ public final class ChunkPlanForge {
             }
             boolean zh = ChunkPlanMessages.isChinese(player.getLanguage());
             boolean inList = eng.getConfig().exemptPlayers().contains(player.getUUID());
+            String dimKey = eng.isIndependentMode()
+                    ? player.level().dimension().location().toString() : null;
+            QuotaEngine.QuotaStatus status = dimKey == null
+                    ? eng.quotaStatus(player.getUUID()) : eng.quotaStatus(player.getUUID(), dimKey);
             player.sendSystemMessage(Component.literal(ChunkPlanMessages.welcomeMessage(
-                    player.getGameProfile().getName(), eng.quotaStatus(player.getUUID()),
+                    player.getGameProfile().getName(), status, dimKey,
                     eng.isExempt(player.getUUID(), player.hasPermissions(2)), inList, zh)));
         }
 
@@ -257,13 +275,22 @@ public final class ChunkPlanForge {
 
         // ---------- 内部 ----------
 
+        /** 当前世界全部 live 维度 key（动态 getAllLevels，天然含 mod/datapack 注册维度，issue #3） */
+        static List<String> liveDims(MinecraftServer server) {
+            List<String> dims = new ArrayList<>();
+            for (net.minecraft.server.level.ServerLevel level : server.getAllLevels()) {
+                dims.add(level.dimension().location().toString());
+            }
+            java.util.Collections.sort(dims);
+            return dims;
+        }
+
         /** 额度耗尽处理：加入原版 UserBanList（expires=恢复时间，原版自动过期兜底）+ 管理名单 + 踢出 */
         static void applyBan(ServerPlayer player, long untilMillis) {
             MinecraftServer server = player.server;
             GameProfile profile = player.getGameProfile();
             // 文案按玩家客户端语言渲染（坑 #22：引擎只返回结构化数据）
-            String message = ChunkPlanMessages.banMessage(
-                    engine.quotaStatus(profile.getId()), ChunkPlanMessages.isChinese(player.getLanguage()));
+            String message = banMessageFor(player, untilMillis);
             UserBanList bans = server.getPlayerList().getBans();
             // 服主已手动封禁的玩家：不覆盖原 ban（避免手动永久 ban 被临时 ban 替换后随额度恢复被误解除）
             UserBanListEntry existing = bans.get(profile);
@@ -288,12 +315,48 @@ public final class ChunkPlanForge {
                     profile.getName(), new Date(untilMillis), message);
         }
 
-        /** 定时扫描：管理名单中额度已恢复的玩家 -> 解 ban */
+        /** ban 公告文案：共享模式现状口径；独立模式显示触发维度 + 最早可进恢复时间（issue #3） */
+        private static String banMessageFor(ServerPlayer player, long untilMillis) {
+            boolean zh = ChunkPlanMessages.isChinese(player.getLanguage());
+            if (engine.isIndependentMode()) {
+                String dimKey = player.level().dimension().location().toString();
+                return ChunkPlanMessages.banMessage(engine.quotaStatus(player.getUUID(), dimKey),
+                        dimKey, untilMillis, zh);
+            }
+            return ChunkPlanMessages.banMessage(engine.quotaStatus(player.getUUID()), zh);
+        }
+
+        /**
+         * 维度独立模式耗尽重定向（issue #3）：传送到目标维度的默认落地坐标 + 聊天公告
+         * （口径同踢出公告，换成"被传送到某维度"）。目标失效（维度卸载/坐标被清）则回退封禁。
+         */
+        static void applyRedirect(ServerPlayer player, String targetDim) {
+            MinecraftServer server = player.server;
+            String fromDim = player.level().dimension().location().toString();
+            dev.chunkplan.common.DimensionStore.SpawnPoint spawn = engine.getDimensionStore().spawn(targetDim);
+            net.minecraft.server.level.ServerLevel target = server.getLevel(
+                    net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.DIMENSION,
+                            net.minecraft.resources.ResourceLocation.parse(targetDim)));
+            if (spawn == null || target == null) {
+                LOG.warn("重定向目标维度 {} 无效（未加载或坐标缺失），回退封禁", targetDim);
+                applyBan(player, engine.earliestRecoveryAcrossDims(player.getUUID(), liveDims(server)));
+                return;
+            }
+            boolean zh = ChunkPlanMessages.isChinese(player.getLanguage());
+            String message = ChunkPlanMessages.redirectMessage(
+                    engine.quotaStatus(player.getUUID(), fromDim), fromDim, targetDim, zh);
+            player.teleportTo(target, spawn.x(), spawn.y(), spawn.z(), player.getYRot(), player.getXRot());
+            player.sendSystemMessage(Component.literal(message));
+            LOG.info("玩家 {} 维度 {} 额度耗尽，已重定向到 {}", player.getGameProfile().getName(), fromDim, targetDim);
+        }
+
+        /** 定时扫描：管理名单中额度已恢复的玩家 -> 解 ban（独立模式按维度口径判定，issue #3） */
         static void scanBans(MinecraftServer server) {
             try {
+                List<String> liveDims = liveDims(server);
                 UserBanList bans = server.getPlayerList().getBans();
                 for (ManagedBanStore.Entry entry : engine.getBanStore().all()) {
-                    if (!engine.isAllLinesExceeded(entry.uuid())) {
+                    if (!engine.shouldStayBanned(entry.uuid(), liveDims)) {
                         GameProfile profile = new GameProfile(entry.uuid(), "");
                         // 仅解除 ChunkPlan 自己加的 ban；服主手动 ban 的条目（来源非 ChunkPlan）保留
                         UserBanListEntry ban = bans.get(profile);
