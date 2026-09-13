@@ -23,6 +23,11 @@ public final class ChunkPlanClient {
     public static final KeyMapping OPEN_GUI = new KeyMapping(
             "key.chunkplan.open_gui", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_K, "key.categories.chunkplan");
 
+    /** 客户端 mod 版本号（版本不匹配兜底页显示用；来自主类构造器注入） */
+    public static String clientVersion() {
+        return ChunkPlanNeoForge.MOD_VERSION;
+    }
+
     private ChunkPlanClient() {
     }
 

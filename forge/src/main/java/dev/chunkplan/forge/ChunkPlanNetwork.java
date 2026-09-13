@@ -73,14 +73,18 @@ public final class ChunkPlanNetwork {
 
         public static void handle(GuiRequestPayload m, Supplier<NetworkEvent.Context> ctx) {
             ctx.get().enqueueWork(() -> {
-                if (m.protocolVersion() != GuiStatus.PROTOCOL_VERSION) {
-                    return;
-                }
                 ServerPlayer player = ctx.get().getSender();
                 if (player == null) {
                     return;
                 }
                 if (!allowRequest(player.getUUID())) {
+                    return;
+                }
+                if (m.protocolVersion() != GuiStatus.PROTOCOL_VERSION) {
+                    // 版本不匹配：回版本横幅（不依赖引擎，引擎未就绪也可回），客户端据此渲染兜底页并
+                    // 显示两端版本号；旧客户端（无横幅解析能力）读协议头即失败，行为同从前
+                    CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
+                            new GuiStatusPayload(GuiStatus.versionBanner(ChunkPlanForge.MOD_VERSION).encode()));
                     return;
                 }
                 sendStatus(player);
@@ -228,7 +232,8 @@ public final class ChunkPlanNetwork {
                 isAdmin ? ForgeConfig.readRawTiers(resolveConfigFile(player)) : List.of(),
                 qs.lines(), qs.allExceeded(), qs.recoveryMillis(), worst,
                 presetNames, eng.getPlayerPresetName(uuid),
-                independent ? 1 : 0, currentDim, liveDims, dimLines, dimConfig);
+                independent ? 1 : 0, currentDim, liveDims, dimLines, dimConfig,
+                ChunkPlanForge.MOD_VERSION, false);
     }
 
     /** 实际生效的配置文件（坑 #38）：存档级 serverconfig 唯一位置，config/ 仅作异常时序兜底 */

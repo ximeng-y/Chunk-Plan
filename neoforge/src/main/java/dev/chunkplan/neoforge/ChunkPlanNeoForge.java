@@ -45,12 +45,16 @@ public final class ChunkPlanNeoForge {
 
     public static final String MODID = "chunkplan";
 
+    /** mod 版本号（构造器从 ModContainer 读取）：GUI 版本横幅与版本不匹配兜底页显示用 */
+    public static volatile String MOD_VERSION = "";
+
     private static final Logger LOG = LoggerFactory.getLogger("ChunkPlan");
 
     /** 服务端生命周期内的引擎实例（单服务器），包内供命令访问 */
     static volatile QuotaEngine engine;
 
     public ChunkPlanNeoForge(ModContainer modContainer) {
+        MOD_VERSION = modContainer.getModInfo().getVersion().toString();
         // SERVER 类型 TOML 配置：主位置 <serverDir>/config/，world/serverconfig/ 为可选存档级覆盖层
         modContainer.registerConfig(ModConfig.Type.SERVER, NeoForgeConfig.SPEC);
     }

@@ -99,9 +99,6 @@ public final class ChunkPlanNetwork {
 
     private static void handleRequest(GuiRequestPayload payload, IPayloadContext context) {
         context.enqueueWork(() -> {
-            if (payload.protocolVersion() != GuiStatus.PROTOCOL_VERSION) {
-                return;
-            }
             ServerPlayer player = asPlayer(context);
             if (player == null) {
                 return;
@@ -112,6 +109,13 @@ public final class ChunkPlanNetwork {
                 return; // 冷却期内丢弃，防高频状态请求放大
             }
             LAST_REQUEST.put(player.getUUID(), now);
+            if (payload.protocolVersion() != GuiStatus.PROTOCOL_VERSION) {
+                // 版本不匹配：回版本横幅（不依赖引擎，引擎未就绪也可回），客户端据此渲染兜底页并
+                // 显示两端版本号；旧客户端（无横幅解析能力）读协议头即失败，行为同从前
+                PacketDistributor.sendToPlayer(player, new GuiStatusPayload(
+                        GuiStatus.versionBanner(ChunkPlanNeoForge.MOD_VERSION).encode()));
+                return;
+            }
             sendStatus(player);
         });
     }
@@ -232,7 +236,8 @@ public final class ChunkPlanNetwork {
                 isAdmin ? NeoForgeConfig.readRawTiers(resolveConfigFile(player)) : List.of(),
                 qs.lines(), qs.allExceeded(), qs.recoveryMillis(), worst,
                 presetNames, eng.getPlayerPresetName(uuid),
-                independent ? 1 : 0, currentDim, liveDims, dimLines, dimConfig);
+                independent ? 1 : 0, currentDim, liveDims, dimLines, dimConfig,
+                ChunkPlanNeoForge.MOD_VERSION, false);
     }
 
     /** 实际生效的配置文件：world/serverconfig/ 覆盖层存在时优先（与启动/命令语义一致） */

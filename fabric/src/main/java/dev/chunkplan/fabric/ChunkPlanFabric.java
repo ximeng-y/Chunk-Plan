@@ -38,6 +38,11 @@ public final class ChunkPlanFabric implements ModInitializer {
 
     private static final Logger LOG = LoggerFactory.getLogger("ChunkPlan");
 
+    public static final String MODID = "chunkplan";
+
+    /** mod 版本号（onInitialize 从 loader 读取）：GUI 版本横幅与版本不匹配兜底页显示用 */
+    public static volatile String MOD_VERSION = "";
+
     /** 服务端生命周期内的引擎实例（单服务器），供命令访问 */
     static volatile QuotaEngine engine;
 
@@ -52,6 +57,8 @@ public final class ChunkPlanFabric implements ModInitializer {
 
     @Override
     public void onInitialize() {
+        MOD_VERSION = FabricLoader.getInstance().getModContainer(MODID)
+                .map(c -> c.getMetadata().getVersion().getFriendlyString()).orElse("");
         this.configFile = FabricLoader.getInstance().getConfigDir().resolve("chunkplan.json");
 
         ServerLifecycleEvents.SERVER_STARTED.register(this::onServerStarted);

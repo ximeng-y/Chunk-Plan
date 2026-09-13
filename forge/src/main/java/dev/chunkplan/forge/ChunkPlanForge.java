@@ -49,12 +49,16 @@ public final class ChunkPlanForge {
 
     public static final String MODID = "chunkplan";
 
+    /** mod 版本号（构造器从 ModContainer 读取）：GUI 版本横幅与版本不匹配兜底页显示用 */
+    public static volatile String MOD_VERSION = "";
+
     private static final Logger LOG = LoggerFactory.getLogger("ChunkPlan");
 
     /** 服务端生命周期内的引擎实例（单服务器），包内供命令访问 */
     static volatile QuotaEngine engine;
 
     public ChunkPlanForge(FMLJavaModLoadingContext context) {
+        MOD_VERSION = context.getContainer().getModInfo().getVersion().toString();
         // SERVER 类型 TOML 配置：Forge 1.20.1 唯一位置是 <world>/serverconfig/（与 NeoForge 的 config/ 不同，坑 #38）。
         // 用构造器注入的 context 而非 ModLoadingContext.get()——后者在 Forge 47.4 已 @Deprecated(forRemoval)；
         // FMLModContainer 按构造器参数个数分派（0 参无注入 / 1 参注入 FMLJavaModLoadingContext，字节码实证）

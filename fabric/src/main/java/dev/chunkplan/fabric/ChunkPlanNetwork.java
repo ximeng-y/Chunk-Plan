@@ -87,11 +87,15 @@ public final class ChunkPlanNetwork {
     /** 注册服务端接收器（在 main 入口调用；服务端执行） */
     public static void registerServerReceivers() {
         ServerPlayNetworking.registerGlobalReceiver(GuiRequestPayload.TYPE, (payload, context) -> {
-            if (payload.protocolVersion() != GuiStatus.PROTOCOL_VERSION) {
-                return;
-            }
             context.server().execute(() -> {
                 if (!allowRequest(context.player().getUUID())) {
+                    return;
+                }
+                if (payload.protocolVersion() != GuiStatus.PROTOCOL_VERSION) {
+                    // 版本不匹配：回版本横幅（不依赖引擎，引擎未就绪也可回），客户端据此渲染兜底页并
+                    // 显示两端版本号；旧客户端（无横幅解析能力）读协议头即失败，行为同从前
+                    ServerPlayNetworking.send(context.player(), new GuiStatusPayload(
+                            GuiStatus.versionBanner(ChunkPlanFabric.MOD_VERSION).encode()));
                     return;
                 }
                 sendStatus(context.player());
@@ -209,6 +213,7 @@ public final class ChunkPlanNetwork {
                 isAdmin ? FabricConfig.readRawTiers(ChunkPlanFabric.configFile) : List.of(),
                 qs.lines(), qs.allExceeded(), qs.recoveryMillis(), worst,
                 presetNames, eng.getPlayerPresetName(uuid),
-                independent ? 1 : 0, currentDim, liveDims, dimLines, dimConfig);
+                independent ? 1 : 0, currentDim, liveDims, dimLines, dimConfig,
+                ChunkPlanFabric.MOD_VERSION, false);
     }
 }

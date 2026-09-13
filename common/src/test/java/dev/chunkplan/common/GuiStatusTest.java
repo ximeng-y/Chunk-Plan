@@ -29,7 +29,8 @@ class GuiStatusTest {
                         new QuotaEngine.LineStatus(24 * 3600, 2000.0, 900.5, 1234567890000L)),
                 false, -1, 50,
                 List.of("pvp", "relax"), "pvp",
-                dimensionMode, currentDim, dims, dimLines, dimConfig);
+                dimensionMode, currentDim, dims, dimLines, dimConfig,
+                "0.3.0", false);
     }
 
     private static GuiStatus sample() {
@@ -66,7 +67,8 @@ class GuiStatusTest {
                 List.of(new QuotaTiers.Tier(false, "5h", 500.0)),
                 List.of(), true, 999L, -1,
                 List.of(), null,
-                0, null, List.of(), List.of(), null);
+                0, null, List.of(), List.of(), null,
+                "0.3.0", false);
         GuiStatus d = GuiStatus.decode(withNull.encode());
         assertNotNull(d);
         assertTrue(d.presets().isEmpty());
@@ -76,7 +78,8 @@ class GuiStatusTest {
                 true, false, true, true,
                 List.of(), List.of(), false, -1, -1,
                 List.of("pvp", "relax"), "pvp",
-                0, null, List.of(), List.of(), null);
+                0, null, List.of(), List.of(), null,
+                "0.3.0", false);
         GuiStatus d2 = GuiStatus.decode(withNames.encode());
         assertNotNull(d2);
         assertEquals(List.of("pvp", "relax"), d2.presets());
@@ -118,7 +121,8 @@ class GuiStatusTest {
         GuiStatus admin = new GuiStatus(1.0, 0.05, 0.5, 2.0,
                 true, false, false, true,
                 List.of(), List.of(), false, -1, -1, List.of(), null,
-                1, "minecraft:overworld", List.of("minecraft:overworld"), List.of(), cfg);
+                1, "minecraft:overworld", List.of("minecraft:overworld"), List.of(), cfg,
+                "0.3.0", false);
         GuiStatus d = GuiStatus.decode(admin.encode());
         assertNotNull(d);
         assertNotNull(d.dimConfig());
@@ -136,7 +140,8 @@ class GuiStatusTest {
         GuiStatus plain = new GuiStatus(1.0, 0.05, 0.5, 2.0,
                 true, false, false, false,
                 List.of(), List.of(), false, -1, -1, List.of(), null,
-                1, "minecraft:overworld", List.of("minecraft:overworld"), List.of(), cfg);
+                1, "minecraft:overworld", List.of("minecraft:overworld"), List.of(), cfg,
+                "0.3.0", false);
         GuiStatus d2 = GuiStatus.decode(plain.encode());
         assertNotNull(d2);
         assertNull(d2.dimConfig());
@@ -175,11 +180,53 @@ class GuiStatusTest {
     }
 
     @Test
-    void decodeWrongVersionReturnsNull() {
+    void decodeWrongVersionReturnsVersionBanner() {
         byte[] full = sample().encode();
-        // 首个 int 是协议版本，篡改 +1 模拟版本不符
+        // 首个 int 是协议版本，篡改 +1 模拟版本不符 → 返回版本横幅（携带服务端 mod 版本号）
         full[0] += 1;
-        assertNull(GuiStatus.decode(full));
+        GuiStatus banner = GuiStatus.decode(full);
+        assertNotNull(banner);
+        assertTrue(banner.versionMismatch());
+        assertEquals("0.3.0", banner.serverModVersion());
+    }
+
+    @Test
+    void roundTripCarriesServerModVersion() {
+        // 正常状态 decode：serverModVersion 透传、versionMismatch=false
+        GuiStatus d = GuiStatus.decode(sample().encode());
+        assertNotNull(d);
+        assertEquals("0.3.0", d.serverModVersion());
+        assertFalse(d.versionMismatch());
+    }
+
+    @Test
+    void versionBannerFactoryCarriesModVersionOnly() {
+        GuiStatus banner = GuiStatus.versionBanner("0.4.0");
+        assertTrue(banner.versionMismatch());
+        assertEquals("0.4.0", banner.serverModVersion());
+        assertTrue(banner.tiers().isEmpty());
+        assertTrue(banner.dimLines().isEmpty());
+        assertFalse(banner.isAdmin());
+    }
+
+    @Test
+    void decodeForeignVersionBannerIgnoresTrailingBytes() {
+        // 未来服务端的横幅响应带未知新字段：mismatch 客户端只读冻结头两字段，尾随内容忽略
+        try {
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            java.io.DataOutputStream out = new java.io.DataOutputStream(bos);
+            out.writeInt(GuiStatus.PROTOCOL_VERSION + 1);
+            out.writeUTF("0.4.0");
+            out.writeUTF("future-unknown-field");
+            out.writeInt(-42);
+            out.flush();
+            GuiStatus banner = GuiStatus.decode(bos.toByteArray());
+            assertNotNull(banner);
+            assertTrue(banner.versionMismatch());
+            assertEquals("0.4.0", banner.serverModVersion());
+        } catch (java.io.IOException e) {
+            throw new AssertionError(e);
+        }
     }
 
     @Test
@@ -189,7 +236,8 @@ class GuiStatusTest {
                 List.of(new QuotaTiers.Tier(false, "5h", 500.0)),
                 List.of(), true, 999L, -1,
                 List.of(), null,
-                0, null, List.of(), List.of(), null);
+                0, null, List.of(), List.of(), null,
+                "0.3.0", false);
         GuiStatus d = GuiStatus.decode(s.encode());
         assertNotNull(d);
         assertTrue(d.lines().isEmpty());
@@ -208,12 +256,13 @@ class GuiStatusTest {
         assertNull(GuiStatus.decode(craftHeader(0, -1)));
     }
 
-    /** 构造合法头部（版本 + 4 double + 4 boolean）后写入指定的 tierCount/lineCount */
+    /** 构造合法头部（版本 + 服务端版本 + 4 double + 4 boolean）后写入指定的 tierCount/lineCount */
     private static byte[] craftHeader(int tierCount, int lineCount) {
         try {
             java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
             java.io.DataOutputStream out = new java.io.DataOutputStream(bos);
             out.writeInt(GuiStatus.PROTOCOL_VERSION);
+            out.writeUTF("0.3.0");
             out.writeDouble(1.0);
             out.writeDouble(0.05);
             out.writeDouble(0.5);

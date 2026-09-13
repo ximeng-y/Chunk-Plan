@@ -13,8 +13,8 @@ import java.util.List;
  *
  * <p>服务端壳层从 {@link QuotaEngine} 构建本对象后 {@link #encode()} 为字节数组，
  * 通过各自加载器的网络通道发给客户端；客户端 {@link #decode(byte[])} 还原后渲染用量页/管理页/维度页。
- * 序列化收敛在此处，六端共享，避免重复实现（协议版本不匹配/数据损坏时 decode 返回 null，
- * 客户端显示"服务器未装 ChunkPlan 或版本不匹配"）。
+ * 序列化收敛在此处，六端共享，避免重复实现（数据损坏时 decode 返回 null；
+ * 协议版本不匹配时 decode 返回 versionMismatch=true 的版本横幅，客户端渲染兜底页并显示两端版本号）。
  *
  * <p>字段说明：
  * <ul>
@@ -29,6 +29,10 @@ import java.util.List;
  *   <li>{@code dimensions}（v3）：服务器全部 live 维度 key（动态 getAllLevels，兼容 mod 注册维度）</li>
  *   <li>{@code dimLines}（v3）：各维度下该玩家的额度状态（用量页维度下拉；全体下发）</li>
  *   <li>{@code dimConfig}（v3）：维度管理配置（仅管理员；null = 非管理员不下发）</li>
+ *   <li>{@code serverModVersion}（v4）：服务端 mod 版本号（wire 格式第 2 字段，冻结头的一部分，
+ *       供版本不匹配兜底页显示；正常状态同样携带，可为 null = 未知）</li>
+ *   <li>{@code versionMismatch}：版本不匹配标志（<b>非序列化</b>，仅 decode 遇协议版本不符时为 true；
+ *       encode 忽略此字段，服务端构造的正常状态恒为 false）</li>
  * </ul>
  */
 public record GuiStatus(
@@ -51,10 +55,13 @@ public record GuiStatus(
         String currentDim,
         List<String> dimensions,
         List<DimLines> dimLines,
-        DimConfigStatus dimConfig) {
+        DimConfigStatus dimConfig,
+        String serverModVersion,
+        boolean versionMismatch) {
 
-    /** 协议版本：两端不一致时 decode 返回 null（客户端提示升级）；v3 增加维度字段（issue #3） */
-    public static final int PROTOCOL_VERSION = 3;
+    /** 协议版本：两端不一致时 decode 返回版本横幅（versionMismatch=true，兜底页显示两端版本号）；
+     *  v3 增加维度字段（issue #3）；v4 在协议头插入 serverModVersion（版本不匹配兜底） */
+    public static final int PROTOCOL_VERSION = 4;
 
     /** 编解码防御上限（防损坏数据异常内存分配，与维度实际规模相比极宽松） */
     private static final int MAX_DIMS = 64;
@@ -73,12 +80,26 @@ public record GuiStatus(
     public record DimConfigStatus(boolean redirectOnExhaust, List<String> redirectOrder, List<DimEntry> dims) {
     }
 
-    /** 序列化为字节数组（DataOutputStream，纯 Java） */
+    /**
+     * 版本横幅（服务端在请求协议版本与本端不符时回发）：除 serverModVersion 外全部为空值，
+     * 客户端 decode 走 mismatch 分支只读协议头两字段，其余内容不会解析——供兜底页显示两端版本号。
+     * 服务端引擎未就绪也可回发（不依赖 engine），保证客户端总能看到版本提示。
+     */
+    public static GuiStatus versionBanner(String serverModVersion) {
+        return new GuiStatus(0, 0, 0, 0, false, false, false, false,
+                List.of(), List.of(), false, -1, -1, List.of(), null,
+                0, null, List.of(), List.of(), null, serverModVersion, true);
+    }
+
+    /** 序列化为字节数组（DataOutputStream，纯 Java）。
+     *  协议头为<b>冻结契约</b>：[protocolVersion int][serverModVersion UTF]——
+     *  版本不匹配的客户端只解析这两字段即停止，未来任何版本不得改变其位置与含义 */
     public byte[] encode() {
         try {
             ByteArrayOutputStream bos = new ByteArrayOutputStream(256);
             DataOutputStream out = new DataOutputStream(bos);
             out.writeInt(PROTOCOL_VERSION);
+            out.writeUTF(serverModVersion == null ? "" : serverModVersion);
             out.writeDouble(firstEntryFee);
             out.writeDouble(familiarEntryFee);
             out.writeDouble(highSpeedThreshold);
@@ -176,15 +197,19 @@ public record GuiStatus(
         }
     }
 
-    /** 反序列化；协议版本不符或数据损坏返回 null（调用方按"服务器未装/版本不匹配"处理） */
+    /** 反序列化；数据损坏返回 null（调用方按"解析失败"处理），协议版本不符返回版本横幅
+     *  （versionMismatch=true，携带服务端 mod 版本号，供客户端渲染兜底页） */
     public static GuiStatus decode(byte[] data) {
         if (data == null) {
             return null;
         }
         try {
             DataInputStream in = new DataInputStream(new ByteArrayInputStream(data));
-            if (in.readInt() != PROTOCOL_VERSION) {
-                return null;
+            int protocol = in.readInt();
+            // 冻结头第 2 字段：服务端 mod 版本（mismatch 分支只读到这里即返回，不再解析后续内容）
+            String serverModVersion = in.readUTF();
+            if (protocol != PROTOCOL_VERSION) {
+                return versionBanner(serverModVersion == null || serverModVersion.isEmpty() ? null : serverModVersion);
             }
             double first = in.readDouble();
             double familiar = in.readDouble();
@@ -299,7 +324,8 @@ public record GuiStatus(
                     List.copyOf(tiers), List.copyOf(lines), allExceeded, recovery, worst,
                     List.copyOf(presets), playerPreset.isEmpty() ? null : playerPreset,
                     dimensionMode, currentDim.isEmpty() ? null : currentDim,
-                    List.copyOf(dimensions), List.copyOf(dimLines), dimConfig);
+                    List.copyOf(dimensions), List.copyOf(dimLines), dimConfig,
+                    serverModVersion.isEmpty() ? null : serverModVersion, false);
         } catch (IOException | RuntimeException e) {
             return null; // 截断/损坏/版本不符：安全回退
         }

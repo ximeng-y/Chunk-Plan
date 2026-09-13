@@ -59,6 +59,11 @@ public final class ChunkPlanForgeClient {
 
     /** 向服务端请求状态（打开界面时调用；界面打开期间断线再点刷新也会走此路径，
      *  未连接直接放弃——sendToServer 对空连接 NPE） */
+    /** 客户端 mod 版本号（版本不匹配兜底页显示用；来自主类/加载器注入） */
+    public static String clientVersion() {
+        return ChunkPlanForge.MOD_VERSION;
+    }
+
     public static void sendRequest() {
         if (Minecraft.getInstance().getConnection() == null) {
             return;

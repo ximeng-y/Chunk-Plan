@@ -79,5 +79,8 @@
   "gui.chunkplan.tab.usage": "用量",
   "gui.chunkplan.unsaved": "有未保存的更改，点击「设置」保存",
   "gui.chunkplan.usage.title": "探索额度状态",
+  "gui.chunkplan.version.client": "客户端 ChunkPlan 版本：%s",
+  "gui.chunkplan.version.mismatch": "两端版本不一致——请把服务端和客户端更新到同一版本",
+  "gui.chunkplan.version.server": "服务器 ChunkPlan 版本：%s",
   "gui.chunkplan.zero_line": "所有探索窗口均已关闭，当前无额度限制"
 }

@@ -157,6 +157,10 @@ public final class ChunkPlanGuiScreen extends Screen {
     @Override
     protected void init() {
         this.resetTier = 0;
+        if (isVersionMismatch()) {
+            // 版本不匹配兜底页：不建控件也不发请求（服务端已确认协议不符），避免空数据控件残影
+            return;
+        }
         rebuild();
         requestStatus();
     }
@@ -1308,11 +1312,17 @@ public final class ChunkPlanGuiScreen extends Screen {
     public void onStatus(GuiStatus s) {
         this.status = s;
         this.waiting = false;
-        if (s != null) {
-            // 用量页维度下拉无记忆：每次状态刷新重置为当前所在维度（issue #3）
-            this.usageDim = s.dimensionMode() == 1 ? s.currentDim() : null;
-            rebuild();
+        if (s == null) {
+            return;
         }
+        if (s.versionMismatch()) {
+            // 版本不匹配：清掉控件进入兜底页（不 rebuild，避免空数据控件残影）
+            clearWidgets();
+            return;
+        }
+        // 用量页维度下拉无记忆：每次状态刷新重置为当前所在维度（issue #3）
+        this.usageDim = s.dimensionMode() == 1 ? s.currentDim() : null;
+        rebuild();
     }
 
     private void requestStatus() {
@@ -1355,6 +1365,10 @@ public final class ChunkPlanGuiScreen extends Screen {
         // 背景由渲染入口 renderWithTooltipAndSubtitles 在调用本方法前统一绘制，此处不得重复调用
         // （重复调用会让模糊后处理再次采样当前帧已画内容，出现整页模糊/幽灵重影）
         g.fill(0, 32, width, 33, 0xFF555555);
+        if (isVersionMismatch()) {
+            renderVersionMismatch(g);
+            return;
+        }
         if (page == 0) {
             renderUsage(g);
         } else if (page == 2) {
@@ -1371,6 +1385,29 @@ public final class ChunkPlanGuiScreen extends Screen {
             renderConfirm(g);
         }
         super.extractRenderState(g, mouseX, mouseY, partialTick);
+    }
+
+    /** 当前是否处于版本不匹配兜底状态（decode 返回的版本横幅） */
+    private boolean isVersionMismatch() {
+        return status != null && status.versionMismatch();
+    }
+
+    /** 版本不匹配兜底页：协议版本不一致时服务端回版本横幅，只显示两端版本号 */
+    private void renderVersionMismatch(GuiGraphicsExtractor g) {
+        int x = 12;
+        int y = 40;
+        g.text(font, Component.translatable("gui.chunkplan.usage.title"), x, y, COL_ACCENT);
+        y += 16;
+        GuiStatus s = status;
+        String server = s != null && s.serverModVersion() != null && !s.serverModVersion().isEmpty()
+                ? s.serverModVersion() : "?";
+        g.text(font, Component.translatable("gui.chunkplan.version.server", server), x, y, COL_TEXT);
+        y += 12;
+        String client = ChunkPlanFabricClient.clientVersion();
+        g.text(font, Component.translatable("gui.chunkplan.version.client",
+                client == null || client.isEmpty() ? "?" : client), x, y, COL_TEXT);
+        y += 14;
+        g.text(font, Component.translatable("gui.chunkplan.version.mismatch"), x, y, COL_RED);
     }
 
     private void renderUsage(GuiGraphicsExtractor g) {

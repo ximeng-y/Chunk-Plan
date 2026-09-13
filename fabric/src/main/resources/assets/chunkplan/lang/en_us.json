@@ -79,5 +79,8 @@
   "gui.chunkplan.tab.usage": "Usage",
   "gui.chunkplan.unsaved": "You have unsaved changes, click Save to apply",
   "gui.chunkplan.usage.title": "Exploration Quota",
+  "gui.chunkplan.version.client": "Client ChunkPlan version: %s",
+  "gui.chunkplan.version.mismatch": "The two versions don't match — update the mod so both sides run the same version",
+  "gui.chunkplan.version.server": "Server ChunkPlan version: %s",
   "gui.chunkplan.zero_line": "All quota windows are disabled; no quota limits in effect"
 }
