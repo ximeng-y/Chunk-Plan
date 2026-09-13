@@ -110,7 +110,6 @@ public final class ChunkPlanGuiScreen extends Screen {
     private Button dimModeButton;
     private Button redirectButton;
     private final Button[] slotButtons = new Button[3];
-    private Button dimSaveButton;
     private Button dimEditCycle;
     private final Button[] dimTierToggle = new Button[4];
     private final Button[] dimTierWindow = new Button[4];
@@ -792,10 +791,10 @@ public final class ChunkPlanGuiScreen extends Screen {
             }
         }
 
-        // 保存按钮：独立（或正切换到独立）时任一 live 维度坐标非法/缺失 -> 灰（用户硬性要求）
-        dimSaveButton = addButton(left, saveY, 110, 20, Component.translatable("gui.chunkplan.dim.save_coords"),
+        // 保存按钮恒可点：坐标齐全是「切换独立模式」的前置条件，由服务端在切换时校验（不齐则拒绝
+        // 并列出缺失维度）；客户端灰显会让「切独立 → 逐个填坐标 → 保存」这条正常路径走不通
+        addButton(left, saveY, 110, 20, Component.translatable("gui.chunkplan.dim.save_coords"),
                 b -> saveDimCoords());
-        refreshDimSaveActive();
 
         // 底部档位编辑器：选中维度 + 4 档（仅独立模式可编辑，共享模式灰显——服务端同语义）
         int et = dimEditorTop();
@@ -882,18 +881,9 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (dimModeButton != null) {
             dimModeButton.setMessage(dimModeLabel());
         }
-        refreshDimSaveActive();
     }
 
-    private void refreshDimSaveActive() {
-        if (dimSaveButton == null) {
-            return;
-        }
-        boolean effIndependent = (status != null && status.dimensionMode() == 1) || Boolean.TRUE.equals(pendingDimMode);
-        dimSaveButton.active = !effIndependent || missingSpawnDims().isEmpty();
-    }
-
-    /** live 维度中缺合法落地坐标者（启用独立模式的前置条件） */
+    /** live 维度中缺合法落地坐标者（启用独立模式的前置条件，仅供提示与保存时跳过非法维度） */
     private List<String> missingSpawnDims() {
         if (status == null || status.dimensions() == null) {
             return List.of();
@@ -944,12 +934,12 @@ public final class ChunkPlanGuiScreen extends Screen {
         return c;
     }
 
-    /** 保存坐标（仅派发有更改且合法的维度）+ 待切换的维度模式 */
+    /** 保存坐标（仅派发有更改且合法的维度；非法/缺失维度跳过，缺坐标时模式切换由服务端拒绝）+ 待切换的维度模式 */
     private void saveDimCoords() {
         List<String> cmds = new ArrayList<>();
         for (String dim : dimensionKeys()) {
             if (!dimCoordsValid(dim)) {
-                continue; // 非法/缺失坐标的维度跳过（独立模式下保存按钮已被禁用兜底）
+                continue; // 该维度坐标未填/非法：不派发（下次填好再保存）
             }
             GuiStatus.DimEntry e = dimEntry(dim);
             double[] c = parsedCoords(dim);
