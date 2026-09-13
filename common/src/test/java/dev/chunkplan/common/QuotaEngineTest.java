@@ -1144,4 +1144,320 @@ class QuotaEngineTest {
         engine.clearPlayerPreset(player);
         assertNull(engine.quotaStatus(player).presetName());
     }
+
+    // ---------- 维度独立计费（issue #3） ----------
+
+    private static final String END = "minecraft:the_end";
+    private static final List<String> LIVE_DIMS = List.of(OVERWORLD, NETHER, END);
+
+    /** 独立模式测试配置：窗口均用预设合法写法对应秒数（1h=3600 / 24h=86400），快照反查不失真 */
+    private void setIndependentConfig() {
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(
+                        new QuotaConfig.Line(1, 3600, 2.0),
+                        new QuotaConfig.Line(2, 86400, 100.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+    }
+
+    /** 配好各维度落地坐标并切到独立模式（前置：setIndependentConfig 已调用） */
+    private void enableIndependentMode() {
+        setIndependentConfig();
+        engine.setDimensionSpawn(OVERWORLD, 0, 64, 0);
+        engine.setDimensionSpawn(NETHER, 0, 64, 0);
+        engine.setDimensionSpawn(END, 0, 64, 0);
+        assertTrue(engine.setDimensionMode(DimensionStore.MODE_INDEPENDENT, LIVE_DIMS).isEmpty());
+        assertTrue(engine.isIndependentMode());
+    }
+
+    @Test
+    void dimensionModeSwitchRequiresSpawnForEveryLiveDim() {
+        // 未配置任何坐标：拒绝并列出全部缺失维度
+        setIndependentConfig();
+        assertEquals(LIVE_DIMS, engine.setDimensionMode(DimensionStore.MODE_INDEPENDENT, LIVE_DIMS));
+        assertFalse(engine.isIndependentMode());
+        // 补齐后通过，并用当前全局 12 值快照初始化各维度 tiers
+        enableIndependentMode();
+        List<QuotaTiers.Tier> tiers = engine.getDimensionStore().tiers(OVERWORLD);
+        assertEquals(4, tiers.size());
+        assertTrue(tiers.get(0).enabled());
+        assertEquals("1h", tiers.get(0).window());
+        assertEquals(2.0, tiers.get(0).limit(), 1e-9);
+        assertTrue(tiers.get(1).enabled());
+        assertEquals("24h", tiers.get(1).window());
+        // 切回共享模式：维度配置保留，模式立即生效
+        assertTrue(engine.setDimensionMode(DimensionStore.MODE_SHARED, LIVE_DIMS).isEmpty());
+        assertFalse(engine.isIndependentMode());
+        assertEquals(4, engine.getDimensionStore().tiers(OVERWORLD).size());
+    }
+
+    @Test
+    void independentModeBillsIntoPerDimensionBuckets() {
+        enableIndependentMode();
+        // 主世界消费：基准 + 两个区块（1.0 + 1.0）；共享模式的全局桶不记账（独立模式不再读全局线）
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0, LIVE_DIMS);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0, LIVE_DIMS);
+        engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0, LIVE_DIMS);
+        assertEquals(2.0, engine.quotaStatus(player, OVERWORLD).lines().get(0).spent(), 1e-9);
+        // 地狱独立记账：落点 1.0 + 新区块 1.0，与主世界互不串
+        engine.onPlayerTick(player, false, NETHER, 0, 64, 0, LIVE_DIMS);
+        engine.onPlayerTick(player, false, NETHER, 16, 64, 0, LIVE_DIMS);
+        assertEquals(2.0, engine.quotaStatus(player, NETHER).lines().get(0).spent(), 1e-9);
+        assertEquals(2.0, engine.quotaStatus(player, OVERWORLD).lines().get(0).spent(), 1e-9);
+        // check 不带维度（共享口径）读全局桶：独立模式下消费不在全局桶
+        assertEquals(0.0, engine.quotaStatus(player).lines().get(0).spent(), 1e-9);
+    }
+
+    @Test
+    void independentModeDimTiersCanBeConfiguredIndependently() {
+        enableIndependentMode();
+        // 主世界第一档上限调到 0.5（地狱保持快照值 2.0）
+        assertTrue(engine.setDimensionTiers(OVERWORLD, List.of(
+                new QuotaTiers.Tier(true, "1h", 0.5),
+                new QuotaTiers.Tier(true, "24h", 100.0),
+                new QuotaTiers.Tier(false, "7d", 10000.0),
+                new QuotaTiers.Tier(false, "30d", 40000.0))));
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0, LIVE_DIMS);
+        var r = engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0, LIVE_DIMS);
+        assertEquals(QuotaEngine.ResultType.BAN, r.type()); // 1.0 > 0.5
+        // 另一玩家在地狱按快照上限 2.0 不受影响
+        UUID other = UUID.randomUUID();
+        engine.onPlayerTick(other, false, NETHER, 0, 64, 0, LIVE_DIMS);
+        assertEquals(QuotaEngine.ResultType.NONE,
+                engine.onPlayerTick(other, false, NETHER, 16, 64, 0, LIVE_DIMS).type());
+    }
+
+    @Test
+    void independentModeBillingOffDimensionFreeButExplored() {
+        enableIndependentMode();
+        engine.setDimensionBilling(OVERWORLD, false);
+        // 关闭计费的维度：跨区块移动零计费、不判满
+        for (int i = 0; i < 5; i++) {
+            QuotaEngine.TickResult r = engine.onPlayerTick(player, false, OVERWORLD, i * 16.0, 64, 0, LIVE_DIMS);
+            assertEquals(QuotaEngine.ResultType.NONE, r.type());
+            assertTrue(r.alerts().isEmpty());
+        }
+        assertTrue(engine.isDimEnterable(player, OVERWORLD));
+        // 重新开启计费：与关闭前同区块（区块 4）→ 无区块变化零计费（tracking 全程维护，无误计费）
+        engine.setDimensionBilling(OVERWORLD, true);
+        assertEquals(QuotaEngine.ResultType.NONE,
+                engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0, LIVE_DIMS).type());
+        assertEquals(0.0, engine.quotaStatus(player, OVERWORLD).lines().get(0).spent(), 1e-9);
+        // 踏入关闭期间探索过的区块 0：熟悉费 0.05（计费关闭期间的探索记入了已探索集合）
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0, LIVE_DIMS);
+        assertEquals(0.05, engine.quotaStatus(player, OVERWORLD).lines().get(0).spent(), 1e-9);
+    }
+
+    @Test
+    void independentModeZeroLineDimFree() {
+        enableIndependentMode();
+        // 该维度全部档禁用 = 该维度零线：免费但其它维度照常
+        assertTrue(engine.setDimensionTiers(OVERWORLD, List.of(
+                new QuotaTiers.Tier(false, "1h", 2.0),
+                new QuotaTiers.Tier(false, "24h", 100.0),
+                new QuotaTiers.Tier(false, "7d", 10000.0),
+                new QuotaTiers.Tier(false, "30d", 40000.0))));
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0, LIVE_DIMS);
+        for (int i = 1; i <= 3; i++) {
+            assertEquals(QuotaEngine.ResultType.NONE,
+                    engine.onPlayerTick(player, false, OVERWORLD, i * 16.0, 64, 0, LIVE_DIMS).type());
+        }
+        assertTrue(engine.isDimEnterable(player, OVERWORLD));
+        assertTrue(engine.quotaStatus(player, OVERWORLD).lines().isEmpty());
+    }
+
+    @Test
+    void independentModePlayerPresetBeatsDimTiers() {
+        enableIndependentMode();
+        // 玩家预设：仅第一档 5h/1000——跨所有维度生效，优先于各维度配置
+        assertTrue(engine.savePreset("relax", presetTier1("5h", 1000.0)));
+        assertTrue(engine.setPlayerPreset(player, "relax"));
+        // 主世界上限被预设抬到 1000：连续消费不踢（维度配置 2.0 已被覆盖）
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0, LIVE_DIMS);
+        for (int i = 1; i <= 3; i++) {
+            assertEquals(QuotaEngine.ResultType.NONE,
+                    engine.onPlayerTick(player, false, OVERWORLD, i * 16.0, 64, 0, LIVE_DIMS).type());
+        }
+        assertEquals(1, engine.quotaStatus(player, OVERWORLD).lines().size());
+        assertEquals(1000.0, engine.quotaStatus(player, OVERWORLD).lines().get(0).limit(), 1e-9);
+        // 地狱同样按预设线
+        assertEquals(1000.0, engine.quotaStatus(player, NETHER).lines().get(0).limit(), 1e-9);
+    }
+
+    @Test
+    void independentModeExhaustRedirectsToEnterableDim() {
+        enableIndependentMode();
+        engine.setRedirectOnExhaust(true);
+        engine.setRedirectTarget(0, NETHER);
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0, LIVE_DIMS);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0, LIVE_DIMS);  // 1.0
+        engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0, LIVE_DIMS);  // 2.0（恰等于上限）
+        // 3.0 > 2.0：主世界满，但地狱可进 -> REDIRECT 而非 BAN
+        var r = engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0, LIVE_DIMS);
+        assertEquals(QuotaEngine.ResultType.REDIRECT, r.type());
+        assertEquals(NETHER, r.redirectDim());
+        assertTrue(r.alerts().isEmpty());
+        // 传送落点照常按目标维度计费
+        engine.onPlayerTick(player, false, NETHER, 0, 64, 0, LIVE_DIMS);
+        assertEquals(1.0, engine.quotaStatus(player, NETHER).lines().get(0).spent(), 1e-9);
+    }
+
+    @Test
+    void independentModeAllDimsExhaustedBansWithEarliestRecovery() {
+        enableIndependentMode();
+        engine.setRedirectOnExhaust(true);
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0, LIVE_DIMS);
+        for (int i = 1; i <= 3; i++) {
+            engine.onPlayerTick(player, false, OVERWORLD, i * 16.0, 64, 0, LIVE_DIMS); // 主世界 3.0 > 2.0
+            engine.onPlayerTick(player, false, NETHER, i * 16.0, 64, 0, LIVE_DIMS);    // 地狱同步消费
+            engine.onPlayerTick(player, false, END, i * 16.0, 64, 0, LIVE_DIMS);       // 末地同步消费
+        }
+        // 主世界再次踏入：三维度全满 -> BAN；恢复时间 = 最早可进维度（三者锚点同分钟、窗口同长，
+        // 即公共周期终点）——注意重定向开启时本 tick 仍会先尝试重定向，END 也满则无候选
+        long m0 = clock.now / 60000;
+        var r = engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0, LIVE_DIMS);
+        assertEquals(QuotaEngine.ResultType.BAN, r.type());
+        assertEquals(m0 * 60000L + 3_600_000L, r.banUntilMillis());
+        // login gate：全维度不可进 -> 应保持封禁
+        assertTrue(engine.shouldStayBanned(player, LIVE_DIMS));
+        // 时间推进跨过周期终点：任一维度可进即解封（scanBans 口径）
+        clock.advanceMillis(3_600_000L);
+        assertFalse(engine.shouldStayBanned(player, LIVE_DIMS));
+    }
+
+    @Test
+    void independentModeLoginGateAllowsJoinWhenOtherDimEnterable() {
+        enableIndependentMode();
+        // 重定向开启 + 主世界满但地狱可进：登录闸门放行（tick 内自然重定向）
+        engine.setRedirectOnExhaust(true);
+        engine.setRedirectTarget(0, NETHER);
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0, LIVE_DIMS);
+        for (int i = 1; i <= 3; i++) {
+            engine.onPlayerTick(player, false, OVERWORLD, i * 16.0, 64, 0, LIVE_DIMS);
+        }
+        assertTrue(engine.isDimEnterable(player, NETHER));
+        assertFalse(engine.isDimEnterable(player, OVERWORLD));
+        assertTrue(engine.anyDimEnterable(player, LIVE_DIMS));
+        assertFalse(engine.shouldStayBanned(player, LIVE_DIMS));
+
+        // 重定向关闭：主世界满即 ban（其余维度可进也不放行），按最后所在维度判定解封
+        engine.setRedirectOnExhaust(false);
+        var r = engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0, LIVE_DIMS);
+        assertEquals(QuotaEngine.ResultType.BAN, r.type());
+        // 主世界恢复时间（锚点 + 1h）而非跨维度最早时刻
+        long m0 = clock.now / 60000;
+        assertEquals(m0 * 60000L + 3_600_000L, r.banUntilMillis());
+        assertTrue(engine.shouldStayBanned(player, LIVE_DIMS));
+        clock.advanceMillis(3_600_000L);
+        assertFalse(engine.shouldStayBanned(player, LIVE_DIMS));
+    }
+
+    @Test
+    void independentModeAlertsAreDimIsolated() {
+        // tier1 limit 10.0（+1.0/区块 = +10%，逐档可控）
+        setIndependentConfig();
+        engine.setDimensionTiers(OVERWORLD, List.of(
+                new QuotaTiers.Tier(true, "1h", 10.0),
+                new QuotaTiers.Tier(true, "24h", 100.0),
+                new QuotaTiers.Tier(false, "7d", 10000.0),
+                new QuotaTiers.Tier(false, "30d", 40000.0)));
+        engine.setDimensionTiers(NETHER, List.of(
+                new QuotaTiers.Tier(true, "1h", 10.0),
+                new QuotaTiers.Tier(true, "24h", 100.0),
+                new QuotaTiers.Tier(false, "7d", 10000.0),
+                new QuotaTiers.Tier(false, "30d", 40000.0)));
+        engine.setDimensionSpawn(OVERWORLD, 0, 64, 0);
+        engine.setDimensionSpawn(NETHER, 0, 64, 0);
+        assertTrue(engine.setDimensionMode(DimensionStore.MODE_INDEPENDENT, List.of(OVERWORLD, NETHER)).isEmpty());
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0, List.of(OVERWORLD, NETHER));
+        var r = engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0, List.of(OVERWORLD, NETHER)); // 10%
+        assertTrue(r.alerts().isEmpty());
+        r = engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0, List.of(OVERWORLD, NETHER)); // 20%
+        assertEquals(List.of(15), percents(r));
+        // 切到地狱：维度隔离——首见（已带 10% 消费）只重基线不补发；各自从 0 触发
+        r = engine.onPlayerTick(player, false, NETHER, 0, 64, 0, List.of(OVERWORLD, NETHER));
+        assertTrue(r.alerts().isEmpty());
+        r = engine.onPlayerTick(player, false, NETHER, 16, 64, 0, List.of(OVERWORLD, NETHER)); // 20%
+        assertEquals(List.of(15), percents(r));
+    }
+
+    @Test
+    void resetClearsAllDimensionBuckets() {
+        enableIndependentMode();
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0, LIVE_DIMS);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0, LIVE_DIMS);
+        engine.onPlayerTick(player, false, NETHER, 0, 64, 0, LIVE_DIMS);
+        engine.onPlayerTick(player, false, NETHER, 16, 64, 0, LIVE_DIMS);
+        engine.resetSpend(player);
+        assertEquals(0.0, engine.quotaStatus(player, OVERWORLD).lines().get(0).spent(), 1e-9);
+        assertEquals(0.0, engine.quotaStatus(player, NETHER).lines().get(0).spent(), 1e-9);
+        // 已探索集合保留：再踏入收熟悉费
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0, LIVE_DIMS);
+        assertEquals(0.05, engine.quotaStatus(player, OVERWORLD).lines().get(0).spent(), 1e-9);
+    }
+
+    @Test
+    void dimWindowOffClearsDimRecordsForAll() throws Exception {
+        UUID offline = UUID.randomUUID();
+        enableIndependentMode();
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0, LIVE_DIMS);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0, LIVE_DIMS); // 主世界 tier1 = 1.0
+        engine.onPlayerTick(offline, false, OVERWORLD, 0, 64, 0, LIVE_DIMS);
+        engine.onPlayerTick(offline, false, OVERWORLD, 16, 64, 0, LIVE_DIMS);
+        engine.saveAll();
+        engine.onPlayerDisconnect(offline);
+        // 关闭主世界第一档：该维度该档记录全部清空（在线 + 离线文件），地狱不受影响
+        engine.clearDimSpendForAll(OVERWORLD, java.util.Set.of(1));
+        assertEquals(0.0, engine.quotaStatus(player, OVERWORLD).lines().get(0).spent(), 1e-9);
+        // 地狱：落点 1.0 + 新区块 1.0
+        engine.onPlayerTick(player, false, NETHER, 0, 64, 0, LIVE_DIMS);
+        engine.onPlayerTick(player, false, NETHER, 16, 64, 0, LIVE_DIMS);
+        assertEquals(2.0, engine.quotaStatus(player, NETHER).lines().get(0).spent(), 1e-9);
+        // 离线玩家文件已改写（新引擎读取验证）
+        QuotaEngine engine2 = new QuotaEngine(tmp,
+                QuotaConfig.builder()
+                        .lines(List.of(new QuotaConfig.Line(1, 3600, 2.0), new QuotaConfig.Line(2, 86400, 100.0)))
+                        .highSpeedThreshold(1000)
+                        .build(new ArrayList<>()),
+                null, new ManagedBanStore(tmp.resolve("bans.json")), clock::get);
+        assertEquals(0.0, engine2.quotaStatus(offline, OVERWORLD).lines().get(0).spent(), 1e-9);
+    }
+
+    @Test
+    void sharedModeQuotaStatusWithDimStillReadsGlobalBuckets() {
+        // 共享模式（默认）：quotaStatus(uuid, dim) 与 quotaStatus(uuid) 同口径（壳层统一调用面的回归保护）
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);
+        assertEquals(engine.quotaStatus(player).lines().get(0).spent(),
+                engine.quotaStatus(player, OVERWORLD).lines().get(0).spent(), 1e-9);
+    }
+
+    @Test
+    void independentModeDataPersistsAndMigratesFromV3() throws Exception {
+        enableIndependentMode();
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0, LIVE_DIMS);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0, LIVE_DIMS);
+        engine.onPlayerDisconnect(player);
+        assertTrue(Files.exists(tmp.resolve("players/" + player + ".json")));
+        // 手工把文件降级为 v3（保留 explored 与全局 tiers，去掉 v4 字段）：v3 -> v4 无损迁移
+        Path f = tmp.resolve("players/" + player + ".json");
+        var obj = com.google.gson.JsonParser.parseString(Files.readString(f, StandardCharsets.UTF_8)).getAsJsonObject();
+        obj.addProperty("version", 3);
+        obj.remove("dimTiers");
+        obj.remove("lastDim");
+        Files.writeString(f, obj.toString(), StandardCharsets.UTF_8);
+        // 重启（同一存档目录）：独立模式继续（store 持久化），维度消费从 0 起（v3 无维度桶）
+        QuotaEngine engine2 = new QuotaEngine(tmp,
+                QuotaConfig.builder()
+                        .lines(List.of(new QuotaConfig.Line(1, 3600, 2.0), new QuotaConfig.Line(2, 86400, 100.0)))
+                        .highSpeedThreshold(1000)
+                        .build(new ArrayList<>()),
+                null, new ManagedBanStore(tmp.resolve("bans.json")), clock::get);
+        assertTrue(engine2.isIndependentMode());
+        assertEquals(0.0, engine2.quotaStatus(player, OVERWORLD).lines().get(0).spent(), 1e-9);
+        // 已探索集合保留：踏入旧区块收熟悉费
+        engine2.onPlayerTick(player, false, OVERWORLD, 0, 64, 0, LIVE_DIMS);
+        engine2.onPlayerTick(player, false, OVERWORLD, 16, 64, 0, LIVE_DIMS);
+        assertEquals(0.05, engine2.quotaStatus(player, OVERWORLD).lines().get(0).spent(), 1e-9);
+    }
 }

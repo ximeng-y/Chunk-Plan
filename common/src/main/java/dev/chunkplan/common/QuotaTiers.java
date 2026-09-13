@@ -32,6 +32,32 @@ public final class QuotaTiers {
     private static final List<TierDefault> DEFAULTS =
             List.of(TIER1_DEFAULT, TIER2_DEFAULT, TIER3_DEFAULT, TIER4_DEFAULT);
 
+    /** 指定档位的默认值（tier 1~4；越界返回第一档默认，调用方保证 tier 合法） */
+    public static TierDefault defaultOf(int tier) {
+        return DEFAULTS.get(Math.min(Math.max(tier, 1), 4) - 1);
+    }
+
+    /**
+     * 反查窗口秒数对应的预设写法（如 18000 -> "5h"），维度快照初始化从激活线推导 12 值时用
+     * （issue #3：引擎只持有激活线，无原始 12 值，靠本方法还原窗口写法）。
+     * 找不到返回 null（激活线窗口必在预设内，理论不可达；调用方回退该档默认写法）。
+     */
+    public static String presetNameForWindow(int tier, long windowSeconds) {
+        List<String> presets = switch (tier) {
+            case 1 -> TIER1_WINDOWS;
+            case 2 -> TIER2_WINDOWS;
+            case 3 -> TIER3_WINDOWS;
+            case 4 -> TIER4_WINDOWS;
+            default -> List.of();
+        };
+        for (String p : presets) {
+            if (DurationParser.parseSeconds(p) == windowSeconds) {
+                return p;
+            }
+        }
+        return null;
+    }
+
     /** 预设窗口解析后的秒数集合（预设均为合法时长，静态预解析不会失败） */
     private static final List<List<Long>> PRESET_SECONDS = List.of(
             parsePreset(TIER1_WINDOWS), parsePreset(TIER2_WINDOWS),

@@ -3,6 +3,7 @@ package dev.chunkplan.fabric;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 
 import dev.chunkplan.common.QuotaConfig;
 import dev.chunkplan.common.QuotaEngine;
@@ -30,33 +31,109 @@ public final class ChunkPlanMessages {
     /**
      * ban 消息（坑 #26）：标题 + 原因（满线中窗口最长者）+ 各线状态（含各线独立的下次重置时间）
      * + 最早可进入时间 + 结尾说明。排版参照用户模板：分割线分隔、标签列按显示宽度对齐。
-     * 传入 quotaStatus（ban / 登录拦截时至少一条线满）。
+     * 传入 quotaStatus（ban / 登录拦截时至少一条线满）。共享模式口径（issue #3 前的原始语义）。
      */
     public static String banMessage(QuotaEngine.QuotaStatus status, boolean zh) {
-        // 原因行：满线中窗口最长者（5h 与 1d 同时满 -> 显示 1d）
-        String fullName = null;
-        long maxFull = -1;
-        for (QuotaEngine.LineStatus line : status.lines()) {
-            if (line.spent() > line.limit() && line.windowSeconds() > maxFull) {
-                maxFull = line.windowSeconds();
-                fullName = windowName(line.windowSeconds(), zh);
+        return banMessage(status, null, -1, zh);
+    }
+
+    /**
+     * ban 消息（坑 #26 模板 + issue #3 独立模式口径）：
+     * triggerDim 为 null = 共享模式（原因行 = 满线中窗口最长者；恢复时间取 status.recoveryMillis）；
+     * 非 null = 维度独立模式（原因行 = "所有维度的探索额度上限均已耗尽" + 触发维度，
+     * 线状态为触发维度的额度情况，恢复时间 = 最早有任一维度可进的时刻，由壳层算好传入）。
+     */
+    public static String banMessage(QuotaEngine.QuotaStatus status, String triggerDim, long recoveryMillis, boolean zh) {
+        StringBuilder sb = new StringBuilder();
+        if (triggerDim != null) {
+            // 独立模式：原因行（全维度耗尽 + 触发维度详情，issue #3 拍板口径）
+            if (zh) {
+                sb.append("§c[ChunkPlan] 由于服务器管理员对于区块探索额度的限制，您已被限制进入服务器！\n");
+                sb.append("§c原因：所有维度的探索额度上限均已耗尽（触发维度：§b").append(triggerDim).append("§c）\n");
+            } else {
+                sb.append("§c[ChunkPlan] You have been restricted from joining the server due to the admin's chunk exploration quota limit!\n");
+                sb.append("§cReason: the exploration quota limits of ALL dimensions are exhausted (triggered in §b")
+                        .append(triggerDim).append("§c)\n");
+            }
+        } else {
+            // 共享模式：原因行 = 满线中窗口最长者（5h 与 1d 同时满 -> 显示 1d）
+            String fullName = null;
+            long maxFull = -1;
+            for (QuotaEngine.LineStatus line : status.lines()) {
+                if (line.spent() > line.limit() && line.windowSeconds() > maxFull) {
+                    maxFull = line.windowSeconds();
+                    fullName = windowName(line.windowSeconds(), zh);
+                }
+            }
+            if (zh) {
+                sb.append("§c[ChunkPlan] 由于服务器管理员对于区块探索额度的限制，您已被限制进入服务器！\n");
+                // 原因行配色：窗口名浅蓝 §b、探索额度上限黄 §e、其余红色警示
+                sb.append("§c原因：您的 §b").append(fullName == null ? "探索额度" : fullName)
+                        .append(" §e探索额度上限 §c已耗尽\n");
+            } else {
+                sb.append("§c[ChunkPlan] You have been restricted from joining the server due to the admin's chunk exploration quota limit!\n");
+                sb.append("§cReason: Your §eexploration quota limit §b(").append(fullName == null ? "quota" : fullName.toLowerCase())
+                        .append(") §cis exhausted\n");
             }
         }
+        sb.append("§7").append(DIVIDER).append("\n");
+        if (zh) {
+            sb.append(triggerDim == null ? "§e您的探索额度情况：\n" : "§e触发维度的探索额度情况：\n");
+        } else {
+            sb.append(triggerDim == null ? "§eYour exploration quota status:\n" : "§eQuota status of the triggering dimension:\n");
+        }
+        appendLineStatuses(sb, status.lines(), zh);
+        sb.append("§7").append(DIVIDER).append("\n");
+        long recovery = triggerDim != null ? recoveryMillis : status.recoveryMillis();
+        if (zh) {
+            if (recovery > 0) {
+                sb.append("§a您最早可于：").append(formatTime(recovery)).append(" 再次进入服务器\n");
+            }
+            // 尾部说明：仅特定短语黄 §e（节约资源 / 咨询管理员），句子其余部分白 §f
+            sb.append("§f额度限制是§e为了节约服务器的CPU、网络流量等资源§f，感谢您的配合！\n");
+            sb.append("§f如有疑问/需要重置或提高额度，请§e咨询您的服务器管理员");
+        } else {
+            if (recovery > 0) {
+                sb.append("§aYou may rejoin at: ").append(formatTime(recovery)).append("\n");
+            }
+            sb.append("§fThe quota limit §esaves server CPU, network traffic and other resources§f. Thank you for your cooperation!\n");
+            sb.append("§fFor quota reset/increase or questions, please §econtact your server administrator");
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 耗尽重定向公告（issue #3）：排版仿 ban 公告（坑 #26 模板），口径换成
+     * "原维度额度耗尽、已被传送到目标维度"——标题黄色（非惩罚性动作），
+     * 线状态为原维度的额度情况（额度重置后可返回原维度）。
+     */
+    public static String redirectMessage(QuotaEngine.QuotaStatus status, String fromDim, String toDim, boolean zh) {
         StringBuilder sb = new StringBuilder();
         if (zh) {
-            sb.append("§c[ChunkPlan] 由于服务器管理员对于区块探索额度的限制，您已被限制进入服务器！\n");
-            // 原因行配色：窗口名浅蓝 §b、探索额度上限黄 §e、其余红色警示
-            sb.append("§c原因：您的 §b").append(fullName == null ? "探索额度" : fullName)
-                    .append(" §e探索额度上限 §c已耗尽\n");
+            sb.append("§e[ChunkPlan] 由于服务器管理员对于区块探索额度的限制，您已被传送到其他维度！\n");
+            sb.append("§e原因：维度 §b").append(fromDim).append("§e 的探索额度上限已耗尽，您已被传送至 §b").append(toDim).append("\n");
         } else {
-            sb.append("§c[ChunkPlan] You have been restricted from joining the server due to the admin's chunk exploration quota limit!\n");
-            sb.append("§cReason: Your §eexploration quota limit §b(").append(fullName == null ? "quota" : fullName.toLowerCase())
-                    .append(") §cis exhausted\n");
+            sb.append("§e[ChunkPlan] You have been teleported to another dimension due to the admin's chunk exploration quota limit!\n");
+            sb.append("§eReason: the exploration quota of §b").append(fromDim).append("§e is exhausted; you have been teleported to §b")
+                    .append(toDim).append("\n");
         }
         sb.append("§7").append(DIVIDER).append("\n");
-        sb.append(zh ? "§e您的探索额度情况：\n" : "§eYour exploration quota status:\n");
-        for (QuotaEngine.LineStatus line : status.lines()) {
-            // 子条目配色：时间窗口名浅蓝 §b（与原因行一致）、数值白 §f
+        sb.append(zh ? "§e原维度的探索额度情况：\n" : "§eQuota status of the previous dimension:\n");
+        appendLineStatuses(sb, status.lines(), zh);
+        sb.append("§7").append(DIVIDER).append("\n");
+        if (zh) {
+            sb.append("§f额度重置后您即可返回原维度，感谢您的配合！\n");
+            sb.append("§f如有疑问/需要重置或提高额度，请§e咨询您的服务器管理员");
+        } else {
+            sb.append("§fYou may return to the previous dimension once its quota resets. Thank you for your cooperation!\n");
+            sb.append("§fFor quota reset/increase or questions, please §econtact your server administrator");
+        }
+        return sb.toString();
+    }
+
+    /** 各线状态（ban/redirect 公告共用体例）：窗口名浅蓝、数值白，满线红色注明下次重置时间（坑 #26） */
+    private static void appendLineStatuses(StringBuilder sb, List<QuotaEngine.LineStatus> lines, boolean zh) {
+        for (QuotaEngine.LineStatus line : lines) {
             String label = windowName(line.windowSeconds(), zh) + (zh ? "：" : ": ");
             sb.append("§b").append(label).append("§f").append(String.format("%.1f/%.1f", line.spent(), line.limit()));
             if (line.spent() > line.limit()) {
@@ -69,22 +146,6 @@ public final class ChunkPlanMessages {
             }
             sb.append("\n");
         }
-        sb.append("§7").append(DIVIDER).append("\n");
-        if (zh) {
-            if (status.recoveryMillis() > 0) {
-                sb.append("§a您最早可于：").append(formatTime(status.recoveryMillis())).append(" 再次进入服务器\n");
-            }
-            // 尾部说明：仅特定短语黄 §e（节约资源 / 咨询管理员），句子其余部分白 §f
-            sb.append("§f额度限制是§e为了节约服务器的CPU、网络流量等资源§f，感谢您的配合！\n");
-            sb.append("§f如有疑问/需要重置或提高额度，请§e咨询您的服务器管理员");
-        } else {
-            if (status.recoveryMillis() > 0) {
-                sb.append("§aYou may rejoin at: ").append(formatTime(status.recoveryMillis())).append("\n");
-            }
-            sb.append("§fThe quota limit §esaves server CPU, network traffic and other resources§f. Thank you for your cooperation!\n");
-            sb.append("§fFor quota reset/increase or questions, please §econtact your server administrator");
-        }
-        return sb.toString();
     }
 
     /** 公告分割线（长度取适中值，避免聊天自动换行打断） */
@@ -141,9 +202,19 @@ public final class ChunkPlanMessages {
      */
     public static String checkStatusText(String name, QuotaEngine.QuotaStatus status, boolean self, boolean zh,
                                          boolean isExempt, boolean inExemptList) {
+        return checkStatusText(name, status, self, zh, isExempt, inExemptList, null);
+    }
+
+    /** check 状态消息（维度重载，issue #3）：dimKey 非 null 时附加"当前维度"行（维度独立模式） */
+    public static String checkStatusText(String name, QuotaEngine.QuotaStatus status, boolean self, boolean zh,
+                                         boolean isExempt, boolean inExemptList, String dimKey) {
         StringBuilder sb = new StringBuilder();
         sb.append(zh ? "§a[ChunkPlan] §f" + name + " §7探索额度状态："
                      : "§a[ChunkPlan] §f" + name + " §7exploration status:");
+        // 维度独立模式（issue #3）：展示的额度情况对应指定维度
+        if (dimKey != null) {
+            sb.append(zh ? "\n§7  当前维度：§b" : "\n§7  Current dimension: §b").append(dimKey);
+        }
         for (QuotaEngine.LineStatus line : status.lines()) {
             sb.append("\n§7  ").append(formatWindow(line.windowSeconds()))
                     .append(zh ? " 窗口: §f" : " window: §f")
@@ -199,11 +270,11 @@ public final class ChunkPlanMessages {
 
     /**
      * 登录欢迎消息（坑 #24）：自动触发一次 check 状态展示 + 提示语，登录时发送一次。
-     * 后续计划：客户端安装 mod 时再追加可视化查询/配置页面入口行（本期不做）。
+     * dimKey 非 null 时 check 部分附带当前维度行（issue #3 维度独立模式）。
      */
-    public static String welcomeMessage(String name, QuotaEngine.QuotaStatus status, boolean isExempt,
+    public static String welcomeMessage(String name, QuotaEngine.QuotaStatus status, String dimKey, boolean isExempt,
                                         boolean inExemptList, boolean zh) {
-        return checkStatusText(name, status, true, zh, isExempt, inExemptList)
+        return checkStatusText(name, status, true, zh, isExempt, inExemptList, dimKey)
                 + "\n" + (zh ? "§7查询额度请使用 /chunkplan check 命令"
                               : "§7Check your quota with /chunkplan check");
     }
@@ -284,6 +355,10 @@ public final class ChunkPlanMessages {
                     + "§f预设：§a/chunkplan preset list | save <名称> | delete <名称>§f，save 将当前配置存为预设（存储在服务端）\n"
                     + "§f应用预设到全体：§a/chunkplan preset apply <名称>§f，写入全局配置，需确认\n"
                     + "§f按玩家应用预设：§a/chunkplan preset player <玩家 | @a> [名称 | default]§f，缺省名称时查询当前分配\n"
+                    + "§f维度计费模式：§a/chunkplan config dimensionMode <shared | independent>§f，独立模式要求每个维度先配置落地坐标\n"
+                    + "§f维度配置：§a/chunkplan config dimension <维度> billing <on | off> | spawn <x> <y> <z>§f（计费开关两种模式通用）\n"
+                    + "§f维度额度线：§a/chunkplan config dimension <维度> window | windowTime | windowLimit ...§f（仅独立模式，参数同全局 window 命令族）\n"
+                    + "§f耗尽重定向：§a/chunkplan config redirect <on | off>§f 与 §a/chunkplan config redirectTarget <primary | secondary | tertiary> <维度 | none>§f（仅独立模式）\n"
                     + "§f重载配置：§a/chunkplan reload\n"
                     + "§7数值允许整数或最多 2 位小数；所有修改写入配置文件并立即生效";
         }
@@ -300,6 +375,10 @@ public final class ChunkPlanMessages {
                 + "§fPresets: §a/chunkplan preset list | save <name> | delete <name>§f - save stores the current config as a preset (stored server-side)\n"
                 + "§fApply a preset to everyone: §a/chunkplan preset apply <name>§f - writes the global config (needs confirmation)\n"
                 + "§fApply a preset per player: §a/chunkplan preset player <player | @a> [name | default]§f - omit the name to query the current assignment\n"
+                + "§fDimension billing mode: §a/chunkplan config dimensionMode <shared | independent>§f - independent mode requires every dimension to have landing coordinates configured first\n"
+                + "§fDimension config: §a/chunkplan config dimension <dim> billing <on | off> | spawn <x> <y> <z>§f (the billing toggle works in both modes)\n"
+                + "§fDimension quota lines: §a/chunkplan config dimension <dim> window | windowTime | windowLimit ...§f (independent mode only; same arguments as the global window commands)\n"
+                + "§fExhaustion redirect: §a/chunkplan config redirect <on | off>§f and §a/chunkplan config redirectTarget <primary | secondary | tertiary> <dim | none>§f (independent mode only)\n"
                 + "§fReload: §a/chunkplan reload\n"
                 + "§7Numbers may be integers or up to 2 decimals; all changes are written to the config file and take effect immediately";
     }

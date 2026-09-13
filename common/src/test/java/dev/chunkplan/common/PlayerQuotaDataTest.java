@@ -105,7 +105,7 @@ class PlayerQuotaDataTest {
         p.recordSpend(1, 1000L * 60000, 3.5);
         String json = GsonHolder.GSON.toJson(p.toDto());
         Map<?, ?> parsed = GsonHolder.GSON.fromJson(json, Map.class);
-        assertEquals(3, ((Number) parsed.get("version")).intValue());
+        assertEquals(4, ((Number) parsed.get("version")).intValue());
         assertTrue(parsed.containsKey("explored"));
         assertTrue(parsed.containsKey("tiers"));
         // explored 为按行对象结构：{"minecraft:overworld":{"2":[[1,1]]}}
@@ -288,5 +288,111 @@ class PlayerQuotaDataTest {
         c.cycleStartMillis = start;
         c.spent = spent;
         return c;
+    }
+
+    // ---------- v4：维度独立消费桶（issue #3） ----------
+
+    @Test
+    void dimBucketsAreIndependentPerDimension() {
+        PlayerQuotaData p = new PlayerQuotaData();
+        long now = 1000L * 60000 + 30000;
+        p.recordDimSpend("minecraft:overworld", 1, now, 1.0);
+        p.recordDimSpend("minecraft:overworld", 1, now + 1000, 0.5);
+        p.recordDimSpend("minecraft:the_nether", 1, now, 2.0);
+        // 各维度互不串
+        assertEquals(1.5, p.effectiveDimSpent("minecraft:overworld", 1, now + 2000, 3600), 1e-9);
+        assertEquals(2.0, p.effectiveDimSpent("minecraft:the_nether", 1, now + 2000, 3600), 1e-9);
+        assertEquals(0.0, p.effectiveDimSpent("minecraft:the_end", 1, now + 2000, 3600), 1e-9);
+        // 与全局桶独立（共享模式记账不受独立模式消费影响，反之亦然）
+        assertEquals(0.0, p.effectiveSpent(1, now + 2000, 3600), 1e-9);
+        assertEquals(-1, p.cycleStartMillis(1));
+        p.recordSpend(1, now, 5.0);
+        assertEquals(5.0, p.effectiveSpent(1, now + 2000, 3600), 1e-9);
+        assertEquals(1.5, p.effectiveDimSpent("minecraft:overworld", 1, now + 2000, 3600), 1e-9);
+        // 锚点按维度分键
+        assertEquals(1000L * 60000, p.dimCycleStartMillis("minecraft:overworld", 1));
+        // lastDim 更新（值变化才置脏）
+        p.clearDirty();
+        p.setLastDim("minecraft:overworld");
+        assertTrue(p.isDirty());
+        p.clearDirty();
+        p.setLastDim("minecraft:overworld"); // 同值不置脏
+        assertFalse(p.isDirty());
+    }
+
+    @Test
+    void dimBucketsExpireAndClear() {
+        PlayerQuotaData p = new PlayerQuotaData();
+        p.recordDimSpend("minecraft:overworld", 1, 100L * 60000 + 30000, 5.0); // 锚定 100min
+        long end = 101L * 60000;
+        assertEquals(5.0, p.effectiveDimSpent("minecraft:overworld", 1, end - 1, 60), 1e-9);
+        assertEquals(0.0, p.effectiveDimSpent("minecraft:overworld", 1, end, 60), 1e-9); // 到点整窗清零
+        assertTrue(p.expireDimIfNeeded("minecraft:overworld", 1, end, 60));
+        assertEquals(-1, p.dimCycleStartMillis("minecraft:overworld", 1));
+        // 单档/单维度清理
+        p.recordDimSpend("minecraft:overworld", 2, end, 1.0);
+        assertTrue(p.clearDimTierSpend("minecraft:overworld", 1));
+        assertFalse(p.clearDimTierSpend("minecraft:overworld", 1)); // 已清
+        assertEquals(1.0, p.effectiveDimSpent("minecraft:overworld", 2, end, 3600), 1e-9);
+        assertTrue(p.clearDimTierSpend("minecraft:overworld", 2));
+        assertFalse(p.clearDimTierSpend("minecraft:the_nether", 1)); // 无该维度
+        p.recordDimSpend("minecraft:the_nether", 1, end, 1.0);
+        p.clearDimSpend("minecraft:the_nether");
+        assertEquals(0.0, p.effectiveDimSpent("minecraft:the_nether", 1, end, 3600), 1e-9);
+    }
+
+    @Test
+    void clearSpendCoversGlobalAndAllDimensions() {
+        PlayerQuotaData p = new PlayerQuotaData();
+        long now = 1000L * 60000;
+        p.recordSpend(1, now, 5.0);
+        p.recordDimSpend("minecraft:overworld", 1, now, 1.0);
+        p.recordDimSpend("minecraft:the_nether", 1, now, 2.0);
+        p.recordDimSpend("minecraft:the_nether", 2, now, 3.0);
+        // 单档全清：全局 + 每个维度该档
+        p.clearTierSpendEverywhere(1);
+        assertEquals(0.0, p.effectiveSpent(1, now + 1000, 3600), 1e-9);
+        assertEquals(0.0, p.effectiveDimSpent("minecraft:overworld", 1, now + 1000, 3600), 1e-9);
+        assertEquals(0.0, p.effectiveDimSpent("minecraft:the_nether", 1, now + 1000, 3600), 1e-9);
+        assertEquals(3.0, p.effectiveDimSpent("minecraft:the_nether", 2, now + 1000, 3600), 1e-9); // 他档保留
+        // 全清
+        p.clearSpend();
+        assertEquals(0.0, p.effectiveDimSpent("minecraft:the_nether", 2, now + 1000, 3600), 1e-9);
+    }
+
+    @Test
+    void v4JsonRoundTripWithDimTiersAndLastDim() {
+        PlayerQuotaData p = new PlayerQuotaData();
+        p.markExplored("minecraft:overworld", chunk(1, 2));
+        p.recordSpend(1, 1000L * 60000, 5.0); // 共享模式全局桶
+        p.recordDimSpend("minecraft:the_nether", 1, 1000L * 60000, 2.0);
+        p.recordDimSpend("minecraft:the_nether", 2, 1000L * 60000, 0.5);
+        p.setLastDim("minecraft:the_nether");
+
+        String json = GsonHolder.GSON.toJson(p.toDto());
+        PlayerQuotaData back = PlayerQuotaData.fromDto(
+                GsonHolder.GSON.fromJson(json, PlayerQuotaData.Dto.class));
+        long now = 1000L * 60000 + 1000;
+        assertTrue(back.isExplored("minecraft:overworld", chunk(1, 2)));
+        assertEquals(5.0, back.effectiveSpent(1, now, 3600), 1e-9);
+        assertEquals(2.0, back.effectiveDimSpent("minecraft:the_nether", 1, now, 3600), 1e-9);
+        assertEquals(0.5, back.effectiveDimSpent("minecraft:the_nether", 2, now, 3600), 1e-9);
+        assertEquals("minecraft:the_nether", back.lastDim());
+        assertEquals(1000L * 60000, back.dimCycleStartMillis("minecraft:the_nether", 1));
+    }
+
+    @Test
+    void fromDtoSkipsInvalidDimEntries() {
+        PlayerQuotaData.Dto dto = new PlayerQuotaData.Dto();
+        dto.dimTiers = Map.of(
+                "minecraft:overworld", Map.of(
+                        1, cycle(1000L, 1.5),   // 合法
+                        9, cycle(1000L, 1.0)),  // 非法档位：跳过
+                "", Map.of(1, cycle(1000L, 1.0)), // 空维度 key：跳过
+                "minecraft:the_nether", Map.of(2, cycle(-1L, 9.9))); // 未锚定：跳过
+        PlayerQuotaData p = PlayerQuotaData.fromDto(dto);
+        assertEquals(1.5, p.effectiveDimSpent("minecraft:overworld", 1, 1001L, 3600), 1e-9);
+        assertEquals(-1, p.dimCycleStartMillis("minecraft:the_nether", 2));
+        assertEquals(java.util.Set.of("minecraft:overworld"), p.dimKeys()); // 空维度 key 的条目被跳过
     }
 }
