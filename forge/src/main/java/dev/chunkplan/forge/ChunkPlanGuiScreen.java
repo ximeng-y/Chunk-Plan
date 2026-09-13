@@ -451,11 +451,11 @@ public final class ChunkPlanGuiScreen extends Screen {
         String saved = t == null ? "" : fmtLimit(t.limit());
         String typed = tierLimit[i] == null ? "" : tierLimit[i].getValue().trim();
         if (typed.isEmpty()) {
-            return; // 清空视为无更改（applyTier 同样跳过空值），重建回显服务端值
+            this.tierDirty[i] = false; // 清空视为无更改（applyTier 同样跳过空值），重建回显服务端值
+            return;
         }
-        if (!typed.equals(saved)) {
-            markTierDirty(tier);
-        }
+        // 赋值式现算：改了又改回原值自动回到干净态（与维度页 markDimTierDirtyIfChanged 同构）
+        this.tierDirty[i] = !typed.equals(saved);
     }
 
     /** 保存后：清该档未保存标记并显示灰字「设置已保存」 */
@@ -737,6 +737,15 @@ public final class ChunkPlanGuiScreen extends Screen {
         return null;
     }
 
+    /**
+     * 维度是否 live（在服务端当前注册维度列表中）。非 live 的已配置维度是陈旧条目：
+     * 服务端对全部 config dimension 命令 requireLiveDim 拒绝，客户端同步禁控/跳过派发，
+     * 防乐观值永不消费、「未保存」红字滞留整个会话（审查 MINOR）。
+     */
+    private boolean isLiveDim(String dim) {
+        return status != null && status.dimensions() != null && status.dimensions().contains(dim);
+    }
+
     private QuotaTiers.Tier dimTier(String dim, int tier) {
         GuiStatus.DimEntry e = dimEntry(dim);
         if (e == null || e.tiers() == null || tier < 1 || tier > e.tiers().size()) {
@@ -827,9 +836,10 @@ public final class ChunkPlanGuiScreen extends Screen {
             if (pb != null && pb == billing) {
                 pendingBilling.remove(dim);
             }
+            boolean live = isLiveDim(dim);
             addButton(left + 150, ry, 48, 18,
                     Component.translatable(curBilling ? "gui.chunkplan.on" : "gui.chunkplan.off"),
-                    b -> toggleDimBilling(dimF, curBilling));
+                    b -> toggleDimBilling(dimF, curBilling)).active = live;
             for (int k = 0; k < 3; k++) {
                 String[] saved = savedDimCoords.computeIfAbsent(dim, d -> new String[3]);
                 GuiStatus.DimEntry fe = e;
@@ -859,6 +869,7 @@ public final class ChunkPlanGuiScreen extends Screen {
                 // 未保存状态一律由 dimCoordsDirty() 现算（与服务端值比对），见坑 #49
                 box.setResponder(v -> saved[axis] = v);
                 box.setMaxLength(32);
+                box.active = live; // 非 live 维度：服务端 requireLiveDim 会拒绝，直接禁编辑防乐观值滞留
                 addRenderableWidget(box);
             }
         }
@@ -876,16 +887,18 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (selectedDim == null) {
             return;
         }
-        // 下拉展开期间不建档位行控件：该环境文本绘制层浮于后画填充之上（如字体合批 mod），会透出下拉黑底
-        if (dimDropdownOpen && dimDropdownPage == 2) {
-            return;
-        }
         DimTierEdit st = dimEditState(selectedDim);
         java.util.Arrays.fill(dimTierLimit, null); // 被下拉覆盖的行不建控件：先清引用防误用旧实例
+        boolean live = isLiveDim(selectedDim); // 非 live 维度：服务端会拒绝全部 dimension 命令，编辑器整体禁用
         for (int i = 0; i < 4; i++) {
             int tier = i + 1;
             int ry = et + 24 + i * 22;
             final int idx = i;
+            // 被展开中的下拉覆盖该行时不建控件：被覆盖内容一律不画（文本层浮于填充之上，坑 #47）。
+            // 逐行判定而非整段 return——下拉较短时其下方的行仍要正常显示（与管理页档位行同规则）
+            if (coveredByDropdown(12, ry, 420, 22)) {
+                continue;
+            }
             // 重建回落（与管理页档位行同规则）
             QuotaTiers.Tier rt = dimTier(selectedDim, tier);
             String curWindow = rt == null ? "" : rt.window();
@@ -906,7 +919,7 @@ public final class ChunkPlanGuiScreen extends Screen {
             setRect(dimTierToggleRect[i], left + 40, ry, 52, 20);
             String win = st.pendingWindow[idx] != null ? st.pendingWindow[idx] : curWindow;
             setRect(dimTierWindowRect[i], left + 98, ry, 64, 20);
-            dimTierWindowClickable[i] = independent && effOn;
+            dimTierWindowClickable[i] = independent && live && effOn;
             dimTierLimit[i] = new EditBox(font, left + 168, ry, 50, 20, Component.empty());
             dimTierLimit[i].setValue(st.savedLimit[idx] != null ? st.savedLimit[idx] : fmtLimit(curLimit));
             String dimKey = selectedDim;
@@ -916,10 +929,10 @@ public final class ChunkPlanGuiScreen extends Screen {
             });
             dimTierLimit[i].setMaxLength(12);
             addRenderableWidget(dimTierLimit[i]);
-            dimTierLimit[i].active = independent && effOn;
+            dimTierLimit[i].active = independent && live && effOn;
             dimTierSet[i] = addButton(left + 224, ry, 42, 20,
                     Component.translatable("gui.chunkplan.set"), b -> applyDimTier(dimKey, tier));
-            dimTierSet[i].active = independent;
+            dimTierSet[i].active = independent && live;
         }
     }
 
@@ -1032,6 +1045,9 @@ public final class ChunkPlanGuiScreen extends Screen {
             return true;
         }
         for (String dim : dimensionKeys()) {
+            if (!isLiveDim(dim)) {
+                continue; // 非 live 维度不参与：服务端拒绝其全部命令，不存在可消费的乐观值
+            }
             if (dimEditPending(dim)) {
                 return true;
             }
@@ -1041,6 +1057,9 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     /** 计费开关本地切换：仅改待保存值，随「保存」统一派发（原先即时生效，与坐标/档位不一致——用户反馈） */
     private void toggleDimBilling(String dim, boolean cur) {
+        if (!isLiveDim(dim)) {
+            return; // 非 live 维度：服务端 requireLiveDim 拒绝，开关不可切（按钮已禁用，此处兜底）
+        }
         pendingBilling.put(dim, !cur);
         rebuild();
     }
@@ -1092,6 +1111,10 @@ public final class ChunkPlanGuiScreen extends Screen {
     private void saveDimCoords() {
         List<String> cmds = new ArrayList<>();
         for (String dim : dimensionKeys()) {
+            if (!isLiveDim(dim)) {
+                pendingBilling.remove(dim); // 非 live 维度：服务端拒绝其命令，乐观值直接丢弃防滞留
+                continue;
+            }
             // 计费开关与本批坐标/模式同批派发（原先点击即时生效，与其它控件不一致——用户反馈）
             Boolean newBilling = pendingBilling.get(dim);
             if (newBilling != null) {
@@ -1198,6 +1221,9 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     /** 维度档位行「设置」：与管理页 applyTier 同逻辑，命令换成 dimension 命令族 */
     private void applyDimTier(String dim, int tier) {
+        if (!isLiveDim(dim)) {
+            return; // 非 live 维度：服务端 requireLiveDim 拒绝（按钮已禁用，此处兜底）
+        }
         DimTierEdit st = dimEditState(dim);
         int i = tier - 1;
         boolean curOn = dimTierEnabled(dim, tier);
@@ -1304,18 +1330,21 @@ public final class ChunkPlanGuiScreen extends Screen {
             int dotX = x + 400;
             g.fill(dotX, ry + 6, dotX + 6, ry + 12, dimCoordsValid(dim) ? COL_GREEN : COL_RED);
         }
-        // 保存区提示：未保存红字 > 已保存灰字 > 留空即清除的常驻说明
+        // 保存区提示：未保存红字 > 已保存灰字 > 留空即清除的常驻说明（被下拉覆盖时不画，坑 #47）
         int saveY = dimSaveY();
-        if (dimCoordsDirty()) {
-            g.drawString(font, Component.translatable("gui.chunkplan.dim.coords_dirty"), x + 120, saveY + 6, COL_RED);
-        } else if (dimCoordsSavedShown) {
-            g.drawString(font, Component.translatable("gui.chunkplan.dim.coords_saved"), x + 120, saveY + 6, COL_GRAY);
-        } else {
-            // 坐标是模式无关的单份存储：两种模式下都可改可清（避免"共享模式改不掉"）
-            g.drawString(font, Component.translatable("gui.chunkplan.dim.spawn_hint"), x + 120, saveY + 6, COL_GRAY);
-        }
-        if (effIndependent && !missingSpawnDims().isEmpty()) {
-            g.drawString(font, Component.translatable("gui.chunkplan.dim.coords_missing"), x + 300, saveY + 6, COL_RED);
+        boolean saveTextCovered = coveredByDropdown(x, saveY, 420, 20);
+        if (!saveTextCovered) {
+            if (dimCoordsDirty()) {
+                g.drawString(font, Component.translatable("gui.chunkplan.dim.coords_dirty"), x + 120, saveY + 6, COL_RED);
+            } else if (dimCoordsSavedShown) {
+                g.drawString(font, Component.translatable("gui.chunkplan.dim.coords_saved"), x + 120, saveY + 6, COL_GRAY);
+            } else {
+                // 坐标是模式无关的单份存储：两种模式下都可改可清（避免"共享模式改不掉"）
+                g.drawString(font, Component.translatable("gui.chunkplan.dim.spawn_hint"), x + 120, saveY + 6, COL_GRAY);
+            }
+            if (effIndependent && !missingSpawnDims().isEmpty()) {
+                g.drawString(font, Component.translatable("gui.chunkplan.dim.coords_missing"), x + 300, saveY + 6, COL_RED);
+            }
         }
         // 编辑器标签
         int et = dimEditorTop();
@@ -1324,8 +1353,9 @@ public final class ChunkPlanGuiScreen extends Screen {
             g.drawString(font, Component.translatable("gui.chunkplan.dim.shared_mode_hint"), x + 240, et + 6, COL_GRAY);
         }
         DimTierEdit st = selectedDim == null ? null : dimEdits.get(selectedDim);
-        // 与 buildDimensions 同规则：下拉展开期间档位行控件未建，行文字一并隐藏
-        if (st != null && !(dimDropdownOpen && dimDropdownPage == 2)) {
+        boolean live = selectedDim != null && isLiveDim(selectedDim);
+        // 与 buildDimensions 同规则：被下拉覆盖的行控件未建，行文字一并跳过（逐行判定在循环内）
+        if (st != null) {
             for (int i = 0; i < 4; i++) {
                 int ry = et + 24 + i * 22;
                 if (coveredByDropdown(12, ry, 420, 22)) {
@@ -1337,10 +1367,10 @@ public final class ChunkPlanGuiScreen extends Screen {
                 if (!toggleExpanded) {
                     drawSelectBar(g, dimTierToggleRect[i][0], dimTierToggleRect[i][1], dimTierToggleRect[i][2],
                             dimTierToggleRect[i][3],
-                            Component.translatable(!independent ? "gui.chunkplan.disabled"
+                            Component.translatable(!independent || !live ? "gui.chunkplan.disabled"
                                     : (dimTierEffOn(selectedDim, i + 1) ? "gui.chunkplan.enabled"
                                             : "gui.chunkplan.disabled")),
-                            !independent);
+                            !independent || !live);
                 }
                 QuotaTiers.Tier dt = dimTier(selectedDim, i + 1);
                 String dwin = st.pendingWindow[i] != null ? st.pendingWindow[i] : (dt == null ? "" : dt.window());
@@ -2044,7 +2074,9 @@ public final class ChunkPlanGuiScreen extends Screen {
             }
             for (int i = 0; i < 4; i++) {
                 if (inRect(mouseX, mouseY, dimTierToggleRect[i])) {
-                    toggleDimTier(selectedDim, i + 1);
+                    if (isLiveDim(selectedDim)) { // 非 live 维度：服务端会拒绝，开关不可展开
+                        toggleDimTier(selectedDim, i + 1);
+                    }
                     return true;
                 }
                 if (dimTierWindowClickable[i] && inRect(mouseX, mouseY, dimTierWindowRect[i])) {

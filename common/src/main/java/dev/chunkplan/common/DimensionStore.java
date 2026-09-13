@@ -129,13 +129,15 @@ public final class DimensionStore {
             save();
             return RedirectResult.OK;
         }
-        if (slot > 0 && redirectOrder.get(slot - 1) == null) {
-            return RedirectResult.GAP;
-        }
+        // DUPLICATE 先于 GAP：若两态同时成立，真实冲突是重复，先报 GAP 会误导管理员。
+        // 当前不变量下（前缀连续 + 清空级联 + load 归一）两态实际互斥，此处为防御性加固
         for (int i = 0; i < redirectOrder.size(); i++) {
             if (i != slot && dim.equals(redirectOrder.get(i))) {
                 return RedirectResult.DUPLICATE;
             }
+        }
+        if (slot > 0 && redirectOrder.get(slot - 1) == null) {
+            return RedirectResult.GAP;
         }
         redirectOrder.set(slot, dim);
         save();

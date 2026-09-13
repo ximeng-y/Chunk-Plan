@@ -268,6 +268,13 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **日志核验（用户附带请求）**：用户整合包 `latest.log` 里 4.7 万条 `OpenGLDebug id=1282` **与本 mod 无关**——滤掉后 51766 行只剩 8 行提到 chunkplan；该报错在 2026-08-02（本 mod 尚未装入该整合包）的日志里已有 41052 条且 chunkplan 提及数为 0，上下文是 xaero 地图纹理上传 + `super_resolution` DLSS-G；六模块源码里除 `GLFW_KEY_*` 常量与 `GuiGraphics` 参数类型外**零 GL 调用**。
     - **验证**：common 176 测试（+3：重定向槽位不变量 / 旧数据归一 / clearSpawn 保留他项）；根构建 + fabric-multi 三版本 build 全绿；五端镜像自检 MIRROR OK（新增 `mirror_check.py`：port 变换结果与磁盘文件严格比对）；neoforge rcon 冒烟——spawn 设置/清空落盘、重复槽位被拒、前置槽未填被拒、清空首选连带清空后续槽、共享模式下改坐标→切独立后保留、越界坐标拒绝。GUI 渲染仍需用户实机复测（坑 #11 系列盲区）。
 
+50. **PR #7 审查非阻塞发现补修（坑 #50，2026-09-13，ultra-review 5 路全 PASS 后的用户拍板，直接 main 提交）**：合并 PR #7 后按 Code-Reviewer 发现清单补修 4 项（第 5 项 NITPICK=fabric-multi 三份 lang 按键分类键名 `key.category.*` 代际差异，仅记录不改）。要点：
+    - **①维度页档位行下拉覆盖判定补齐（MINOR）**：坑 #49 只对 `dimDropdownPage == 2`（编辑器维度选择器）整段提前 return，page 4/5（档位开关/窗口下拉）展开时被覆盖行仍建 EditBox/「设置」按钮 → 合批环境残留文字透出路径。修复：删除整段 return（build 与 render 两侧同步删），改**逐行 `coveredByDropdown(12, ry, 420, 22)` continue**（与管理页档位行同规则，下拉较短时其下方行仍正常显示）。渲染侧新增保存区提示文字（dirty 红字/saved 灰字/spawn_hint/coords_missing）的覆盖判定（`coveredByDropdown(x, saveY, 420, 20)`）——page 3 重定向槽位下拉足够高时可盖到保存区。
+    - **②管理页 `markTierDirtyIfChanged` 改赋值式自清（MINOR）**：原实现只置 true 从不置 false，输入改回原值红字「未保存」不消失（与 PR 描述不符；维度页同构件本就是赋值式，两端不对称）。修复：`tierDirty[i] = !typed.isEmpty() && !typed.equals(saved)` 同构赋值（空值分支置 false）。已知权衡：开关待应用（`setTierEnabled` 打脏）后光聚焦额度输入框不输入（responder 无条件回调）会把红字清掉——仅观感损失，`applyTier` 按 `pendingEnabledSet` 派发不受影响，与维度页既有行为一致。
+    - **③非 live 维度乐观值滞留（MINOR）**：管理维度列表 = live ∪ 已配置（`buildGuiStatus` 键并集），陈旧「已配置但已卸载」维度的全部 `config dimension` 命令被 `requireLiveDim` 拒绝 → `pendingBilling`/乐观坐标/`DimTierEdit` 脏标记永不消费，红字滞留本会话。修复（GUI 与服务端同语义）：新增 `isLiveDim(dim)`（查 `status.dimensions()`），四层门禁——计费开关按钮与坐标 EditBox `.active = live`、`toggleDimBilling`/`applyDimTier` 兜底 return、`saveDimCoords` 跳过非 live 并 `pendingBilling.remove` 防滞留、`dimCoordsDirty()` 跳过非 live 维度；档位编辑器整体随 live 禁用（窗口条 `dimTierWindowClickable`、开关条灰显与标签 disabled 均含 `!live`、开关展开点击 `isLiveDim` 门禁）。
+    - **④`setRedirectTarget` 判定顺序防御性加固（NITPICK）**：DUPLICATE 提到 GAP 之前（若两态同时成立真实冲突是重复）。**推演发现当前不变量下（前缀连续 + 清空级联 + load 归一）两态实际互斥**——不可构造同时成立的可达用例，纯防御加固，测试不变（曾试补顺序断言后撤回）。
+    - **验证**：common 176 测试全绿（无新增）；根构建 + fabric-multi 三版本 build 全绿；五端 port_gui.py 重生成 + mirror_check.py 严格自检 MIRROR OK；版本保持 0.3.0，六端 jar 刷新 `.XMTEMP/jars-0.3.0/`。GUI 渲染仍需实机复测（坑 #11 系列盲区）。
+
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
 - 各端配置结构保持一致（TOML 与 JSON 字段一一对应；forge 与 neoforge 的 TOML 键完全相同）
