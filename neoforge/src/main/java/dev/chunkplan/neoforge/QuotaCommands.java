@@ -21,6 +21,7 @@ import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import dev.chunkplan.common.DurationParser;
 import dev.chunkplan.common.FeeLogFile;
 import dev.chunkplan.common.NumericParser;
+import dev.chunkplan.common.PresetStore;
 import dev.chunkplan.common.QuotaConfig;
 import dev.chunkplan.common.QuotaEngine;
 import dev.chunkplan.common.QuotaTiers;
@@ -62,6 +63,10 @@ public final class QuotaCommands {
 
         /** 调低额度：档位 + 新值原文（可能引发在线玩家无警告踢出） */
         record LowerLimit(int tier, String rawValue, long expireMillis) implements PendingAction {
+        }
+
+        /** 应用预设到全体：写入全局配置（可能关档清记录/调低上限踢人，issue #1） */
+        record ApplyPreset(String name, long expireMillis) implements PendingAction {
         }
     }
 
@@ -124,6 +129,29 @@ public final class QuotaCommands {
                                 .requires(s -> s.hasPermission(2))
                                 .then(Commands.argument("number", StringArgumentType.word())
                                         .executes(ctx -> configFamiliarEntryFee(ctx)))))
+                .then(Commands.literal("preset")
+                        .then(Commands.literal("list")
+                                .requires(s -> s.hasPermission(2))
+                                .executes(ctx -> presetList(ctx)))
+                        .then(Commands.literal("save")
+                                .requires(s -> s.hasPermission(2))
+                                .then(Commands.argument("name", StringArgumentType.word())
+                                        .executes(ctx -> presetSave(ctx))))
+                        .then(Commands.literal("delete")
+                                .requires(s -> s.hasPermission(2))
+                                .then(Commands.argument("name", StringArgumentType.word())
+                                        .suggests(QuotaCommands::suggestPresetNames)
+                                        .executes(ctx -> presetDelete(ctx))))
+                        .then(Commands.literal("apply")
+                                .requires(s -> s.hasPermission(2))
+                                .then(Commands.argument("name", StringArgumentType.word())
+                                        .suggests(QuotaCommands::suggestPresetNames)
+                                        .executes(ctx -> presetApply(ctx))))
+                        .then(Commands.literal("player")
+                                .requires(s -> s.hasPermission(2))
+                                .then(Commands.argument("target", StringArgumentType.greedyString())
+                                        .suggests(QuotaCommands::suggestPresetTarget)
+                                        .executes(ctx -> presetPlayer(ctx)))))
                 .then(Commands.literal("help")
                         .requires(s -> s.hasPermission(2))
                         .executes(ctx -> help(ctx)))
@@ -372,6 +400,52 @@ public final class QuotaCommands {
                 return 1;
             } catch (IOException e) {
                 org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("confirm 调整额度失败", e);
+                ctx.getSource().sendFailure(Component.literal(t(ctx,
+                        "§c写入配置失败，详见服务端日志",
+                        "§cFailed to write config; see server log for details")));
+                return 0;
+            }
+        }
+        if (req instanceof PendingAction.ApplyPreset a) {
+            // 应用预设到全体（issue #1）：把预设 12 值写回配置文件 + loadAndApplyConfig 热生效
+            PresetStore.Preset p = eng.getPresetStore().get(a.name());
+            if (p == null) {
+                ctx.getSource().sendFailure(Component.literal(t(ctx,
+                        "预设 " + a.name() + " 已不存在",
+                        "Preset " + a.name() + " no longer exists")));
+                return 0;
+            }
+            try {
+                // 应用前已启用的档位：写入后 enabled→disabled 的档位须清空该档所有玩家记录
+                Set<Integer> wasEnabled = new HashSet<>();
+                for (QuotaConfig.Line line : eng.getConfig().lines()) {
+                    wasEnabled.add(line.tier());
+                }
+                for (int tier = 1; tier <= 4; tier++) {
+                    QuotaTiers.Tier t = p.tiers().get(tier - 1);
+                    NeoForgeConfig.writeTierEnabled(resolveConfigFile(ctx), tier, t.enabled());
+                    NeoForgeConfig.writeTierWindow(resolveConfigFile(ctx), tier, t.window());
+                    NeoForgeConfig.writeTierLimit(resolveConfigFile(ctx), tier, t.limit());
+                }
+                List<String> warnings = loadAndApplyConfig(ctx);
+                // 关档清记录：与 config window off 语义一致（坑 #30，重开从 0 起）
+                for (int tier = 1; tier <= 4; tier++) {
+                    if (wasEnabled.contains(tier) && !p.tiers().get(tier - 1).enabled()) {
+                        eng.clearTierSpendForAll(tier);
+                    }
+                }
+                // 零线（坑 #31）：立即解除 ChunkPlan 来源临时封禁
+                if (eng.getConfig().lines().isEmpty()) {
+                    ChunkPlanNeoForge.GameEvents.scanBans(ctx.getSource().getServer());
+                }
+                String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
+                ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                        "§a已应用预设 §b" + a.name() + "§a：写入全局配置，对全体玩家生效",
+                        "§aApplied preset §b" + a.name() + "§a: written to the global config, effective for all players")
+                        + warning), true);
+                return 1;
+            } catch (IOException e) {
+                org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("confirm 应用预设失败", e);
                 ctx.getSource().sendFailure(Component.literal(t(ctx,
                         "§c写入配置失败，详见服务端日志",
                         "§cFailed to write config; see server log for details")));
@@ -664,6 +738,238 @@ public final class QuotaCommands {
         }
     }
 
+    // ---------- 预设命令族（issue #1、#2） ----------
+
+    /** /chunkplan preset list：default（全局配置别名）+ 各预设摘要 */
+    private static int presetList(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanNeoForge.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        boolean zh = isZh(ctx);
+        StringBuilder sb = new StringBuilder(zh ? "§e--- ChunkPlan 预设列表 ---" : "§e--- ChunkPlan Presets ---");
+        sb.append("\n§bdefault§7（").append(zh ? "全局配置，对未被覆盖的玩家生效" : "global config, applies to players without an override")
+                .append("）§f: ").append(linesSummary(eng.getConfig().lines(), zh));
+        for (PresetStore.Preset p : eng.getPresetStore().all()) {
+            sb.append("\n§b").append(p.name()).append("§f: ").append(tiersSummary(p.tiers(), zh));
+        }
+        ctx.getSource().sendSuccess(() -> Component.literal(sb.toString()), false);
+        return 1;
+    }
+
+    /** /chunkplan preset save <名称>：把当前全局配置（readRawTiers 原值，含禁用档）存为预设 */
+    private static int presetSave(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanNeoForge.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        String name = StringArgumentType.getString(ctx, "name");
+        if (!PresetStore.NAME_PATTERN.matcher(name).matches()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c预设名只能包含字母、数字、下划线、连字符（1~32 字符）",
+                    "§cPreset name may only contain letters, digits, underscores and hyphens (1-32 chars)")));
+            return 0;
+        }
+        List<QuotaTiers.Tier> raw = NeoForgeConfig.readRawTiers(resolveConfigFile(ctx));
+        if (raw == null || raw.size() != 4) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c读取当前配置失败，详见服务端日志",
+                    "§cFailed to read the current config; see server log for details")));
+            return 0;
+        }
+        boolean existed = eng.getPresetStore().exists(name);
+        if (!eng.savePreset(name, raw)) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c预设保存失败（档位校验未通过，详见服务端日志）",
+                    "§cFailed to save preset (tier validation failed; see server log)")));
+            return 0;
+        }
+        ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                "§a已保存预设 §b" + name + "§a（基于当前全局配置）" + (existed ? "，已覆盖同名预设" : ""),
+                "§aSaved preset §b" + name + "§a (from the current global config)" + (existed ? ", overwriting the existing preset" : ""))), true);
+        return 1;
+    }
+
+    /** /chunkplan preset delete <名称>：删除预设并解除相关分配（default 即全局配置，不可删） */
+    private static int presetDelete(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanNeoForge.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        String name = StringArgumentType.getString(ctx, "name");
+        if (name.equals("default")) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "default 预设即全局配置，不能删除",
+                    "The default preset IS the global config and cannot be deleted")));
+            return 0;
+        }
+        int unassigned = eng.deletePreset(name);
+        if (unassigned < 0) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "预设 " + name + " 不存在", "Preset " + name + " does not exist")));
+            return 0;
+        }
+        ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                "§a已删除预设 §b" + name + "§a" + (unassigned > 0
+                        ? "，已解除 " + unassigned + " 名玩家的分配（回落全局配置）"
+                        : ""),
+                "§aDeleted preset §b" + name + "§a" + (unassigned > 0
+                        ? ", unassigned " + unassigned + " player(s) (back to the global config)"
+                        : ""))), true);
+        return 1;
+    }
+
+    /** /chunkplan preset apply <名称>：应用预设到全体（写回全局配置，需 confirm） */
+    private static int presetApply(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanNeoForge.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        String name = StringArgumentType.getString(ctx, "name");
+        if (name.equals("default")) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "default 即当前全局配置，无需应用",
+                    "default IS the current global config; nothing to apply")));
+            return 0;
+        }
+        PresetStore.Preset p = eng.getPresetStore().get(name);
+        if (p == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "预设 " + name + " 不存在", "Preset " + name + " does not exist")));
+            return 0;
+        }
+        boolean zh = isZh(ctx);
+        pending = new PendingAction.ApplyPreset(name, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS);
+        Component msg = Component.literal(t(ctx,
+                "§a将把预设 §b" + name + "§a（" + tiersSummary(p.tiers(), zh) + "）写入全局配置，对全体玩家生效，",
+                "§aThis will write preset §b" + name + "§a (" + tiersSummary(p.tiers(), zh) + ") to the global config, effective for all players, "))
+                .append(ChunkPlanMessages.confirmLink(zh));
+        ctx.getSource().sendSuccess(() -> msg, true);
+        return 1;
+    }
+
+    /**
+     * /chunkplan preset player <目标> [名称|default]：按玩家应用预设（离线可用，按 UUID 持久化）；
+     * 缺省名称 = 查询当前分配；default = 清除覆盖回落全局。
+     * 参数用 greedyString（同 reset：<目标> [预设]），补全按词数分阶段（坑 #35）。
+     */
+    private static int presetPlayer(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanNeoForge.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        String raw = ctx.getArgument("target", String.class).trim();
+        String[] parts = raw.split("\\s+");
+        if (parts.length == 0 || parts[0].isEmpty() || parts.length > 2) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "参数格式: /chunkplan preset player <玩家|@a> [预设名|default]",
+                    "Usage: /chunkplan preset player <player|@a> [preset|default]")));
+            return 0;
+        }
+        List<GameProfile> targets = resolveTargets(ctx, parts[0]);
+        if (targets.isEmpty()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "未找到玩家", "Player not found")));
+            return 0;
+        }
+        boolean zh = isZh(ctx);
+        String who = targets.size() == 1 ? profileName(targets.get(0))
+                : (zh ? targets.size() + " 名玩家" : targets.size() + " players");
+        if (parts.length == 1) {
+            // 查询模式：显示每个目标当前预设（离线可查，按 UUID）
+            StringBuilder sb = new StringBuilder(zh ? "§e--- 预设分配 ---" : "§e--- Preset assignments ---");
+            for (GameProfile gp : targets) {
+                String cur = eng.getPlayerPresetName(gp.getId());
+                sb.append("\n§f").append(profileName(gp)).append(zh ? "：§b" : ": §b")
+                        .append(cur == null ? "default（跟随全局）" : cur);
+            }
+            ctx.getSource().sendSuccess(() -> Component.literal(sb.toString()), false);
+            return 1;
+        }
+        String presetArg = parts[1];
+        if (presetArg.equals("default")) {
+            for (GameProfile gp : targets) {
+                eng.clearPlayerPreset(gp.getId());
+            }
+            notifyPresetTargets(ctx, targets, null, zh);
+            ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                    "§a已将 " + who + " 恢复为全局配置（default）",
+                    "§aRestored " + who + " to the global config (default)")), true);
+            return 1;
+        }
+        if (!eng.getPresetStore().exists(presetArg)) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "预设 " + presetArg + " 不存在", "Preset " + presetArg + " does not exist")));
+            return 0;
+        }
+        for (GameProfile gp : targets) {
+            eng.setPlayerPreset(gp.getId(), presetArg);
+        }
+        notifyPresetTargets(ctx, targets, presetArg, zh);
+        ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                "§a已为 " + who + " 应用预设 §b" + presetArg + "§a（额度线即时生效）",
+                "§aApplied preset §b" + presetArg + "§a to " + who + " (quota lines effective immediately)")), true);
+        return 1;
+    }
+
+    /** 预设分配变更后通知在线目标（离线/mock 发送为 no-op 或跳过，坑 #9） */
+    private static void notifyPresetTargets(CommandContext<CommandSourceStack> ctx, List<GameProfile> targets,
+                                            String presetName, boolean zh) {
+        for (GameProfile gp : targets) {
+            ServerPlayer target = DevCommands.findByUuid(ctx.getSource().getServer(), gp.getId());
+            if (target != null) {
+                boolean tzh = ChunkPlanMessages.isChinese(target.clientInformation().language());
+                target.sendSystemMessage(Component.literal(tzh
+                        ? "您的探索额度规则已被管理员调整（" + (presetName == null ? "恢复全局默认" : "预设：" + presetName) + "）"
+                        : "Your exploration quota rules were updated by an administrator ("
+                                + (presetName == null ? "back to global default" : "preset: " + presetName) + ")."));
+            }
+        }
+    }
+
+    /** 全局额度线摘要（default 展示用）："tier1 5h≤500 / tier2 24h≤2000"，零线显示"无限制" */
+    private static String linesSummary(List<QuotaConfig.Line> lines, boolean zh) {
+        if (lines.isEmpty()) {
+            return zh ? "零线（无限制）" : "no limits";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (QuotaConfig.Line line : lines) {
+            if (sb.length() > 0) {
+                sb.append(zh ? " / " : " / ");
+            }
+            sb.append("tier").append(line.tier()).append(" ").append(ChunkPlanMessages.formatWindow(line.windowSeconds()))
+                    .append("≤").append(String.format("%.2f", line.limit()));
+        }
+        return sb.toString();
+    }
+
+    /** 预设摘要（四档含禁用档，只显示启用档）："tier1 5h≤500 / tier2 24h≤2000" */
+    private static String tiersSummary(List<QuotaTiers.Tier> tiers, boolean zh) {
+        if (tiers == null || tiers.size() != 4) {
+            return zh ? "（档位数据非法）" : "(invalid tier data)";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 4; i++) {
+            QuotaTiers.Tier t = tiers.get(i);
+            if (!t.enabled()) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append(" / ");
+            }
+            sb.append("tier").append(i + 1).append(" ").append(t.window()).append("≤")
+                    .append(String.format("%.2f", t.limit()));
+        }
+        if (sb.length() == 0) {
+            return zh ? "零线（无限制）" : "no limits";
+        }
+        return sb.toString();
+    }
+
     /** /chunkplan help（仅管理员）：config 与 reset 用法教学 */
     private static int help(CommandContext<CommandSourceStack> ctx) {
         QuotaEngine eng = ChunkPlanNeoForge.engine;
@@ -819,6 +1125,80 @@ public final class QuotaCommands {
             return builder.buildFuture();
         }
         // 第 3 词起：reset 只接受 <目标> [层级]，不再建议（坑 #35）
+        return builder.buildFuture();
+    }
+
+    /** 预设名补全（preset delete / apply）：来自预设库，前缀过滤 */
+    private static CompletableFuture<Suggestions> suggestPresetNames(CommandContext<CommandSourceStack> ctx, SuggestionsBuilder builder) {
+        QuotaEngine eng = ChunkPlanNeoForge.engine;
+        List<String> names = eng == null ? List.of()
+                : eng.getPresetStore().all().stream().map(PresetStore.Preset::name).toList();
+        return suggestFromList(builder, names);
+    }
+
+    /**
+     * preset player 目标补全：按已输入词数分阶段（坑 #35 同款）——第 1 词补玩家名+选择器；
+     * 第 2 词补预设名+default；第 3 词起不再建议（命令只接受 &lt;目标&gt; [预设] 两个词）。
+     */
+    private static CompletableFuture<Suggestions> suggestPresetTarget(CommandContext<CommandSourceStack> ctx, SuggestionsBuilder builder) {
+        String remaining = builder.getRemaining();
+        List<String> words = new ArrayList<>();
+        for (String w : remaining.split("\\s+")) {
+            if (!w.isEmpty()) {
+                words.add(w);
+            }
+        }
+        int n = words.size();
+        int lastWs = -1;
+        for (int i = remaining.length() - 1; i >= 0; i--) {
+            if (Character.isWhitespace(remaining.charAt(i))) {
+                lastWs = i;
+                break;
+            }
+        }
+        boolean trailingSpace = !remaining.isEmpty() && lastWs == remaining.length() - 1;
+        if (n == 0 || (n == 1 && !trailingSpace)) {
+            // 第 1 词输入中：玩家名 + 常用选择器（与 suggestResetTarget 第 1 词分支一致）
+            MinecraftServer server = ctx.getSource().getServer();
+            String prefix = remaining.toLowerCase();
+            Set<String> seen = new HashSet<>();
+            for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+                addName(builder, seen, prefix, p.getGameProfile().getName());
+            }
+            for (ServerPlayer p : DevCommands.MOCK_PLAYERS) {
+                if (!p.isRemoved()) {
+                    addName(builder, seen, prefix, p.getGameProfile().getName());
+                }
+            }
+            for (String sel : List.of("@a", "@e", "@p", "@s", "@r")) {
+                if (prefix.isEmpty() || sel.startsWith(prefix)) {
+                    builder.suggest(sel);
+                }
+            }
+            return builder.buildFuture();
+        }
+        if (n <= 2 && !(n == 2 && trailingSpace)) {
+            // 第 2 词输入中或未完成：补全预设名 + default（greedy 参数建议需含完整剩余文本）
+            QuotaEngine eng = ChunkPlanNeoForge.engine;
+            if (eng == null) {
+                return builder.buildFuture();
+            }
+            String head = lastWs >= 0 ? remaining.substring(0, lastWs + 1) : words.get(0) + " ";
+            String tail = n == 2 ? words.get(1).toLowerCase() : "";
+            List<String> values = new ArrayList<>();
+            for (PresetStore.Preset p : eng.getPresetStore().all()) {
+                values.add(p.name());
+            }
+            values.add("default");
+            for (String v : values) {
+                // 第 2 词已完整输入时不再建议该词本身（防套娃，坑 #35 补丁 2）
+                if (tail.isEmpty() || (v.toLowerCase().startsWith(tail) && !v.equalsIgnoreCase(words.get(1)))) {
+                    builder.suggest(head + v);
+                }
+            }
+            return builder.buildFuture();
+        }
+        // 第 3 词起：preset player 只接受 <目标> [预设]，不再建议（坑 #35）
         return builder.buildFuture();
     }
 

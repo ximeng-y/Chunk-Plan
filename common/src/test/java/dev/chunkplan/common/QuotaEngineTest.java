@@ -941,4 +941,207 @@ class QuotaEngineTest {
         assertEquals(0.0, engine2.quotaStatus(player).lines().get(0).spent(), 1e-9);
         assertEquals(1.0, engine2.quotaStatus(player).lines().get(1).spent(), 1e-9);
     }
+
+    // ---------- 按玩家预设覆盖（issue #1、#2） ----------
+
+    /** 仅第一档启用的预设（5h 窗口、可变上限），便于验证覆盖后的窗口/上限生效 */
+    private static List<QuotaTiers.Tier> presetTier1(String window, double limit) {
+        return List.of(
+                new QuotaTiers.Tier(true, window, limit),
+                new QuotaTiers.Tier(false, "24h", 2000.0),
+                new QuotaTiers.Tier(false, "7d", 10000.0),
+                new QuotaTiers.Tier(false, "30d", 40000.0));
+    }
+
+    @Test
+    void playerPresetOverridesLimitAndRecoveryWindow() {
+        // 全局 tier1 = 60s/2.0；预设 tier1 = 5h/1.0：覆盖后上限与恢复窗口都来自预设
+        assertTrue(engine.savePreset("harsh", presetTier1("5h", 1.0)));
+        assertTrue(engine.setPlayerPreset(player, "harsh"));
+        assertEquals("harsh", engine.getPlayerPresetName(player));
+
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        QuotaEngine.TickResult r1 = engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);
+        assertEquals(QuotaEngine.ResultType.NONE, r1.type()); // 1.0 ≤ 1.0 未满
+
+        QuotaEngine.TickResult r2 = engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);
+        // 2.0 > 1.0：BAN，恢复时间 = 首消锚点 + 预设窗口 5h（固定周期语义，坑 #40）
+        assertEquals(QuotaEngine.ResultType.BAN, r2.type());
+        long anchor = 1_000_000_000L / 60000 * 60000;
+        assertEquals(anchor + 5 * 3600 * 1000L, r2.banUntilMillis());
+        assertEquals("harsh", engine.quotaStatus(player).presetName());
+    }
+
+    @Test
+    void playerPresetZeroLineNotBilled() {
+        // 全禁预设 = 按玩家零线：不记账、不判踢、不落盘（坑 #31 语义按玩家生效）
+        assertTrue(engine.savePreset("peace", List.of(
+                new QuotaTiers.Tier(false, "5h", 500.0),
+                new QuotaTiers.Tier(false, "24h", 2000.0),
+                new QuotaTiers.Tier(false, "7d", 10000.0),
+                new QuotaTiers.Tier(false, "30d", 40000.0))));
+        assertTrue(engine.setPlayerPreset(player, "peace"));
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        for (int i = 1; i <= 3; i++) {
+            QuotaEngine.TickResult r = engine.onPlayerTick(player, false, OVERWORLD, i * 16, 64, 0);
+            assertEquals(QuotaEngine.ResultType.NONE, r.type());
+        }
+        assertFalse(engine.isAllLinesExceeded(player));
+        assertTrue(engine.quotaStatus(player).lines().isEmpty());
+        // 零线分支在加载数据前早退：不产生玩家数据文件
+        assertFalse(Files.exists(tmp.resolve("players/" + player + ".json")));
+    }
+
+    @Test
+    void clearPlayerPresetFallsBackToGlobal() {
+        assertTrue(engine.savePreset("relax", presetTier1("5h", 1000.0)));
+        assertTrue(engine.setPlayerPreset(player, "relax"));
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        for (int i = 1; i <= 3; i++) {
+            QuotaEngine.TickResult r = engine.onPlayerTick(player, false, OVERWORLD, i * 16, 64, 0);
+            // 全局上限 2.0 会在 3.0 时踢，但预设上限 1000 不踢
+            assertEquals(QuotaEngine.ResultType.NONE, r.type());
+        }
+        engine.clearPlayerPreset(player);
+        assertNull(engine.getPlayerPresetName(player));
+        // 回落全局：累计 3.0 + 本次 1.0 = 4.0 > 2.0 → BAN
+        QuotaEngine.TickResult r = engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0);
+        assertEquals(QuotaEngine.ResultType.BAN, r.type());
+    }
+
+    @Test
+    void presetOverrideOnlyAffectsAssignedPlayer() {
+        assertTrue(engine.savePreset("relax", presetTier1("5h", 1000.0)));
+        UUID other = UUID.randomUUID();
+        assertTrue(engine.setPlayerPreset(player, "relax"));
+
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(other, false, OVERWORLD, 0, 64, 0);
+        for (int i = 1; i <= 3; i++) {
+            QuotaEngine.TickResult ra = engine.onPlayerTick(player, false, OVERWORLD, i * 16, 64, 0);
+            assertEquals(QuotaEngine.ResultType.NONE, ra.type()); // 覆盖玩家：上限 1000
+            QuotaEngine.TickResult rb = engine.onPlayerTick(other, false, OVERWORLD, i * 16, 64, 0);
+            // 未覆盖玩家走全局：第 3 次踏入累计 3.0 > 2.0 → BAN
+            assertEquals(i == 3 ? QuotaEngine.ResultType.BAN : QuotaEngine.ResultType.NONE, rb.type());
+        }
+    }
+
+    @Test
+    void setPlayerPresetMissingPresetReturnsFalse() {
+        assertFalse(engine.setPlayerPreset(player, "nope"));
+        assertNull(engine.getPlayerPresetName(player));
+        // 未被覆盖：全局上限 2.0 照常生效
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);
+        assertEquals(QuotaEngine.ResultType.BAN,
+                engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0).type());
+    }
+
+    @Test
+    void setPlayerPresetClearsAlertStateToAvoidIndexMismatch() {
+        // 全局 2 条线：首 tick 初始化 AlertState.lastLevels（长度 2）
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        // 换成 3 条线的预设：不清状态则下次 checkAlerts 按下标访问 lastLevels[2] 越界（坑 #30 同因）
+        assertTrue(engine.savePreset("wide", List.of(
+                new QuotaTiers.Tier(true, "5h", 500.0),
+                new QuotaTiers.Tier(true, "24h", 2000.0),
+                new QuotaTiers.Tier(true, "7d", 10000.0),
+                new QuotaTiers.Tier(false, "30d", 40000.0))));
+        assertTrue(engine.setPlayerPreset(player, "wide"));
+        QuotaEngine.TickResult r = engine.onPlayerTick(player, false, OVERWORLD, 0.1, 64, 0);
+        assertEquals(QuotaEngine.ResultType.NONE, r.type());
+        assertEquals(3, engine.quotaStatus(player).lines().size());
+    }
+
+    @Test
+    void savePresetSameNameRefreshesOverride() {
+        assertTrue(engine.savePreset("p", presetTier1("5h", 1000.0)));
+        assertTrue(engine.setPlayerPreset(player, "p"));
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0); // spent 1.0
+        // 同名覆盖：上限降到 0.5，正在使用该预设的玩家立即按新值判满
+        assertTrue(engine.savePreset("p", presetTier1("5h", 0.5)));
+        QuotaEngine.TickResult r = engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);
+        assertEquals(QuotaEngine.ResultType.BAN, r.type()); // 2.0 > 0.5
+    }
+
+    @Test
+    void deletePresetRemovesOverrideAndFallsBackToGlobal() {
+        assertTrue(engine.savePreset("relax", presetTier1("5h", 1000.0)));
+        assertTrue(engine.setPlayerPreset(player, "relax"));
+        UUID other = UUID.randomUUID();
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        for (int i = 1; i <= 3; i++) {
+            assertEquals(QuotaEngine.ResultType.NONE,
+                    engine.onPlayerTick(player, false, OVERWORLD, i * 16, 64, 0).type());
+        }
+        assertEquals(1, engine.deletePreset("relax"));
+        assertEquals(-1, engine.deletePreset("relax"));
+        assertNull(engine.getPlayerPresetName(player));
+        assertNull(engine.getPlayerPresetName(other)); // 无关玩家不受影响
+        // 回落全局：4.0 > 2.0 → BAN
+        assertEquals(QuotaEngine.ResultType.BAN,
+                engine.onPlayerTick(player, false, OVERWORLD, 64, 64, 0).type());
+    }
+
+    @Test
+    void setConfigRefreshesOverrideGlobalFields() {
+        // 预设只含额度线：费率抄全局。全局改费率后覆盖玩家的有效配置须跟随（setConfig 重建覆盖）
+        assertTrue(engine.savePreset("relax", presetTier1("5h", 1000.0)));
+        assertTrue(engine.setPlayerPreset(player, "relax"));
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(new QuotaConfig.Line(1, 60, 2.0), new QuotaConfig.Line(2, 120, 3.0)))
+                .firstEntryFee(3.0)
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);
+        // 覆盖玩家的额度线来自预设（1 条 5h/1000），费率是新全局 3.0
+        assertEquals(1, engine.quotaStatus(player).lines().size());
+        assertEquals(3.0, engine.quotaStatus(player).lines().get(0).spent(), 1e-9);
+    }
+
+    @Test
+    void exemptPlayerWithPresetOverrideNotBilled() {
+        // 豁免判定保持全局，优先于预设覆盖
+        assertTrue(engine.savePreset("relax", presetTier1("5h", 1000.0)));
+        assertTrue(engine.setPlayerPreset(player, "relax"));
+        engine.onPlayerTick(player, true, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, true, OVERWORLD, 16, 64, 0);
+        engine.onPlayerTick(player, true, OVERWORLD, 32, 64, 0);
+        assertEquals(0.0, engine.quotaStatus(player).lines().get(0).spent(), 1e-9);
+    }
+
+    @Test
+    void presetAssignmentPersistsAcrossEngineRestart() {
+        assertTrue(engine.savePreset("relax", presetTier1("5h", 1000.0)));
+        assertTrue(engine.setPlayerPreset(player, "relax"));
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0);
+
+        // 新引擎（同一存档目录）：分配从 presets.json 恢复，覆盖继续生效
+        QuotaEngine engine2 = new QuotaEngine(tmp,
+                QuotaConfig.builder()
+                        .lines(List.of(new QuotaConfig.Line(1, 60, 2.0), new QuotaConfig.Line(2, 120, 3.0)))
+                        .highSpeedThreshold(1000)
+                        .build(new ArrayList<>()),
+                null, new ManagedBanStore(tmp.resolve("bans.json")), clock::get);
+        assertEquals("relax", engine2.getPlayerPresetName(player));
+        assertEquals("relax", engine2.quotaStatus(player).presetName());
+        // 全局上限 2.0 会在第 3 次踏入踢出，预设上限 1000 不踢
+        engine2.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);
+        assertEquals(QuotaEngine.ResultType.NONE,
+                engine2.onPlayerTick(player, false, OVERWORLD, 48, 64, 0).type());
+    }
+
+    @Test
+    void quotaStatusReportsPresetNameTransitions() {
+        assertNull(engine.quotaStatus(player).presetName());
+        assertTrue(engine.savePreset("p", presetTier1("5h", 1000.0)));
+        assertTrue(engine.setPlayerPreset(player, "p"));
+        assertEquals("p", engine.quotaStatus(player).presetName());
+        engine.clearPlayerPreset(player);
+        assertNull(engine.quotaStatus(player).presetName());
+    }
 }

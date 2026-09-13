@@ -6,6 +6,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -74,7 +75,12 @@ public final class QuotaEngine {
     public record LineStatus(long windowSeconds, double limit, double spent, long nextResetMillis) {
     }
 
-    public record QuotaStatus(List<LineStatus> lines, long recoveryMillis, boolean allExceeded, WindowAlert worstAlert) {
+    /**
+     * check 状态。presetName 为该玩家当前应用的预设名（null = 跟随全局 default，
+     * 即未被按玩家预设覆盖）——壳层据此在 check 文案中显示来源（issue #2）。
+     */
+    public record QuotaStatus(List<LineStatus> lines, long recoveryMillis, boolean allExceeded, WindowAlert worstAlert,
+                              String presetName) {
     }
 
     /** 每玩家追踪状态（首 tick / 上一 tick 位置与区块） */
@@ -99,12 +105,15 @@ public final class QuotaEngine {
     private final Path playerDataDir;
     private volatile FeeLogger feeLogger;
     private final ManagedBanStore banStore;
+    private final PresetStore presetStore;
     private final LongSupplier clock;
 
     private volatile QuotaConfig config;
     private final ConcurrentMap<UUID, PlayerQuotaData> dataByPlayer = new ConcurrentHashMap<>();
     private final ConcurrentMap<UUID, Tracking> tracking = new ConcurrentHashMap<>();
     private final ConcurrentMap<UUID, AlertState> alertStates = new ConcurrentHashMap<>();
+    /** 按玩家预设覆盖（issue #2）：uuid -> 覆盖配置（额度线来自预设，其余字段抄全局） */
+    private final ConcurrentMap<UUID, QuotaConfig> playerOverrides = new ConcurrentHashMap<>();
 
     /**
      * @param dataDir   存档内数据根目录（如 {@code <world>/chunkplan}），壳层传
@@ -123,7 +132,11 @@ public final class QuotaEngine {
         this.config = config;
         this.feeLogger = feeLogger;
         this.banStore = banStore;
+        // 预设库随引擎自建（issue #1：预设存储在服务端 <world>/chunkplan/presets.json），
+        // 壳层无需感知文件路径；构造即按已持久化的分配重建按玩家覆盖
+        this.presetStore = new PresetStore(dataDir.resolve("presets.json"));
         this.clock = clock;
+        rebuildAllOverrides();
     }
 
     public Path getDataDir() {
@@ -136,6 +149,10 @@ public final class QuotaEngine {
 
     public ManagedBanStore getBanStore() {
         return banStore;
+    }
+
+    public PresetStore getPresetStore() {
+        return presetStore;
     }
 
     public QuotaConfig getConfig() {
@@ -151,6 +168,9 @@ public final class QuotaEngine {
         if (old != null && !sameLineTiers(old.lines(), config.lines())) {
             alertStates.clear();
         }
+        // 按玩家覆盖的非额度线字段（费率/倍率/豁免等）抄自全局，全局变更须随之重建；
+        // 覆盖的额度线来自预设（与全局无关），线数不变故不影响对应玩家的提示状态
+        rebuildAllOverrides();
     }
 
     /** 两条额度线集合的档位序列是否一致（按顺序比较；toLines 恒按档位升序产出） */
@@ -171,6 +191,111 @@ public final class QuotaEngine {
         this.feeLogger = feeLogger;
     }
 
+    // ---------- 按玩家预设覆盖（issue #1、#2） ----------
+
+    /**
+     * 玩家有效配置：有预设覆盖用覆盖（额度线来自预设，费率/倍率/豁免等抄全局），否则全局配置。
+     * 引擎内所有"针对某玩家"的额度线/费率读取必须经此解析，禁止直读 {@code config}。
+     */
+    private QuotaConfig effectiveConfig(UUID uuid) {
+        QuotaConfig override = playerOverrides.get(uuid);
+        return override != null ? override : config;
+    }
+
+    /** 由预设构建覆盖配置：额度线来自预设（toLines 校验回退），其余字段抄当前全局 */
+    private QuotaConfig buildOverride(PresetStore.Preset preset) {
+        List<String> warnings = new ArrayList<>();
+        List<QuotaConfig.Line> lines = QuotaTiers.toLines(preset.tiers(), warnings);
+        for (String w : warnings) {
+            LOG.warn("预设 {} 产生额度线告警：{}", preset.name(), w);
+        }
+        QuotaConfig g = config;
+        return QuotaConfig.builder()
+                .lines(lines)
+                .firstEntryFee(g.firstEntryFee())
+                .familiarEntryFee(g.familiarEntryFee())
+                .highSpeedThreshold(g.highSpeedThreshold())
+                .highSpeedMultiplier(g.highSpeedMultiplier())
+                .exemptByDefault(g.exemptByDefault())
+                .exemptPlayers(g.exemptPlayers())
+                .saveIntervalSec(g.saveIntervalSec())
+                .banScanIntervalSec(g.banScanIntervalSec())
+                .logFeeEvents(g.logFeeEvents())
+                .build(null);
+    }
+
+    private void rebuildAllOverrides() {
+        playerOverrides.clear();
+        for (Map.Entry<UUID, String> e : presetStore.assignments().entrySet()) {
+            PresetStore.Preset p = presetStore.get(e.getValue());
+            if (p != null) {
+                playerOverrides.put(e.getKey(), buildOverride(p));
+            }
+        }
+    }
+
+    /** 给玩家应用预设（覆盖其额度线，按 UUID 持久化、离线可用）；预设不存在返回 false */
+    public boolean setPlayerPreset(UUID uuid, String presetName) {
+        PresetStore.Preset p = presetStore.get(presetName);
+        if (p == null) {
+            return false;
+        }
+        presetStore.assign(uuid, presetName);
+        playerOverrides.put(uuid, buildOverride(p));
+        // 预设线数可能与全局不同：AlertState.lastLevels 按下标对齐 lines，须清（坑 #30 同因）
+        alertStates.remove(uuid);
+        return true;
+    }
+
+    /** 清除玩家覆盖（回落全局 default 预设） */
+    public void clearPlayerPreset(UUID uuid) {
+        presetStore.assign(uuid, null);
+        playerOverrides.remove(uuid);
+        alertStates.remove(uuid);
+    }
+
+    /** 玩家当前预设名；null = 跟随全局 default */
+    public String getPlayerPresetName(UUID uuid) {
+        return presetStore.assignment(uuid);
+    }
+
+    /**
+     * 保存（或同名覆盖）预设；成功后刷新正在使用该预设的玩家覆盖（同名覆盖即改其生效值）。
+     * 校验失败（名称/档位非法）返回 false。
+     */
+    public boolean savePreset(String name, List<QuotaTiers.Tier> tiers) {
+        if (!presetStore.save(name, tiers)) {
+            return false;
+        }
+        PresetStore.Preset p = presetStore.get(name);
+        for (Map.Entry<UUID, String> e : presetStore.assignments().entrySet()) {
+            if (e.getValue().equals(name)) {
+                playerOverrides.put(e.getKey(), buildOverride(p));
+                alertStates.remove(e.getKey());
+            }
+        }
+        return true;
+    }
+
+    /** 删除预设并解除相关分配；返回解除的分配数，预设不存在返回 -1 */
+    public int deletePreset(String name) {
+        List<UUID> affected = new ArrayList<>();
+        for (Map.Entry<UUID, String> e : presetStore.assignments().entrySet()) {
+            if (e.getValue().equals(name)) {
+                affected.add(e.getKey());
+            }
+        }
+        int unassigned = presetStore.delete(name);
+        if (unassigned < 0) {
+            return -1;
+        }
+        for (UUID uuid : affected) {
+            playerOverrides.remove(uuid);
+            alertStates.remove(uuid);
+        }
+        return unassigned;
+    }
+
     /** 豁免判定：默认 OP + 配置名单豁免；exemptByDefault=false 时全员受限 */
     public boolean isExempt(UUID uuid, boolean isOp) {
         QuotaConfig cfg = config;
@@ -187,7 +312,9 @@ public final class QuotaEngine {
             alertStates.remove(uuid);
             return TickResult.none();
         }
-        if (config.lines().isEmpty()) {
+        // 该玩家的有效配置（有预设覆盖用覆盖，issue #2）；本 tick 全程用同一引用
+        QuotaConfig cfg = effectiveConfig(uuid);
+        if (cfg.lines().isEmpty()) {
             // 零线（坑 #31）：全部窗口已关闭——不加载玩家数据、不记账、不判踢、不提示；
             // 清除位移基准：零线期间 tracking 不更新，若不清理，零线前已追踪的玩家在
             // 重开窗口后首个 tick 会把零线期间整段位移当区块变化计费（且必然触发高速
@@ -211,7 +338,7 @@ public final class QuotaEngine {
             tr.prevZ = z;
             tr.prevChunk = curChunk;
             tr.prevDim = dimKey;
-            return TickResult.none(checkAlerts(uuid, data, now));
+            return TickResult.none(checkAlerts(uuid, data, now, cfg));
         }
 
         double dx = x - tr.prevX;
@@ -230,20 +357,19 @@ public final class QuotaEngine {
             // 同一区块内（挂机/踱步/移动）：不重复计费
             // 坑 #30：每 tick 仍判满——配置变更（降额度/改窗口/启用新线）导致超限时
             // 下一 tick 即踢出，原地不动也生效（保证"降低额度不会瘫痪系统、当场生效"）
-            if (isAllLinesExceeded(data, now)) {
-                return TickResult.ban(recoveryMillis(data));
+            if (isAllLinesExceeded(data, now, cfg)) {
+                return TickResult.ban(recoveryMillis(data, cfg));
             }
-            return TickResult.none(checkAlerts(uuid, data, now));
+            return TickResult.none(checkAlerts(uuid, data, now, cfg));
         }
 
         // 基础费判定：先查集合，不在则先加入集合（"踏入的要么是来过的，要么是没来过的"）
         boolean familiar = data.isExplored(dimKey, curChunk);
-        double base = familiar ? config.familiarEntryFee() : config.firstEntryFee();
+        double base = familiar ? cfg.familiarEntryFee() : cfg.firstEntryFee();
         if (!familiar) {
             data.markExplored(dimKey, curChunk);
         }
 
-        QuotaConfig cfg = config;
         double fee = base * (speed > cfg.highSpeedThreshold() ? cfg.highSpeedMultiplier() : 1.0);
         // 每次消费计入所有启用档位（坑 #30 各窗口独立记账）；先惰性过期再记账：
         // 已到周期的档整窗清零并重新锚定（固定周期语义，坑 #40）
@@ -253,15 +379,15 @@ public final class QuotaEngine {
         }
 
         if (cfg.logFeeEvents() && feeLogger != null) {
-            feeLogger.logFee(uuid, dimKey, curChunk, speed, fee, totalSpent(data, now));
+            feeLogger.logFee(uuid, dimKey, curChunk, speed, fee, totalSpent(data, now, cfg));
         }
 
         // 先记账后判踢：任一额度线满 -> BAN（坑 #25：原"全部满才拒"，用户确认为单线满即拒）
-        if (isAllLinesExceeded(data, now)) {
-            long until = recoveryMillis(data);
+        if (isAllLinesExceeded(data, now, cfg)) {
+            long until = recoveryMillis(data, cfg);
             return TickResult.ban(until);
         }
-        return TickResult.none(checkAlerts(uuid, data, now));
+        return TickResult.none(checkAlerts(uuid, data, now, cfg));
     }
 
     /**
@@ -270,7 +396,7 @@ public final class QuotaEngine {
      */
     public boolean isAllLinesExceeded(UUID uuid) {
         PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
-        return isAllLinesExceeded(data, clock.getAsLong());
+        return isAllLinesExceeded(data, clock.getAsLong(), effectiveConfig(uuid));
     }
 
     /** /chunkplan check 状态：各线已消费/上限、任一满标志、恢复时间（未满为 -1）、
@@ -278,10 +404,11 @@ public final class QuotaEngine {
     public QuotaStatus quotaStatus(UUID uuid) {
         PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
         long now = clock.getAsLong();
+        QuotaConfig cfg = effectiveConfig(uuid);
         List<LineStatus> lines = new ArrayList<>();
         boolean any = false;
         WindowAlert worst = null;
-        for (QuotaConfig.Line line : config.lines()) {
+        for (QuotaConfig.Line line : cfg.lines()) {
             double spent = data.effectiveSpent(line.tier(), now, line.windowSeconds());
             // 各线独立的下次重置时间：该线当前周期终点（固定周期到点整窗清零，坑 #40）。
             // 与满线恢复时间同一公式；未满线也展示，便于玩家看到"该线何时清零"（坑 #26）
@@ -300,8 +427,8 @@ public final class QuotaEngine {
                 worst = new WindowAlert(line.windowSeconds(), level, severityOf(level));
             }
         }
-        long recovery = any ? recoveryMillis(data) : -1;
-        return new QuotaStatus(lines, recovery, any, worst);
+        long recovery = any ? recoveryMillis(data, cfg) : -1;
+        return new QuotaStatus(lines, recovery, any, worst, getPlayerPresetName(uuid));
     }
 
     /** /chunkplan reset（全档位）：只清消费桶，已探索集合终身保留 */
@@ -419,8 +546,8 @@ public final class QuotaEngine {
      * 首见（登录/重连/服务器重启后首个 tick）只初始化当前档位不触发，避免补发历史档位刷屏；
      * 档位上升跨过新档时逐档生成提示；额度重置/滑出后档位回落，重新涨回时再次触发。
      */
-    private List<WindowAlert> checkAlerts(UUID uuid, PlayerQuotaData data, long now) {
-        List<QuotaConfig.Line> lines = config.lines();
+    private List<WindowAlert> checkAlerts(UUID uuid, PlayerQuotaData data, long now, QuotaConfig cfg) {
+        List<QuotaConfig.Line> lines = cfg.lines();
         AlertState state = alertStates.computeIfAbsent(uuid, k -> new AlertState());
         if (!state.initialized) {
             state.lastLevels = new int[lines.size()];
@@ -471,9 +598,9 @@ public final class QuotaEngine {
         return Severity.HIGH;
     }
 
-    private boolean isAllLinesExceeded(PlayerQuotaData data, long nowMillis) {
+    private boolean isAllLinesExceeded(PlayerQuotaData data, long nowMillis, QuotaConfig cfg) {
         // 坑 #25：任一额度线满即视为超限（原"全部满才拒"改为单线满即拒）
-        for (QuotaConfig.Line line : config.lines()) {
+        for (QuotaConfig.Line line : cfg.lines()) {
             if (data.effectiveSpent(line.tier(), nowMillis, line.windowSeconds()) > line.limit()) {
                 return true;
             }
@@ -486,9 +613,9 @@ public final class QuotaEngine {
      * 到该时刻所有满线的周期同时到点、整窗清零（等价 reset），承诺精确兑现——
      * 不再有旧滚动窗口"最早桶滑出但额度仍超限"的到点二次封禁问题。
      */
-    private long recoveryMillis(PlayerQuotaData data) {
+    private long recoveryMillis(PlayerQuotaData data, QuotaConfig cfg) {
         long worst = -1;
-        for (QuotaConfig.Line line : config.lines()) {
+        for (QuotaConfig.Line line : cfg.lines()) {
             if (data.effectiveSpent(line.tier(), clock.getAsLong(), line.windowSeconds()) <= line.limit()) {
                 continue;
             }
@@ -502,9 +629,9 @@ public final class QuotaEngine {
     }
 
     /** 累计总点数：按最长窗口档位求和（仅用于日志展示；各档位周期内容相同，取最大窗口档位即可） */
-    private double totalSpent(PlayerQuotaData data, long nowMillis) {
+    private double totalSpent(PlayerQuotaData data, long nowMillis, QuotaConfig cfg) {
         QuotaConfig.Line maxLine = null;
-        for (QuotaConfig.Line line : config.lines()) {
+        for (QuotaConfig.Line line : cfg.lines()) {
             if (maxLine == null || line.windowSeconds() > maxLine.windowSeconds()) {
                 maxLine = line;
             }
