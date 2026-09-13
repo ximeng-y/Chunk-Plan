@@ -31,7 +31,7 @@
   "gui.chunkplan.dim.pick_dim": "查看维度",
   "gui.chunkplan.dim.redirect": "耗尽重定向",
   "gui.chunkplan.dim.save_coords": "保存坐标/模式",
-  "gui.chunkplan.dim.shared": "共享全局额度线",
+  "gui.chunkplan.dim.shared": "全维度共享额度",
   "gui.chunkplan.dim.shared_mode_hint": "额度线规则仅在维度独立模式下可编辑",
   "gui.chunkplan.dim.slot1": "首选",
   "gui.chunkplan.dim.slot2": "次选",

@@ -895,8 +895,8 @@ public final class QuotaCommands {
         String mode = StringArgumentType.getString(ctx, "mode");
         if (!mode.equals("shared") && !mode.equals("independent")) {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
-                    "模式需为 shared（共享全局额度线）或 independent（每维度独立）",
-                    "Mode must be shared (global quota lines) or independent (per-dimension)")));
+                    "模式需为 shared（全维度共享额度）或 independent（每维度独立）",
+                    "Mode must be shared (quota shared across dimensions) or independent (per-dimension)")));
             return 0;
         }
         List<String> liveDims = ChunkPlanNeoForge.GameEvents.liveDims(ctx.getSource().getServer());

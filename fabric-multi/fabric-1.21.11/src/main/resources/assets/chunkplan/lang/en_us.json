@@ -31,7 +31,7 @@
   "gui.chunkplan.dim.pick_dim": "View dim",
   "gui.chunkplan.dim.redirect": "Redirect",
   "gui.chunkplan.dim.save_coords": "Save coords/mode",
-  "gui.chunkplan.dim.shared": "Shared global lines",
+  "gui.chunkplan.dim.shared": "Shared across dimensions",
   "gui.chunkplan.dim.shared_mode_hint": "Quota lines are editable only in per-dimension mode",
   "gui.chunkplan.dim.slot1": "Primary",
   "gui.chunkplan.dim.slot2": "Secondary",

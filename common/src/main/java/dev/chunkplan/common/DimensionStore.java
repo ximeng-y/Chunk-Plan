@@ -17,7 +17,7 @@ import org.slf4j.LoggerFactory;
 /**
  * 维度计费配置库（{@code dimensions.json}，issue #3）：维度独立计费的全套配置。
  *
- * <p>内容：模式（shared 共享全局额度线 / independent 每维度独立四档）、每维度计费开关
+ * <p>内容：模式（shared 全维度共享额度 / independent 每维度独立四档）、每维度计费开关
  * 与默认落地坐标（/tp 数据规范）、每维度四档额度线快照、耗尽重定向（开关 + 3 个固定槽）。
  *
  * <p>为什么独立存 JSON 而不进各端主配置文件：四端主配置格式不同（TOML/JSON），维度是

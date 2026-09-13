@@ -240,6 +240,14 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **协议级验证边界**：mineflayer 裸协议客户端在 NeoForge 21.1 **无法接收 S2C 自定义 payload**——`NetworkRegistry.checkPacket` 抛 `Payload chunkplan:gui_status may not be sent to the client!`（未在协商阶段注册通道的连接拒收，真实 mod 客户端不受影响）。但 C2S 请求正常派发，且 proto=4/proto=999 两分支均跑到发送点无异常 = **NPE 修复在真实复现路径（管理员 + 未配满重定向槽位）上验证通过**；S2C 回包与 GUI 渲染仍需用户实机验证（坑 #11 系列盲区）
     - **验证**：common 169 → 173（+DimensionStore null 槽位 1 + GuiStatus v4 roundtrip/横幅工厂/尾随字节忽略 3 + 错误版本改横幅断言 1 换 1）；根构建 + fabric-multi 三版本 build 全绿；五端 GUI/网络/客户端类经 Node 断言式脚本镜像（`.XMTEMP/patch_gui_v4.js`），新方法 diff 自检 fabric≡1.21.11、26.x 仅 GuiGraphicsExtractor/g.text 差异行
 
+47. **维度页布局修正 + 下拉遮盖 + 共享模式文案（坑 #47，2026-09-13，用户 NeoForge 实机截图反馈，版本保持 0.3.0）**：
+    - **表头与首行重叠**：列表头画在 y=56，而 `DIM_LIST_TOP=62`（首行控件顶边）→ 文字压进行件顶边 3px。修复：表头 58、`DIM_LIST_TOP=70`（表头上距模式行按钮 2px、下距首行 3px）
+    - **保存按钮自适应**：原 `dimEditorTop()=height-118`、`dimSaveY()=height-144` 钉死屏底，维度少时列表与保存钮之间大片空白。改为**自上而下流式**：`dimListBottom()`（`DIM_LIST_TOP + min(dims, visibleRows)×24`，行数按维度数封顶）→ `dimSaveY()=listBottom+6` → `dimEditorTop()=saveY+26`；`dimVisibleRows()=(height-218)/24`（218 = 列表顶 70 + 保存钮区 32 + 编辑器 110 + 底边距 6）。build/render/滚动共用同一布局推导
+    - **下拉框遮盖（重要环境事实）**：用户整合包环境**文本绘制层浮于后画填充之上**（像素级实证：tier 行文字透在维度下拉的不透明黑底与灰高亮条上；疑似字体合批类性能 mod 如 ImmediatelyFast 所致）→ **遮盖式下拉不能依赖绘制顺序 z 序**，修复两层：① 黑底加 2px 底部补白（末行文字下缘原与下边框零间距），末行命中区同步 +2（管理页补全下拉同规则）；② 维度下拉展开期间**不建/不画被覆盖内容**（`buildDimensions` 档位行控件提前 return、`renderDimensions` 档位标签、`renderUsage` 下方额度内容）——正常 z 序环境下视觉不变（本就被黑底盖住），合批环境下杜绝透出。管理页 reset/preset 补全下拉（page 1）未做内容隐藏（未反馈，后续同症状同处理）
+    - **文案更名**：`gui.chunkplan.dim.shared` "共享全局额度线"→"全维度共享额度"（en "Shared global lines"→"Shared across dimensions"），×12 lang；4 份 QuotaCommands 的 dimensionMode 非法参数错误提示括号内术语同步。**"已切换到共享计费（全局额度线与预设恢复生效…）"成功提示不改**——它描述机制事实而非模式名称标签
+    - **port_gui.py 缺口修复**：脚本写于坑 #45，坑 #46 新增的 `ChunkPlanClient.clientVersion()` 不在替换清单 → 重新生成五端时会把该调用错写成 neoforge 的 `ChunkPlanClient`（fabric/forge 端类不存在，编译失败）。已在四个移植函数补 clientVersion 替换。**教训：每次在 neoforge GUI 新增对客户端类的调用后，重跑 port_gui.py 前必须核对替换清单是否覆盖；镜像自检用"port 函数内存变换 neoforge 基线 vs 磁盘文件逐字节比对"最可靠**
+    - **验证**：common 173 测试不变（纯壳层/lang 改动）；根构建 + fabric-multi 三版本 build 全绿；五端镜像自检 MIRROR OK；产物 jar 刷新至 `.XMTEMP/jars-0.3.0/`（版本号经用户拍板保持 0.3.0 不 bump，覆盖安装需以构建时间为准区分新旧 jar）
+
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
 - 各端配置结构保持一致（TOML 与 JSON 字段一一对应；forge 与 neoforge 的 TOML 键完全相同）

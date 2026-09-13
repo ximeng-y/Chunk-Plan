@@ -165,6 +165,11 @@ public final class ChunkPlanGuiScreen extends Screen {
         requestStatus();
     }
 
+    /** 当前是否处于版本不匹配兜底状态（decode 返回的版本横幅） */
+    private boolean isVersionMismatch() {
+        return status != null && status.versionMismatch();
+    }
+
     /** 重建控件（onStatus / 切页 / 初始化共用；不重新发请求，避免循环） */
     private void rebuild() {
         clearWidgets();
@@ -628,20 +633,29 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     // ---------- 维度页（issue #3） ----------
 
-    private static final int DIM_LIST_TOP = 62;
+    private static final int DIM_LIST_TOP = 70;
     private static final int DIM_ROW_H = 24;
+    /** 底部档位编辑器整体占高（选择器行 18 + 间隔 6 + 4 档 × 22），可视行数推导共用 */
+    private static final int DIM_EDITOR_H = 110;
 
-    /** 维度页底部档位编辑器顶部 y（build/render/滚动共用同一布局推导） */
-    private int dimEditorTop() {
-        return height - 118;
+    /** 维度列表可视行数：按窗口高度自适应，为保存按钮区(32)与底部编辑器(110)、底边距(6)留位 */
+    private int dimVisibleRows() {
+        return Math.max(1, (height - DIM_LIST_TOP - 32 - DIM_EDITOR_H - 6) / DIM_ROW_H);
+    }
+
+    /** 列表实际底部 y：行数按维度数封顶，维度少时保存按钮与编辑器整体上移（自适应布局） */
+    private int dimListBottom() {
+        int rows = Math.min(dimensionKeys().size(), dimVisibleRows());
+        return DIM_LIST_TOP + Math.max(0, rows) * DIM_ROW_H;
     }
 
     private int dimSaveY() {
-        return dimEditorTop() - 26;
+        return dimListBottom() + 6;
     }
 
-    private int dimVisibleRows() {
-        return Math.max(1, (dimSaveY() - 6 - DIM_LIST_TOP) / DIM_ROW_H);
+    /** 维度页底部档位编辑器顶部 y（保存按钮下缘 + 6；build/render/滚动共用同一布局推导） */
+    private int dimEditorTop() {
+        return dimSaveY() + 26;
     }
 
     /** 维度键列表（管理员：live ∪ 已配置；普通玩家：服务端下发的 live 维度） */
@@ -789,6 +803,10 @@ public final class ChunkPlanGuiScreen extends Screen {
                 Component.literal(selectedDim == null ? "—" : font.plainSubstrByWidth(selectedDim, 140)),
                 b -> openDimDropdown(2, left, et, 150, 18));
         if (selectedDim == null) {
+            return;
+        }
+        // 下拉展开期间不建档位行控件：该环境文本绘制层浮于后画填充之上（如字体合批 mod），会透出下拉黑底
+        if (dimDropdownOpen && dimDropdownPage == 2) {
             return;
         }
         DimTierEdit st = dimEditState(selectedDim);
@@ -1087,10 +1105,10 @@ public final class ChunkPlanGuiScreen extends Screen {
         boolean independent = status.dimensionMode() == 1;
         boolean effIndependent = independent || Boolean.TRUE.equals(pendingDimMode);
         List<String> dims = dimensionKeys();
-        // 列表头
-        g.text(font, Component.translatable("gui.chunkplan.dim.dim_header"), x + 2, 56, COL_GRAY);
-        g.text(font, Component.translatable("gui.chunkplan.dim.billing"), x + 152, 56, COL_GRAY);
-        g.text(font, Component.translatable("gui.chunkplan.dim.spawn_header"), x + 216, 56, COL_GRAY);
+        // 列表头（y=58：上距模式行按钮 2px、下距列表首行 3px，原 y=56 与首行控件顶边重叠）
+        g.text(font, Component.translatable("gui.chunkplan.dim.dim_header"), x + 2, 58, COL_GRAY);
+        g.text(font, Component.translatable("gui.chunkplan.dim.billing"), x + 152, 58, COL_GRAY);
+        g.text(font, Component.translatable("gui.chunkplan.dim.spawn_header"), x + 216, 58, COL_GRAY);
         // 行内容（控件之外的文字）
         int visibleRows = dimVisibleRows();
         for (int i = 0; i < dims.size(); i++) {
@@ -1123,7 +1141,8 @@ public final class ChunkPlanGuiScreen extends Screen {
             g.text(font, Component.translatable("gui.chunkplan.dim.shared_mode_hint"), x + 240, et + 6, COL_GRAY);
         }
         DimTierEdit st = selectedDim == null ? null : dimEdits.get(selectedDim);
-        if (st != null) {
+        // 与 buildDimensions 同规则：下拉展开期间档位行控件未建，行文字一并隐藏
+        if (st != null && !(dimDropdownOpen && dimDropdownPage == 2)) {
             for (int i = 0; i < 4; i++) {
                 int ry = et + 24 + i * 22;
                 g.text(font, Component.literal("tier" + (i + 1)), x + 2, ry + 6, COL_TEXT);
@@ -1169,7 +1188,8 @@ public final class ChunkPlanGuiScreen extends Screen {
         int sW = Math.max(dropSrcW, 120);
         int maxRows = Math.max(1, (height - sy - 6) / SUGGEST_ROW_H);
         int rows = Math.min(dims.size(), maxRows);
-        int sH = rows * SUGGEST_ROW_H;
+        // 底部多留 2px：末行文字下缘原与下边框零间距（用户实测反馈"黑背景没有完美盖住底部"）
+        int sH = rows * SUGGEST_ROW_H + 2;
         g.fill(sx, sy, sx + sW, sy + sH, 0xFF000000);
         g.fill(sx, sy, sx + sW, sy + 1, 0xFFFFFFFF);
         g.fill(sx, sy + sH - 1, sx + sW, sy + sH, 0xFFFFFFFF);
@@ -1290,7 +1310,8 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         int sx = resetTargetX;
         int sW = Math.max(resetTargetW + 30, 120);
-        int sH = resetSuggestions.size() * SUGGEST_ROW_H;
+        // 底部多留 2px：末行文字下缘原与下边框零间距（与维度下拉同规则）
+        int sH = resetSuggestions.size() * SUGGEST_ROW_H + 2;
         int sy = resetTargetY + resetTargetH + 2;
         g.fill(sx, sy, sx + sW, sy + sH, 0xFF000000);
         g.fill(sx, sy, sx + sW, sy + 1, 0xFFFFFFFF);
@@ -1387,11 +1408,6 @@ public final class ChunkPlanGuiScreen extends Screen {
         super.extractRenderState(g, mouseX, mouseY, partialTick);
     }
 
-    /** 当前是否处于版本不匹配兜底状态（decode 返回的版本横幅） */
-    private boolean isVersionMismatch() {
-        return status != null && status.versionMismatch();
-    }
-
     /** 版本不匹配兜底页：协议版本不一致时服务端回版本横幅，只显示两端版本号 */
     private void renderVersionMismatch(GuiGraphicsExtractor g) {
         int x = 12;
@@ -1458,6 +1474,9 @@ public final class ChunkPlanGuiScreen extends Screen {
             g.text(font, Component.literal(shown), dimDropX + 4, dimDropY + 4, COL_TEXT);
             g.text(font, Component.literal("▼"), dimDropX + dimDropW - 10, dimDropY + 4, COL_GRAY);
             y += 22;
+            if (dimDropdownOpen && dimDropdownPage == 0) {
+                return; // 下拉展开期间不画下方额度内容：文本会浮于下拉黑底之上（同维度页处理）
+            }
         }
         List<QuotaEngine.LineStatus> lines = dl == null ? s.lines() : dl.lines();
         if (lines.isEmpty()) {
@@ -1643,7 +1662,7 @@ public final class ChunkPlanGuiScreen extends Screen {
             return true; // 弹窗期间拦截底层点击
         }
         if (dimDropdownOpen) {
-            // 维度真下拉：命中行选中；点击列表外关闭
+            // 维度真下拉：命中行选中（末行含 2px 底部补白）；点击列表外关闭
             int sx = dropSrcX;
             int sy = dropSrcY + dropSrcH + 2;
             int sW = Math.max(dropSrcW, 120);
@@ -1651,7 +1670,8 @@ public final class ChunkPlanGuiScreen extends Screen {
             int maxRows = Math.max(1, (height - sy - 6) / SUGGEST_ROW_H);
             int rows = Math.min(dims.size(), maxRows);
             for (int i = 0; i < rows; i++) {
-                if (inRect(event.x(), event.y(), sx, sy + i * SUGGEST_ROW_H, sW, SUGGEST_ROW_H)) {
+                int h = SUGGEST_ROW_H + (i == rows - 1 ? 2 : 0);
+                if (inRect(event.x(), event.y(), sx, sy + i * SUGGEST_ROW_H, sW, h)) {
                     acceptDimDropdown(i);
                     return true;
                 }
@@ -1666,11 +1686,11 @@ public final class ChunkPlanGuiScreen extends Screen {
             return true;
         }
         if (!resetSuggestions.isEmpty()) {
-            int sH = resetSuggestions.size() * SUGGEST_ROW_H;
             int paneY = resetTargetY + resetTargetH + 2;
             for (int i = 0; i < resetSuggestions.size(); i++) {
+                int h = SUGGEST_ROW_H + (i == resetSuggestions.size() - 1 ? 2 : 0); // 末行含底部补白
                 if (inRect(event.x(), event.y(), resetTargetX, paneY + i * SUGGEST_ROW_H,
-                        Math.max(resetTargetW + 30, 120), SUGGEST_ROW_H)) {
+                        Math.max(resetTargetW + 30, 120), h)) {
                     acceptResetSuggestion(i);
                     return true;
                 }
