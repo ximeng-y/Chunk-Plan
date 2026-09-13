@@ -17,7 +17,7 @@ import org.slf4j.LoggerFactory;
 /**
  * 维度计费配置库（{@code dimensions.json}，issue #3）：维度独立计费的全套配置。
  *
- * <p>内容：模式（shared 共享全局额度线 / independent 每维度独立四档）、每维度计费开关
+ * <p>内容：模式（shared 全维度共享额度 / independent 每维度独立四档）、每维度计费开关
  * 与默认落地坐标（/tp 数据规范）、每维度四档额度线快照、耗尽重定向（开关 + 3 个固定槽）。
  *
  * <p>为什么独立存 JSON 而不进各端主配置文件：四端主配置格式不同（TOML/JSON），维度是
@@ -46,6 +46,11 @@ public final class DimensionStore {
 
     /** 单维度配置：billing=false = 该维度不计费（可自由进入，issue 评论"不限制探索的世界"）；spawn=null 未设置；tiers=null 未初始化快照（恒 4 项） */
     public record DimConfig(boolean billing, SpawnPoint spawn, List<QuotaTiers.Tier> tiers) {
+    }
+
+    /** 重定向槽位设置结果：DUPLICATE = 该维度已占用其它槽位；GAP = 前置槽为空（槽位须自首选起连续填写） */
+    public enum RedirectResult {
+        OK, DUPLICATE, GAP
     }
 
     private final Path file;
@@ -107,13 +112,34 @@ public final class DimensionStore {
         return redirectOrder.get(slot);
     }
 
-    /** 设置重定向槽位（slot 0~2；dim 传 null 清空该槽；不校验维度是否存在于世界，壳层负责候选范围） */
-    public synchronized void setRedirectTarget(int slot, String dim) {
+    /**
+     * 设置重定向槽位（slot 0~2；dim 传 null/空串清空该槽）。不校验维度是否存在于世界
+     * （壳层负责候选范围）。槽位两条不变量（用户拍板）：不得跨槽重复、须自首选起连续填写——
+     * 首选为空则次选不可选、次选为空则备选不可选；违反返回 DUPLICATE/GAP 且不改动配置。
+     * 清空某槽时连带清空其后所有槽位（否则留下"首选空而次选有值"的矛盾态）。
+     */
+    public synchronized RedirectResult setRedirectTarget(int slot, String dim) {
         if (slot < 0 || slot >= redirectOrder.size()) {
             throw new IllegalArgumentException("非法重定向槽位: " + slot);
         }
-        redirectOrder.set(slot, dim == null || dim.isEmpty() ? null : dim);
+        if (dim == null || dim.isEmpty()) {
+            for (int i = slot; i < redirectOrder.size(); i++) {
+                redirectOrder.set(i, null);
+            }
+            save();
+            return RedirectResult.OK;
+        }
+        if (slot > 0 && redirectOrder.get(slot - 1) == null) {
+            return RedirectResult.GAP;
+        }
+        for (int i = 0; i < redirectOrder.size(); i++) {
+            if (i != slot && dim.equals(redirectOrder.get(i))) {
+                return RedirectResult.DUPLICATE;
+            }
+        }
+        redirectOrder.set(slot, dim);
         save();
+        return RedirectResult.OK;
     }
 
     /** 该维度是否计费（无条目默认计费=true，两种模式同语义） */
@@ -163,6 +189,17 @@ public final class DimensionStore {
         }
         save();
         return true;
+    }
+
+    /** 清空落地坐标（条目保留计费开关与额度线快照）。坐标不清空会导致配置改不掉——
+     *  GUI 留空曾被 saveDimCoords 的"非法即跳过"吞掉，玩家无法把已配坐标改回未配置 */
+    public synchronized void clearSpawn(String dimKey) {
+        DimConfig d = dims.get(dimKey);
+        if (d == null || d.spawn() == null) {
+            return;
+        }
+        dims.put(dimKey, new DimConfig(d.billing(), null, d.tiers()));
+        save();
     }
 
     /**
@@ -274,9 +311,17 @@ public final class DimensionStore {
         }
         redirectOnExhaust = dto.redirectOnExhaust;
         if (dto.redirectOrder != null) {
-            for (int i = 0; i < redirectOrder.size() && i < dto.redirectOrder.size(); i++) {
+            // 落盘数据可能来自旧版本（无重复/连续性校验，实测有 [overworld, the_end, the_end]）：
+            // 归一为"无重复 + 自首选起连续"，与 setRedirectTarget 的不变量对齐，否则界面会出现
+            // 灰着的槽位里仍写着维度、或同一维度占两槽的矛盾画面
+            LinkedHashSet<String> picked = new LinkedHashSet<>();
+            int out = 0;
+            for (int i = 0; i < dto.redirectOrder.size() && out < redirectOrder.size(); i++) {
                 String d = dto.redirectOrder.get(i);
-                redirectOrder.set(i, d == null || d.isEmpty() ? null : d);
+                if (d == null || d.isEmpty() || !picked.add(d)) {
+                    continue; // 空槽或重复维度：丢弃并让后续槽位前移（连续性由 out 递增保证）
+                }
+                redirectOrder.set(out++, d);
             }
         }
         if (dto.dimensions != null) {

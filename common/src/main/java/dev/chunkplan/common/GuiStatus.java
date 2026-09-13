@@ -24,7 +24,7 @@ import java.util.List;
  *   <li>{@code worstPercent}：跨窗口当前最高档位百分比（-1 = 无档，坑 #29 档位词显示用）</li>
  *   <li>{@code presets}：预设名列表（v2，issue #1；仅管理员请求填充，与 tiers 同策略）</li>
  *   <li>{@code playerPreset}：请求玩家当前预设名（v2，issue #2；null = 跟随全局 default）</li>
- *   <li>{@code dimensionMode}（v3，issue #3）：0 = 共享全局额度线，1 = 每维度独立</li>
+ *   <li>{@code dimensionMode}（v3，issue #3）：0 = 全维度共享额度，1 = 每维度独立</li>
  *   <li>{@code currentDim}（v3）：请求玩家当前所在维度 key（null = 未知）</li>
  *   <li>{@code dimensions}（v3）：服务器全部 live 维度 key（动态 getAllLevels，兼容 mod 注册维度）</li>
  *   <li>{@code dimLines}（v3）：各维度下该玩家的额度状态（用量页维度下拉；全体下发）</li>

@@ -64,10 +64,12 @@ public final class ChunkPlanGuiScreen extends Screen {
     private boolean pendingSkipConfirm;
 
     // 管理页控件
-    private final Button[] tierToggle = new Button[4];
-    private final Button[] tierWindow = new Button[4];
     private final EditBox[] tierLimit = new EditBox[4];
     private final Button[] tierLimitSet = new Button[4];
+    /** 档位行手绘下拉条命中区（[tier] = {x,y,w,h}）：开关条恒可点，窗口条随该档开关启用 */
+    private final int[][] tierToggleRect = new int[4][4];
+    private final int[][] tierWindowRect = new int[4][4];
+    private final boolean[] tierWindowClickable = new boolean[4];
     private EditBox multEdit;
     private EditBox newFeeEdit;
     private EditBox familiarFeeEdit;
@@ -109,32 +111,43 @@ public final class ChunkPlanGuiScreen extends Screen {
     // ---------- 维度页（issue #3） ----------
     private Button dimModeButton;
     private Button redirectButton;
-    private final Button[] slotButtons = new Button[3];
-    private Button dimSaveButton;
+    /** 重定向 3 槽位手绘下拉条命中区（[slot] = {x,y,w,h}）与可点性（须自首选起连续） */
+    private final int[][] slotBarRect = new int[3][4];
+    private final boolean[] slotBarClickable = new boolean[3];
     private Button dimEditCycle;
-    private final Button[] dimTierToggle = new Button[4];
-    private final Button[] dimTierWindow = new Button[4];
     private final EditBox[] dimTierLimit = new EditBox[4];
     private final Button[] dimTierSet = new Button[4];
+    private final int[][] dimTierToggleRect = new int[4][4];
+    private final int[][] dimTierWindowRect = new int[4][4];
+    private final boolean[] dimTierWindowClickable = new boolean[4];
     /** 列表滚动行数（滚轮） */
     private int dimScroll;
-    /** 待切换的维度模式（true=独立 false=共享；null=无）：随「保存」按钮批量派发，坐标非法时保存灰 */
+    /** 待切换的维度模式（true=独立 false=共享；null=无）：随「保存」按钮批量派发 */
     private Boolean pendingDimMode;
-    private boolean dimCoordsDirty;
+    /** 保存动作是否已派发（驱动「坐标配置已保存」灰字；未保存红字由 dimCoordsDirty() 现算） */
     private boolean dimCoordsSavedShown;
-    /** 每维度坐标输入保留（key=dim -> [x,y,z]；null 元素 = 未编辑，回显服务端值） */
+    /** 每维度坐标输入保留（key=dim -> [x,y,z]；非 null 元素 = 已编辑过，可能是空串 = 玩家清空） */
     private final Map<String, String[]> savedDimCoords = new HashMap<>();
+    /** 每维度计费开关的待保存值（key=dim；与坐标/模式同批派发，不再即时生效——用户反馈不一致） */
+    private final Map<String, Boolean> pendingBilling = new HashMap<>();
     /** 每维度档位编辑状态（key=dim；结构与管理页档位行一致） */
     private final Map<String, DimTierEdit> dimEdits = new HashMap<>();
     /** 底部档位编辑器当前选中维度（null = 第一个） */
     private String selectedDim;
 
-    // 维度真下拉（用量页查看维度 + 维度页编辑器选维度，共用一套展开状态）
+    // 维度真下拉（用量页查看维度 + 维度页编辑器选维度 + 重定向槽位 + 档位开关，共用一套展开状态）
+    // dimDropdownPage：0 = 用量页维度 1 = 管理页补全（未用） 2 = 维度页编辑器 3 = 重定向槽 4 = 档位开关
     private boolean dimDropdownOpen;
     private int dimDropdownPage;
     private int dimDropdownSelected = -1;
     private int dimDropX, dimDropY, dimDropW, dimDropH;
     private int dropSrcX, dropSrcY, dropSrcW, dropSrcH;
+    /** 下拉展开时高亮的行索引（-1 = 无）：page 4 复用 dimDropdownSelected 表示当前生效项 */
+    private int redirectSlotEditing = -1;
+    /** 档位开关下拉的宿主信息：page 4 时记录哪一行的哪个条（管理页） */
+    private int toggleTierRow = -1;
+    /** 档位开关下拉的宿主信息：非 null = 维度页该维度的档位行 */
+    private String toggleTierDim;
     /** 用量页当前选中维度（null = 跟随当前所在维度；每次状态刷新重置，无记忆） */
     private String usageDim;
     /** 待确认批量命令所属维度（非 null = 维度页档位编辑器发起，确认后按维度状态标记已保存） */
@@ -205,7 +218,7 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     private void switchPage(int p) {
         this.page = p;
-        this.dimDropdownOpen = false; // 跨页关闭维度下拉（展开状态按页锚定）
+        resetDropdownState(); // 跨页关闭下拉（展开状态按页锚定）；rebuild 由下行统一做
         rebuild();
     }
 
@@ -228,6 +241,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (independent) {
             gy = 64; // 顶部渲染侧留一行提示文字
         } else {
+            java.util.Arrays.fill(tierLimit, null); // 被下拉覆盖的行不建控件：先清引用防误用旧实例
             for (int i = 0; i < 4; i++) {
                 int tier = i + 1;
                 QuotaTiers.Tier rt = rawTier(tier);
@@ -251,26 +265,27 @@ public final class ChunkPlanGuiScreen extends Screen {
 
                 boolean effOn = effEnabled(tier);
                 int ry = 36 + i * rowH;
+                // 展开中的下拉覆盖该行时不建控件：被覆盖内容一律不画（文本层浮于填充之上，坑 #47）。
+                // 探测框只取本行控件本身（高 20），不含行间空隙——否则会把展开源那一行自己也算作被覆盖
+                if (coveredByDropdown(left, ry, 420, 20)) {
+                    continue; // 逐行判定：下拉较短时其下方的行仍要正常显示
+                }
 
+                // 开关与窗口都是手绘下拉条（非 Button）：与用量页维度选择器同一观感（用户反馈过
+                // 原生 Button 不像下拉框）
                 int tx = left + 96;
-                tierToggle[i] = addButton(tx, ry, 52, 20,
-                        effOn ? Component.translatable("gui.chunkplan.enabled")
-                                : Component.translatable("gui.chunkplan.disabled"),
-                        b -> toggleTier(tier));
-
+                setRect(tierToggleRect[i], tx, ry, 52, 20);
                 int wx = tx + 58;
                 String win = pendingWindow[idx] != null ? pendingWindow[idx] : curWindow;
-                tierWindow[i] = addButton(wx, ry, 74, 20,
-                        Component.literal(win.isEmpty() ? "—" : win),
-                        b -> cycleWindow(tier));
-                tierWindow[i].active = effOn;
+                setRect(tierWindowRect[i], wx, ry, 74, 20);
+                tierWindowClickable[i] = effOn;
 
                 int lx = wx + 80;
                 tierLimit[idx] = new EditBox(font, lx, ry, 56, 20, Component.empty());
                 tierLimit[idx].setValue(savedLimit[idx] != null ? savedLimit[idx] : fmtLimit(curLimit));
                 tierLimit[idx].setResponder(v -> {
                     savedLimit[idx] = v.trim().isEmpty() ? null : v; // 清空视为无更改，重建回显服务端值
-                    markTierDirty(tier);
+                    markTierDirtyIfChanged(tier);
                 });
                 addRenderableWidget(tierLimit[idx]);
                 tierLimit[idx].active = effOn;
@@ -364,6 +379,33 @@ public final class ChunkPlanGuiScreen extends Screen {
         return addRenderableWidget(Button.builder(msg, onPress).bounds(x, y, w, h).build());
     }
 
+    private static void setRect(int[] rect, int x, int y, int w, int h) {
+        rect[0] = x;
+        rect[1] = y;
+        rect[2] = w;
+        rect[3] = h;
+    }
+
+    private static boolean inRect(double mx, double my, int[] r) {
+        return inRect(mx, my, r[0], r[1], r[2], r[3]);
+    }
+
+    /**
+     * 手绘下拉条（黑底 + 四边白描边 + 右端 ▼）：非 Button，与用量页维度选择器同一观感。
+     * 用户反馈原生 Button 的开关/窗口控件不像下拉框，故统一为手绘条（坑 #49）。
+     */
+    private void drawSelectBar(GuiGraphics g, int x, int y, int w, int h, Component label, boolean grey) {
+        g.fill(x, y, x + w, y + h, COL_BG);
+        g.fill(x, y, x + w, y + 1, 0xFFFFFFFF);
+        g.fill(x, y + h - 1, x + w, y + h, 0xFFFFFFFF);
+        g.fill(x, y, x + 1, y + h, 0xFFFFFFFF);
+        g.fill(x + w - 1, y, x + w, y + h, 0xFFFFFFFF);
+        int color = grey ? COL_GRAY : COL_TEXT;
+        String shown = font.plainSubstrByWidth(label.getString(), w - 20);
+        g.drawString(font, Component.literal(shown), x + 4, y + (h - 8) / 2, color);
+        g.drawString(font, Component.literal("▼"), x + w - 10, y + (h - 8) / 2, grey ? COL_GRAY : COL_ACCENT);
+    }
+
     private QuotaTiers.Tier rawTier(int tier) {
         if (status == null || status.tiers() == null || tier < 1 || tier > status.tiers().size()) {
             return null;
@@ -396,6 +438,24 @@ public final class ChunkPlanGuiScreen extends Screen {
     /** 栏位发生待应用更改：该档红字提示 */
     private void markTierDirty(int tier) {
         this.tierDirty[tier - 1] = true;
+    }
+
+    /**
+     * 输入框值确实变了才打「未保存」标记。原版 EditBox 的 mouseClicked → onClick → moveCursorTo
+     * 会无条件调用 responder（EditBox.java:243），光聚焦不动也会回调一次——不加比对会出现
+     * 「点一下输入框就红字报未保存」（用户实测反馈，遗留 bug）。
+     */
+    private void markTierDirtyIfChanged(int tier) {
+        int i = tier - 1;
+        QuotaTiers.Tier t = rawTier(tier);
+        String saved = t == null ? "" : fmtLimit(t.limit());
+        String typed = tierLimit[i] == null ? "" : tierLimit[i].getValue().trim();
+        if (typed.isEmpty()) {
+            return; // 清空视为无更改（applyTier 同样跳过空值），重建回显服务端值
+        }
+        if (!typed.equals(saved)) {
+            markTierDirty(tier);
+        }
     }
 
     /** 保存后：清该档未保存标记并显示灰字「设置已保存」 */
@@ -460,30 +520,29 @@ public final class ChunkPlanGuiScreen extends Screen {
     }
 
     private void toggleTier(int tier) {
+        toggleTierRow = tier - 1;
+        toggleTierDim = null;
+        openDimDropdown(4, tierToggleRect[tier - 1]);
+        rebuild(); // 被下拉覆盖的行不再建控件：该环境文本浮于后画填充之上，仅靠绘制顺序遮不住
+    }
+
+    /** 档位开关下拉选中：仅改本地待应用状态，仍须点「设置」才落盘（沿用既有语义） */
+    private void setTierEnabled(int tier, boolean next) {
         int i = tier - 1;
-        boolean next = !effEnabled(tier);
         pendingEnabledSet[i] = true;
         pendingEnabled[i] = next;
-        tierToggle[i].setMessage(next ? Component.translatable("gui.chunkplan.enabled")
-                : Component.translatable("gui.chunkplan.disabled"));
-        tierWindow[i].active = next;
-        tierLimit[i].active = next;
         markTierDirty(tier);
+        rebuild(); // 窗口条/额度输入框的灰显随开关联动，重建刷新
     }
 
     private void cycleWindow(int tier) {
-        int i = tier - 1;
-        QuotaTiers.Tier t = rawTier(tier);
-        List<String> presets = presets(tier);
-        String cur = pendingWindow[i] != null ? pendingWindow[i] : (t == null ? null : t.window());
-        if (presets.isEmpty() || cur == null) {
+        if (!effEnabled(tier)) {
             return;
         }
-        int idx = presets.indexOf(cur);
-        String next = presets.get((idx < 0 ? 0 : (idx + 1) % presets.size()));
-        pendingWindow[i] = next;
-        tierWindow[i].setMessage(Component.literal(next));
-        markTierDirty(tier);
+        toggleTierRow = tier - 1;
+        toggleTierDim = null;
+        openDimDropdown(5, tierWindowRect[tier - 1]);
+        rebuild();
     }
 
     private void setMultiplier() {
@@ -633,20 +692,29 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     // ---------- 维度页（issue #3） ----------
 
-    private static final int DIM_LIST_TOP = 62;
+    private static final int DIM_LIST_TOP = 70;
     private static final int DIM_ROW_H = 24;
+    /** 底部档位编辑器整体占高（选择器行 18 + 间隔 6 + 4 档 × 22），可视行数推导共用 */
+    private static final int DIM_EDITOR_H = 110;
 
-    /** 维度页底部档位编辑器顶部 y（build/render/滚动共用同一布局推导） */
-    private int dimEditorTop() {
-        return height - 118;
+    /** 维度列表可视行数：按窗口高度自适应，为保存按钮区(32)与底部编辑器(110)、底边距(6)留位 */
+    private int dimVisibleRows() {
+        return Math.max(1, (height - DIM_LIST_TOP - 32 - DIM_EDITOR_H - 6) / DIM_ROW_H);
+    }
+
+    /** 列表实际底部 y：行数按维度数封顶，维度少时保存按钮与编辑器整体上移（自适应布局） */
+    private int dimListBottom() {
+        int rows = Math.min(dimensionKeys().size(), dimVisibleRows());
+        return DIM_LIST_TOP + Math.max(0, rows) * DIM_ROW_H;
     }
 
     private int dimSaveY() {
-        return dimEditorTop() - 26;
+        return dimListBottom() + 6;
     }
 
-    private int dimVisibleRows() {
-        return Math.max(1, (dimSaveY() - 6 - DIM_LIST_TOP) / DIM_ROW_H);
+    /** 维度页底部档位编辑器顶部 y（保存按钮下缘 + 6；build/render/滚动共用同一布局推导） */
+    private int dimEditorTop() {
+        return dimSaveY() + 26;
     }
 
     /** 维度键列表（管理员：live ∪ 已配置；普通玩家：服务端下发的 live 维度） */
@@ -723,15 +791,14 @@ public final class ChunkPlanGuiScreen extends Screen {
                         .append(Component.translatable(red ? "gui.chunkplan.on" : "gui.chunkplan.off")),
                 b -> sendCommand("chunkplan config redirect " + (red ? "off" : "on")));
         redirectButton.active = independent;
+        // 3 个槽位：手绘下拉条（真下拉，可空选、不可重复、须自首选起连续填写——服务端同规则）
+        List<String> order = status.dimConfig().redirectOrder();
         for (int s = 0; s < 3; s++) {
-            List<String> order = status.dimConfig().redirectOrder();
             String cur = s < order.size() ? order.get(s) : null;
-            final int slot = s + 1;
-            slotButtons[s] = addButton(left + 298 + s * 106, 36, 100, 20,
-                    Component.translatable("gui.chunkplan.dim.slot" + slot)
-                            .append(Component.literal(": " + (cur == null ? "—" : shortDim(cur)))),
-                    b -> cycleRedirectSlot(slot));
-            slotButtons[s].active = independent;
+            setRect(slotBarRect[s], left + 298 + s * 106, 36, 100, 20);
+            // 次选需首选非空，备选需次选非空（用户规则）；共享模式下整行不可点
+            slotBarClickable[s] = independent
+                    && (s == 0 || (s < order.size() && order.get(s - 1) != null));
         }
 
         // 维度列表（滚轮滚动，见 mouseScrolled）：计费开关（两种模式通用）+ x/y/z 坐标输入
@@ -750,43 +817,56 @@ public final class ChunkPlanGuiScreen extends Screen {
             GuiStatus.DimEntry e = dimEntry(dim);
             boolean billing = e == null || e.billing();
             final String dimF = dim;
+            // 坐标列被展开中的下拉覆盖时不建该行控件（重定向槽位下拉会压住前几行）
+            if (coveredByDropdown(left + 212, ry, 192, 18)) {
+                continue;
+            }
+            // 服务端已确认的待保存开关：消费保留值，回显服务端真相（与坐标/档位同规则）
+            Boolean pb = pendingBilling.get(dim);
+            boolean curBilling = pb != null ? pb : billing;
+            if (pb != null && pb == billing) {
+                pendingBilling.remove(dim);
+            }
             addButton(left + 150, ry, 48, 18,
-                    Component.translatable(billing ? "gui.chunkplan.on" : "gui.chunkplan.off"),
-                    b -> sendCommand("chunkplan config dimension " + dimF + " billing "
-                            + (billing ? "off" : "on")));
+                    Component.translatable(curBilling ? "gui.chunkplan.on" : "gui.chunkplan.off"),
+                    b -> toggleDimBilling(dimF, curBilling));
             for (int k = 0; k < 3; k++) {
                 String[] saved = savedDimCoords.computeIfAbsent(dim, d -> new String[3]);
                 GuiStatus.DimEntry fe = e;
                 final int axis = k;
-                // 服务端已确认的编辑值：消费保留输入，回显格式化服务端值（与管理页 savedLimit 同规则）
+                // 服务端已确认的编辑值：消费保留输入，回显格式化服务端值（与管理页 savedLimit 同规则）；
+                // 清空亦然——服务端已无坐标且本地为空时消费，"留空即清除"不会永远停在未保存
                 if (saved[k] != null) {
-                    try {
-                        double v = Double.parseDouble(saved[k]);
-                        if (fe != null && fe.hasSpawn()
-                                && Double.compare(v, axis == 0 ? fe.x() : axis == 1 ? fe.y() : fe.z()) == 0) {
-                            saved[k] = null;
+                    if ((fe == null || !fe.hasSpawn()) && saved[k].trim().isEmpty()) {
+                        saved[k] = null;
+                    } else {
+                        try {
+                            double v = Double.parseDouble(saved[k]);
+                            if (fe != null && fe.hasSpawn()
+                                    && Double.compare(v, axis == 0 ? fe.x() : axis == 1 ? fe.y() : fe.z()) == 0) {
+                                saved[k] = null;
+                            }
+                        } catch (NumberFormatException ignored) {
                         }
-                    } catch (NumberFormatException ignored) {
                     }
                 }
                 String serverValue = fe == null || !fe.hasSpawn() ? ""
                         : fmtCoord(axis == 0 ? fe.x() : axis == 1 ? fe.y() : fe.z());
                 EditBox box = new EditBox(font, left + 212 + k * 60, ry, 56, 18, Component.empty());
                 box.setValue(saved[k] != null ? saved[k] : serverValue);
-                box.setResponder(v -> {
-                    saved[axis] = v.trim().isEmpty() ? null : v;
-                    dimCoordsDirty = true;
-                    dimCoordsSavedShown = false;
-                });
+                // 保留原始输入（含空串）：清空必须被记住，否则回落到服务端值就再也清不掉坐标；
+                // 不给 responder 打脏标记——原版 EditBox 聚焦点击即回调（EditBox.java:243），
+                // 未保存状态一律由 dimCoordsDirty() 现算（与服务端值比对），见坑 #49
+                box.setResponder(v -> saved[axis] = v);
                 box.setMaxLength(32);
                 addRenderableWidget(box);
             }
         }
 
-        // 保存按钮：独立（或正切换到独立）时任一 live 维度坐标非法/缺失 -> 灰（用户硬性要求）
-        dimSaveButton = addButton(left, saveY, 110, 20, Component.translatable("gui.chunkplan.dim.save_coords"),
+        // 保存按钮恒可点：坐标齐全是「切换独立模式」的前置条件，由服务端在切换时校验（不齐则拒绝
+        // 并列出缺失维度）；客户端灰显会让「切独立 → 逐个填坐标 → 保存」这条正常路径走不通
+        addButton(left, saveY, 110, 20, Component.translatable("gui.chunkplan.dim.save_coords"),
                 b -> saveDimCoords());
-        refreshDimSaveActive();
 
         // 底部档位编辑器：选中维度 + 4 档（仅独立模式可编辑，共享模式灰显——服务端同语义）
         int et = dimEditorTop();
@@ -796,7 +876,12 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (selectedDim == null) {
             return;
         }
+        // 下拉展开期间不建档位行控件：该环境文本绘制层浮于后画填充之上（如字体合批 mod），会透出下拉黑底
+        if (dimDropdownOpen && dimDropdownPage == 2) {
+            return;
+        }
         DimTierEdit st = dimEditState(selectedDim);
+        java.util.Arrays.fill(dimTierLimit, null); // 被下拉覆盖的行不建控件：先清引用防误用旧实例
         for (int i = 0; i < 4; i++) {
             int tier = i + 1;
             int ry = et + 24 + i * 22;
@@ -818,21 +903,16 @@ public final class ChunkPlanGuiScreen extends Screen {
                 }
             }
             boolean effOn = st.pendingEnabledSet[idx] ? st.pendingEnabled[idx] : dimTierEnabled(selectedDim, tier);
-            dimTierToggle[i] = addButton(left + 40, ry, 52, 20,
-                    effOn ? Component.translatable("gui.chunkplan.enabled")
-                            : Component.translatable("gui.chunkplan.disabled"),
-                    b -> toggleDimTier(selectedDim, tier));
-            dimTierToggle[i].active = independent;
+            setRect(dimTierToggleRect[i], left + 40, ry, 52, 20);
             String win = st.pendingWindow[idx] != null ? st.pendingWindow[idx] : curWindow;
-            dimTierWindow[i] = addButton(left + 98, ry, 64, 20,
-                    Component.literal(win.isEmpty() ? "—" : win), b -> cycleDimWindow(selectedDim, tier));
-            dimTierWindow[i].active = independent && effOn;
+            setRect(dimTierWindowRect[i], left + 98, ry, 64, 20);
+            dimTierWindowClickable[i] = independent && effOn;
             dimTierLimit[i] = new EditBox(font, left + 168, ry, 50, 20, Component.empty());
             dimTierLimit[i].setValue(st.savedLimit[idx] != null ? st.savedLimit[idx] : fmtLimit(curLimit));
             String dimKey = selectedDim;
             dimTierLimit[i].setResponder(v -> {
                 st.savedLimit[idx] = v.trim().isEmpty() ? null : v;
-                st.dirty[idx] = true;
+                markDimTierDirtyIfChanged(dimKey, tier);
             });
             dimTierLimit[i].setMaxLength(12);
             addRenderableWidget(dimTierLimit[i]);
@@ -869,18 +949,9 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (dimModeButton != null) {
             dimModeButton.setMessage(dimModeLabel());
         }
-        refreshDimSaveActive();
     }
 
-    private void refreshDimSaveActive() {
-        if (dimSaveButton == null) {
-            return;
-        }
-        boolean effIndependent = (status != null && status.dimensionMode() == 1) || Boolean.TRUE.equals(pendingDimMode);
-        dimSaveButton.active = !effIndependent || missingSpawnDims().isEmpty();
-    }
-
-    /** live 维度中缺合法落地坐标者（启用独立模式的前置条件） */
+    /** live 维度中缺合法落地坐标者（启用独立模式的前置条件，仅供提示与保存时跳过非法维度） */
     private List<String> missingSpawnDims() {
         if (status == null || status.dimensions() == null) {
             return List.of();
@@ -894,17 +965,94 @@ public final class ChunkPlanGuiScreen extends Screen {
         return missing;
     }
 
-    /** 维度坐标当前生效值（编辑优先，未编辑回显服务端值；缺失返回空串） */
+    /** 维度坐标当前生效值（编辑优先——含空串=玩家清空，未编辑回显服务端值；缺失返回空串） */
     private String coordText(String dim, int axis) {
         String[] saved = savedDimCoords.get(dim);
         if (saved != null && saved[axis] != null) {
             return saved[axis];
         }
+        return serverCoordText(dim, axis);
+    }
+
+    /** 服务端已生效的坐标文本（忽略本地编辑缓存）——「未保存」判定与保存比对都以此为准 */
+    private String serverCoordText(String dim, int axis) {
         GuiStatus.DimEntry e = dimEntry(dim);
         if (e == null || !e.hasSpawn()) {
             return "";
         }
         return fmtCoord(axis == 0 ? e.x() : axis == 1 ? e.y() : e.z());
+    }
+
+    /**
+     * 该轴是否有真正改动过的编辑（与服务端值逐字比对）。
+     *
+     * <p>必须现算而不能靠 responder 打标记：原版 EditBox 的 mouseClicked → onClick → moveCursorTo
+     * 会无条件调用 responder（EditBox.java:243），光聚焦不动也会回调一次，打标记就会出现
+     * 「点一下输入框就红字报未保存」（用户实测反馈的遗留 bug，坑 #49）。
+     */
+    private boolean axisEdited(String dim, int axis) {
+        String[] saved = savedDimCoords.get(dim);
+        if (saved == null || saved[axis] == null) {
+            return false;
+        }
+        String typed = saved[axis].trim();
+        String server = serverCoordText(dim, axis).trim();
+        if (typed.equals(server)) {
+            return false;
+        }
+        // 数值等价视为无更改（输入 "1.0" 而服务端回显 "1" 不该报未保存）
+        try {
+            return Double.compare(Double.parseDouble(typed), Double.parseDouble(server)) != 0;
+        } catch (NumberFormatException e) {
+            return true; // 有一侧不是数字（含空串）：确属待处理
+        }
+    }
+
+    /** 该维度是否有待保存的坐标更改（① 待清除 ② 待写入 ③ 填了一半/非法——都算） */
+    private boolean dimEditPending(String dim) {
+        return pendingBilling.containsKey(dim) || coordPending(dim);
+    }
+
+    /** 坐标三格是否有待保存更改（逐轴与服务端值比对；填了一半也算） */
+    private boolean coordPending(String dim) {
+        for (int k = 0; k < 3; k++) {
+            if (axisEdited(dim, k)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 是否有未保存的坐标/模式/计费开关更改（现算）。模式待切换本身也算未保存。
+     * 未编辑过的维度不参与（点击输入框但没改字 = 无更改）。
+     */
+    private boolean dimCoordsDirty() {
+        if (pendingDimMode != null || !pendingBilling.isEmpty()) {
+            return true;
+        }
+        for (String dim : dimensionKeys()) {
+            if (dimEditPending(dim)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 计费开关本地切换：仅改待保存值，随「保存」统一派发（原先即时生效，与坐标/档位不一致——用户反馈） */
+    private void toggleDimBilling(String dim, boolean cur) {
+        pendingBilling.put(dim, !cur);
+        rebuild();
+    }
+
+    /** 该维度计费开关当前展示值（待保存优先） */
+    private boolean dimBillingShown(String dim) {
+        Boolean pb = pendingBilling.get(dim);
+        if (pb != null) {
+            return pb;
+        }
+        GuiStatus.DimEntry e = dimEntry(dim);
+        return e == null || e.billing();
     }
 
     private boolean dimCoordsValid(String dim) {
@@ -931,92 +1079,121 @@ public final class ChunkPlanGuiScreen extends Screen {
         return c;
     }
 
-    /** 保存坐标（仅派发有更改且合法的维度）+ 待切换的维度模式 */
+    /**
+     * 保存坐标与模式：把「新值/清空/模式切换」一次派发给服务端。
+     *
+     * <p>标志必须在派发前落定（原先在派发后置位）：命令是异步回包的，服务端每条命令都回推一次
+     * 状态（ChunkPlanNetwork.handleCommand），首个响应回来重建界面时就会把「刚保存」的乐观状态
+     * 冲掉，出现「只有模式切了、坐标被回退」的假象（用户实测，坑 #49）。
+     *
+     * <p>坐标不区分模式存储（DimensionStore 单份）：这组坐标只对独立计费有意义，共享模式下也照常
+     * 可见可改，切模式不会丢。
+     */
     private void saveDimCoords() {
         List<String> cmds = new ArrayList<>();
         for (String dim : dimensionKeys()) {
-            if (!dimCoordsValid(dim)) {
-                continue; // 非法/缺失坐标的维度跳过（独立模式下保存按钮已被禁用兜底）
+            // 计费开关与本批坐标/模式同批派发（原先点击即时生效，与其它控件不一致——用户反馈）
+            Boolean newBilling = pendingBilling.get(dim);
+            if (newBilling != null) {
+                cmds.add("chunkplan config dimension " + dim + " billing " + (newBilling ? "on" : "off"));
+            }
+            if (!coordPending(dim)) {
+                continue; // 坐标未编辑/已与服务端一致：不派发
             }
             GuiStatus.DimEntry e = dimEntry(dim);
-            double[] c = parsedCoords(dim);
-            boolean changed = e == null || !e.hasSpawn()
-                    || Double.compare(c[0], e.x()) != 0 || Double.compare(c[1], e.y()) != 0
-                    || Double.compare(c[2], e.z()) != 0;
-            if (changed) {
-                cmds.add("chunkplan config dimension " + dim + " spawn "
-                        + fmtCoord(c[0]) + " " + fmtCoord(c[1]) + " " + fmtCoord(c[2]));
+            boolean allBlank = true;
+            for (int k = 0; k < 3; k++) {
+                if (!coordText(dim, k).trim().isEmpty()) {
+                    allBlank = false;
+                    break;
+                }
             }
+            if (allBlank) {
+                if (e != null && e.hasSpawn()) {
+                    cmds.add("chunkplan config dimension " + dim + " spawn clear"); // 全空 = 清空该维度坐标
+                }
+                continue;
+            }
+            if (!dimCoordsValid(dim)) {
+                continue; // 填了一半/非法：不派发（提示行仍显示未保存，下次填好再保存）
+            }
+            double[] c = parsedCoords(dim);
+            cmds.add("chunkplan config dimension " + dim + " spawn "
+                    + fmtCoord(c[0]) + " " + fmtCoord(c[1]) + " " + fmtCoord(c[2]));
         }
         if (pendingDimMode != null) {
             cmds.add("chunkplan config dimensionMode " + (pendingDimMode ? "independent" : "shared"));
         }
         if (cmds.isEmpty()) {
-            dimCoordsDirty = false;
+            rebuild();
             return;
         }
-        cmds.forEach(this::sendCommand);
-        pendingDimMode = null;
-        if (dimModeButton != null) {
-            dimModeButton.setMessage(dimModeLabel());
-        }
-        dimCoordsDirty = false;
+        // 只派发、不提前清乐观值：命令是异步的且服务端每条命令都回推状态，派发后立刻清会让界面
+        // 在回包到达前回落到旧的服务端值（用户实测的「只有模式切了、坐标被回退」）。乐观值由
+        // buildDimensions 按「服务端值 == 乐观值」逐项消费，未确认期间 dimCoordsDirty() 为真。
         dimCoordsSavedShown = true;
+        cmds.forEach(this::sendCommand);
+        rebuild();
     }
 
-    private void cycleRedirectSlot(int slot) {
-        if (status == null || status.dimConfig() == null) {
+    /** 重定向槽位：改用真下拉（打开候选列表），选中经 acceptDimDropdown 派发 */
+    private void openRedirectSlot(int slot) {
+        if (status == null || status.dimConfig() == null || !slotBarClickable[slot]) {
             return;
         }
-        List<String> order = status.dimConfig().redirectOrder();
-        String cur = slot - 1 < order.size() ? order.get(slot - 1) : null;
-        // 循环顺序：空（跳过该槽）→ 各维度 key → 回到空
-        List<String> cands = new ArrayList<>();
-        cands.add(null);
-        cands.addAll(dimensionKeys());
-        int idx = cur == null ? 0 : cands.indexOf(cur); // 已卸载维度不在候选里：从空重新开始
-        String next = cands.get((idx + 1) % cands.size());
-        String slotName = slot == 1 ? "primary" : slot == 2 ? "secondary" : "tertiary";
-        sendCommand("chunkplan config redirectTarget " + slotName
-                + (next == null ? " none" : " " + next));
+        redirectSlotEditing = slot;
+        openDimDropdown(3, slotBarRect[slot]);
     }
 
     private void toggleDimTier(String dim, int tier) {
+        toggleTierRow = tier - 1;
+        toggleTierDim = dim;
+        openDimDropdown(4, dimTierToggleRect[tier - 1]);
+        rebuild(); // 被覆盖行不再建控件（同管理页）
+    }
+
+    /** 维度页档位开关下拉选中：仅改本地待应用状态，仍须点「设置」才落盘 */
+    private void setDimTierEnabled(String dim, int tier, boolean next) {
         DimTierEdit st = dimEditState(dim);
         int i = tier - 1;
-        boolean next = !(st.pendingEnabledSet[i] ? st.pendingEnabled[i] : dimTierEnabled(dim, tier));
         st.pendingEnabledSet[i] = true;
         st.pendingEnabled[i] = next;
-        if (dimTierToggle[i] != null) {
-            dimTierToggle[i].setMessage(next ? Component.translatable("gui.chunkplan.enabled")
-                    : Component.translatable("gui.chunkplan.disabled"));
-        }
-        boolean modeOn = status != null && status.dimensionMode() == 1;
-        if (dimTierWindow[i] != null) {
-            dimTierWindow[i].active = modeOn && next;
-        }
-        if (dimTierLimit[i] != null) {
-            dimTierLimit[i].active = modeOn && next;
-        }
         st.dirty[i] = true;
+        rebuild();
     }
 
     private void cycleDimWindow(String dim, int tier) {
+        if (!dimTierEffOn(dim, tier)) {
+            return;
+        }
+        toggleTierRow = tier - 1;
+        toggleTierDim = dim;
+        openDimDropdown(5, dimTierWindowRect[tier - 1]);
+        rebuild();
+    }
+
+    /** 维度某档当前展示的开关状态（待应用优先） */
+    private boolean dimTierEffOn(String dim, int tier) {
+        DimTierEdit st = dimEditState(dim);
+        int i = tier - 1;
+        return st.pendingEnabledSet[i] ? st.pendingEnabled[i] : dimTierEnabled(dim, tier);
+    }
+
+    /**
+     * 维度档位额度输入：值确实变了才打「未保存」标记（原版 EditBox 聚焦点击即回调 responder，
+     * EditBox.java:243，不比对会出现「点一下输入框就红字报未保存」）。
+     */
+    private void markDimTierDirtyIfChanged(String dim, int tier) {
         DimTierEdit st = dimEditState(dim);
         int i = tier - 1;
         QuotaTiers.Tier t = dimTier(dim, tier);
-        List<String> windowPresets = presets(tier);
-        String cur = st.pendingWindow[i] != null ? st.pendingWindow[i] : (t == null ? null : t.window());
-        if (windowPresets.isEmpty() || cur == null) {
+        String saved = t == null ? "" : fmtLimit(t.limit());
+        String typed = dimTierLimit[i] == null ? "" : dimTierLimit[i].getValue().trim();
+        if (typed.isEmpty()) {
+            st.dirty[i] = false; // 清空视为无更改（applyDimTier 同样跳过空值）
             return;
         }
-        int idx = windowPresets.indexOf(cur);
-        String next = windowPresets.get(idx < 0 ? 0 : (idx + 1) % windowPresets.size());
-        st.pendingWindow[i] = next;
-        if (dimTierWindow[i] != null) {
-            dimTierWindow[i].setMessage(Component.literal(next));
-        }
-        st.dirty[i] = true;
+        st.dirty[i] = !typed.equals(saved);
     }
 
     /** 维度档位行「设置」：与管理页 applyTier 同逻辑，命令换成 dimension 命令族 */
@@ -1092,10 +1269,23 @@ public final class ChunkPlanGuiScreen extends Screen {
         boolean independent = status.dimensionMode() == 1;
         boolean effIndependent = independent || Boolean.TRUE.equals(pendingDimMode);
         List<String> dims = dimensionKeys();
-        // 列表头
-        g.drawString(font, Component.translatable("gui.chunkplan.dim.dim_header"), x + 2, 56, COL_GRAY);
-        g.drawString(font, Component.translatable("gui.chunkplan.dim.billing"), x + 152, 56, COL_GRAY);
-        g.drawString(font, Component.translatable("gui.chunkplan.dim.spawn_header"), x + 216, 56, COL_GRAY);
+        // 重定向 3 槽位文字（手绘下拉条，见 buildDimensions；下拉展开期不画被覆盖者）
+        List<String> order = status.dimConfig().redirectOrder();
+        for (int s = 0; s < 3; s++) {
+            String cur = s < order.size() ? order.get(s) : null;
+            boolean expanded = dimDropdownOpen && dimDropdownPage == 3 && redirectSlotEditing == s;
+            if (!coveredByDropdown(slotBarRect[s][0], slotBarRect[s][1], slotBarRect[s][2], slotBarRect[s][3])
+                    && !expanded) {
+                drawSelectBar(g, slotBarRect[s][0], slotBarRect[s][1], slotBarRect[s][2], slotBarRect[s][3],
+                        Component.translatable("gui.chunkplan.dim.slot" + (s + 1))
+                                .append(Component.literal(": " + (cur == null ? "—" : shortDim(cur)))),
+                        !slotBarClickable[s]);
+            }
+        }
+        // 列表头（y=58：上距模式行按钮 2px、下距列表首行 3px，原 y=56 与首行控件顶边重叠）
+        g.drawString(font, Component.translatable("gui.chunkplan.dim.dim_header"), x + 2, 58, COL_GRAY);
+        g.drawString(font, Component.translatable("gui.chunkplan.dim.billing"), x + 152, 58, COL_GRAY);
+        g.drawString(font, Component.translatable("gui.chunkplan.dim.spawn_header"), x + 216, 58, COL_GRAY);
         // 行内容（控件之外的文字）
         int visibleRows = dimVisibleRows();
         for (int i = 0; i < dims.size(); i++) {
@@ -1104,19 +1294,25 @@ public final class ChunkPlanGuiScreen extends Screen {
             }
             String dim = dims.get(i);
             int ry = DIM_LIST_TOP + (i - dimScroll) * DIM_ROW_H;
+            if (coveredByDropdown(x + 212, ry, 192, 18)) {
+                continue; // 坐标列被展开中的下拉覆盖（重定向槽位下拉会压住前几行）
+            }
             GuiStatus.DimEntry e = dimEntry(dim);
             g.drawString(font, Component.literal(font.plainSubstrByWidth(shortDim(dim), 130)),
-                    x + 2, ry + 6, e != null && !e.billing() ? COL_GRAY : COL_TEXT);
+                    x + 2, ry + 6, dimBillingShown(dim) ? COL_TEXT : COL_GRAY);
             // 坐标合法状态点：绿=合法，红=缺失/非法
             int dotX = x + 400;
             g.fill(dotX, ry + 6, dotX + 6, ry + 12, dimCoordsValid(dim) ? COL_GREEN : COL_RED);
         }
-        // 保存区提示
+        // 保存区提示：未保存红字 > 已保存灰字 > 留空即清除的常驻说明
         int saveY = dimSaveY();
-        if (dimCoordsDirty) {
+        if (dimCoordsDirty()) {
             g.drawString(font, Component.translatable("gui.chunkplan.dim.coords_dirty"), x + 120, saveY + 6, COL_RED);
         } else if (dimCoordsSavedShown) {
             g.drawString(font, Component.translatable("gui.chunkplan.dim.coords_saved"), x + 120, saveY + 6, COL_GRAY);
+        } else {
+            // 坐标是模式无关的单份存储：两种模式下都可改可清（避免"共享模式改不掉"）
+            g.drawString(font, Component.translatable("gui.chunkplan.dim.spawn_hint"), x + 120, saveY + 6, COL_GRAY);
         }
         if (effIndependent && !missingSpawnDims().isEmpty()) {
             g.drawString(font, Component.translatable("gui.chunkplan.dim.coords_missing"), x + 300, saveY + 6, COL_RED);
@@ -1128,20 +1324,47 @@ public final class ChunkPlanGuiScreen extends Screen {
             g.drawString(font, Component.translatable("gui.chunkplan.dim.shared_mode_hint"), x + 240, et + 6, COL_GRAY);
         }
         DimTierEdit st = selectedDim == null ? null : dimEdits.get(selectedDim);
-        if (st != null) {
+        // 与 buildDimensions 同规则：下拉展开期间档位行控件未建，行文字一并隐藏
+        if (st != null && !(dimDropdownOpen && dimDropdownPage == 2)) {
             for (int i = 0; i < 4; i++) {
                 int ry = et + 24 + i * 22;
+                if (coveredByDropdown(12, ry, 420, 22)) {
+                    continue;
+                }
                 g.drawString(font, Component.literal("tier" + (i + 1)), x + 2, ry + 6, COL_TEXT);
+                boolean toggleExpanded = dimDropdownOpen && dimDropdownPage == 4
+                        && selectedDim.equals(toggleTierDim) && toggleTierRow == i;
+                if (!toggleExpanded) {
+                    drawSelectBar(g, dimTierToggleRect[i][0], dimTierToggleRect[i][1], dimTierToggleRect[i][2],
+                            dimTierToggleRect[i][3],
+                            Component.translatable(!independent ? "gui.chunkplan.disabled"
+                                    : (dimTierEffOn(selectedDim, i + 1) ? "gui.chunkplan.enabled"
+                                            : "gui.chunkplan.disabled")),
+                            !independent);
+                }
+                QuotaTiers.Tier dt = dimTier(selectedDim, i + 1);
+                String dwin = st.pendingWindow[i] != null ? st.pendingWindow[i] : (dt == null ? "" : dt.window());
+                boolean winExpanded = dimDropdownOpen && dimDropdownPage == 5
+                        && selectedDim.equals(toggleTierDim) && toggleTierRow == i;
+                if (!winExpanded) {
+                    drawSelectBar(g, dimTierWindowRect[i][0], dimTierWindowRect[i][1], dimTierWindowRect[i][2],
+                            dimTierWindowRect[i][3], Component.literal(dwin.isEmpty() ? "—" : dwin),
+                            !dimTierWindowClickable[i]);
+                }
                 if (st.dirty[i]) {
-                    g.drawString(font, Component.translatable("gui.chunkplan.unsaved"), x + 272, ry + 6, COL_RED);
+                    g.drawString(font, Component.translatable("gui.chunkplan.unsaved"), x + 320, ry + 6, COL_RED);
                 } else if (st.savedShown[i]) {
-                    g.drawString(font, Component.translatable("gui.chunkplan.saved"), x + 272, ry + 6, COL_GRAY);
+                    g.drawString(font, Component.translatable("gui.chunkplan.saved"), x + 320, ry + 6, COL_GRAY);
                 }
             }
         }
     }
 
-    // ---------- 维度真下拉（用量页 + 维度页编辑器共用） ----------
+    // ---------- 真下拉（用量页维度 / 维度页编辑器 / 重定向槽位 / 档位开关与窗口，共用一套展开状态） ----------
+
+    private void openDimDropdown(int srcPage, int[] rect) {
+        openDimDropdown(srcPage, rect[0], rect[1], rect[2], rect[3]);
+    }
 
     private void openDimDropdown(int srcPage, int x, int y, int w, int h) {
         dimDropdownOpen = true;
@@ -1153,28 +1376,115 @@ public final class ChunkPlanGuiScreen extends Screen {
         dropSrcH = h;
     }
 
-    private List<String> dropdownDims() {
-        if (dimDropdownPage == 0) {
-            return status == null || status.dimensions() == null ? List.of() : status.dimensions();
+    /** 关闭下拉并重建：展开期间被覆盖的行不建控件，必须重建才能恢复（调用方若随后自行重建，用 resetDropdownState） */
+    private void closeDimDropdown() {
+        boolean was = dimDropdownOpen;
+        resetDropdownState();
+        if (was) {
+            rebuild();
         }
-        return dimensionKeys();
+    }
+
+    private void resetDropdownState() {
+        dimDropdownOpen = false;
+        dimDropdownSelected = -1;
+        redirectSlotEditing = -1;
+        toggleTierRow = -1;
+        toggleTierDim = null;
+    }
+
+    /** 下拉候选显示文本（page 3 首项为「—」占位 = 清空该槽位） */
+    private List<String> dropdownLabels() {
+        switch (dimDropdownPage) {
+            case 0:
+                return status == null || status.dimensions() == null ? List.of() : status.dimensions();
+            case 3:
+                List<String> labels = new ArrayList<>();
+                labels.add("—");
+                labels.addAll(redirectSlotCandidates());
+                return labels;
+            case 4:
+                return List.of(Component.translatable("gui.chunkplan.enabled").getString(),
+                        Component.translatable("gui.chunkplan.disabled").getString());
+            case 5:
+                return toggleTierRow < 0 ? List.of() : presets(toggleTierRow + 1);
+            default:
+                return dimensionKeys();
+        }
+    }
+
+    /** 与 {@link #dropdownLabels()} 一一对应的取值（page 3 首项 null = 清空；page 4 为 on/off） */
+    private List<String> dropdownValues() {
+        switch (dimDropdownPage) {
+            case 3:
+                List<String> values = new ArrayList<>();
+                values.add(null);
+                values.addAll(redirectSlotCandidates());
+                return values;
+            case 4:
+                return List.of("on", "off");
+            default:
+                return dropdownLabels();
+        }
+    }
+
+    /** 重定向槽位候选：全部维度去掉「已被其它槽位占用」者（用户要求不可重复） */
+    private List<String> redirectSlotCandidates() {
+        List<String> cands = new ArrayList<>(dimensionKeys());
+        if (status != null && status.dimConfig() != null && redirectSlotEditing >= 0) {
+            List<String> order = status.dimConfig().redirectOrder();
+            for (int i = 0; i < order.size(); i++) {
+                if (i != redirectSlotEditing) {
+                    cands.remove(order.get(i));
+                }
+            }
+        }
+        return cands;
+    }
+
+    /** 当前展开的下拉列表矩形 {x,y,w,h}（未展开/无候选返回 null） */
+    private int[] dropdownRect() {
+        if (!dimDropdownOpen) {
+            return null;
+        }
+        List<String> items = dropdownLabels();
+        if (items.isEmpty()) {
+            return null;
+        }
+        int sy = dropSrcY + dropSrcH + 2;
+        int maxRows = Math.max(1, (height - sy - 6) / SUGGEST_ROW_H);
+        int rows = Math.min(items.size(), maxRows);
+        return new int[] {dropSrcX, sy, Math.max(dropSrcW, 120), rows * SUGGEST_ROW_H + 2};
+    }
+
+    /**
+     * 该矩形是否会被展开中的下拉盖住。「盖住」= 不画而不是画在下层：用户环境里文本绘制层浮于
+     * 后画填充之上（字体合批 mod，坑 #47 像素级实证），仅靠绘制顺序遮不住。
+     */
+    private boolean coveredByDropdown(int x, int y, int w, int h) {
+        int[] r = dropdownRect();
+        if (r == null) {
+            return false;
+        }
+        return x < r[0] + r[2] && x + w > r[0] && y < r[1] + r[3] && y + h > r[1];
     }
 
     private void renderDimDropdown(GuiGraphics g, int mouseX, int mouseY) {
         if (!dimDropdownOpen) {
             return;
         }
-        List<String> dims = dropdownDims();
-        if (dims.isEmpty()) {
-            dimDropdownOpen = false;
+        List<String> items = dropdownLabels();
+        if (items.isEmpty()) {
+            resetDropdownState(); // 渲染路径内不 rebuild（会重入）；下个 tick 自然恢复
             return;
         }
         int sx = dropSrcX;
         int sy = dropSrcY + dropSrcH + 2;
         int sW = Math.max(dropSrcW, 120);
         int maxRows = Math.max(1, (height - sy - 6) / SUGGEST_ROW_H);
-        int rows = Math.min(dims.size(), maxRows);
-        int sH = rows * SUGGEST_ROW_H;
+        int rows = Math.min(items.size(), maxRows);
+        // 底部多留 2px：末行文字下缘原与下边框零间距（用户实测反馈"黑背景没有完美盖住底部"）
+        int sH = rows * SUGGEST_ROW_H + 2;
         g.fill(sx, sy, sx + sW, sy + sH, 0xFF000000);
         g.fill(sx, sy, sx + sW, sy + 1, 0xFFFFFFFF);
         g.fill(sx, sy + sH - 1, sx + sW, sy + sH, 0xFFFFFFFF);
@@ -1186,26 +1496,57 @@ public final class ChunkPlanGuiScreen extends Screen {
             if (hover || i == dimDropdownSelected) {
                 g.fill(sx + 1, rowY, sx + sW - 1, rowY + SUGGEST_ROW_H, 0xFF606060);
             }
-            g.drawString(font, Component.literal(font.plainSubstrByWidth(dims.get(i), sW - 12)),
+            g.drawString(font, Component.literal(font.plainSubstrByWidth(items.get(i), sW - 12)),
                     sx + 6, rowY + 2, COL_TEXT);
         }
     }
 
     private void acceptDimDropdown(int idx) {
-        List<String> dims = dropdownDims();
-        if (idx < 0 || idx >= dims.size()) {
+        List<String> values = dropdownValues();
+        if (idx < 0 || idx >= values.size()) {
             return;
         }
-        String dim = dims.get(idx);
-        if (dimDropdownPage == 0) {
-            usageDim = dim;
-        } else {
-            selectedDim = dim;
-        }
-        dimDropdownOpen = false;
-        dimDropdownSelected = -1;
-        if (dimDropdownPage == 2) {
-            rebuild();
+        String value = values.get(idx);
+        int page = dimDropdownPage;
+        int row = toggleTierRow;
+        String rowDim = toggleTierDim;
+        int slot = redirectSlotEditing;
+        resetDropdownState();
+        switch (page) {
+            case 0 -> usageDim = value;
+            case 2 -> {
+                selectedDim = value;
+                rebuild();
+            }
+            case 3 -> {
+                if (slot >= 0) {
+                    String slotName = slot == 0 ? "primary" : slot == 1 ? "secondary" : "tertiary";
+                    sendCommand("chunkplan config redirectTarget " + slotName
+                            + (value == null ? " none" : " " + value));
+                }
+            }
+            case 4 -> {
+                if (row >= 0) {
+                    if (rowDim == null) {
+                        setTierEnabled(row + 1, "on".equals(value));
+                    } else {
+                        setDimTierEnabled(rowDim, row + 1, "on".equals(value));
+                    }
+                }
+            }
+            case 5 -> {
+                if (row >= 0) {
+                    if (rowDim == null) {
+                        pendingWindow[row] = value;
+                        markTierDirty(row + 1);
+                    } else {
+                        dimEditState(rowDim).pendingWindow[row] = value;
+                        dimEditState(rowDim).dirty[row] = true;
+                    }
+                }
+                rebuild();
+            }
+            default -> rebuild();
         }
     }
 
@@ -1295,7 +1636,8 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         int sx = resetTargetX;
         int sW = Math.max(resetTargetW + 30, 120);
-        int sH = resetSuggestions.size() * SUGGEST_ROW_H;
+        // 底部多留 2px：末行文字下缘原与下边框零间距（与维度下拉同规则）
+        int sH = resetSuggestions.size() * SUGGEST_ROW_H + 2;
         int sy = resetTargetY + resetTargetH + 2;
         g.fill(sx, sy, sx + sW, sy + sH, 0xFF000000);
         g.fill(sx, sy, sx + sW, sy + 1, 0xFFFFFFFF);
@@ -1449,15 +1791,23 @@ public final class ChunkPlanGuiScreen extends Screen {
             dimDropY = y;
             dimDropW = Math.min(190, width - dimDropX - 12);
             dimDropH = 16;
-            g.fill(dimDropX, dimDropY, dimDropX + dimDropW, dimDropY + dimDropH, COL_BG);
-            g.fill(dimDropX, dimDropY, dimDropX + dimDropW, dimDropY + 1, 0xFFFFFFFF);
-            g.fill(dimDropX, dimDropY + dimDropH - 1, dimDropX + dimDropW, dimDropY + dimDropH, 0xFFFFFFFF);
-            g.fill(dimDropX, dimDropY, dimDropX + 1, dimDropY + dimDropH, 0xFFFFFFFF);
-            g.fill(dimDropX + dimDropW - 1, dimDropY, dimDropX + dimDropW, dimDropY + dimDropH, 0xFFFFFFFF);
-            String shown = usageDim == null ? "—" : font.plainSubstrByWidth(usageDim, dimDropW - 22);
-            g.drawString(font, Component.literal(shown), dimDropX + 4, dimDropY + 4, COL_TEXT);
-            g.drawString(font, Component.literal("▼"), dimDropX + dimDropW - 10, dimDropY + 4, COL_GRAY);
+            boolean expanded = dimDropdownOpen && dimDropdownPage == 0;
+            if (!expanded) {
+                drawSelectBar(g, dimDropX, dimDropY, dimDropW, dimDropH,
+                        Component.literal(usageDim == null ? "—"
+                                : font.plainSubstrByWidth(usageDim, dimDropW - 20)), false);
+            }
             y += 22;
+            // 下拉展开：把下方额度内容整体下移到列表之下，而不是不画（原先直接 return 会让整片
+            // 可视化消失，用户实测反馈）。下移不依赖绘制顺序，字体合批环境同样成立（坑 #47 教训）。
+            if (expanded) {
+                int[] r = dropdownRect();
+                int belowY = r == null ? y : r[1] + r[3] + 6;
+                if (belowY + 90 > height) {
+                    return; // 矮窗口放不下：退回"不画"，避免内容溢出屏幕
+                }
+                y = belowY;
+            }
         }
         List<QuotaEngine.LineStatus> lines = dl == null ? s.lines() : dl.lines();
         if (lines.isEmpty()) {
@@ -1531,12 +1881,34 @@ public final class ChunkPlanGuiScreen extends Screen {
         } else {
             for (int i = 0; i < 4; i++) {
                 int ry = 36 + i * 32;
+                // 展开中的下拉覆盖该行时不画标签与提示（与 buildAdmin 同步逐行判定，坑 #47 同规则）
+                if (coveredByDropdown(12, ry, width - 24, 20)) {
+                    continue;
+                }
                 g.drawString(font, Component.literal("tier" + (i + 1)), x, ry + 6, COL_TEXT);
-                // 每档独立提示：未保存红 / 已保存灰；仅本次打开期间显示
+                // 每档独立提示：未保存红 / 已保存灰（行下方 2px 处，不与行内控件重叠）
                 if (tierDirty[i]) {
                     g.drawString(font, Component.translatable("gui.chunkplan.unsaved"), x, ry + 22, COL_RED);
                 } else if (tierSavedShown[i]) {
                     g.drawString(font, Component.translatable("gui.chunkplan.saved"), x, ry + 22, COL_GRAY);
+                }
+                // 开关/窗口下拉条（Button 之外手绘，与用量页维度选择器同观感）
+                boolean toggleExpanded = dimDropdownOpen && dimDropdownPage == 4
+                        && toggleTierDim == null && toggleTierRow == i;
+                if (!toggleExpanded) {
+                    drawSelectBar(g, tierToggleRect[i][0], tierToggleRect[i][1], tierToggleRect[i][2],
+                            tierToggleRect[i][3],
+                            Component.translatable(effEnabled(i + 1) ? "gui.chunkplan.enabled"
+                                    : "gui.chunkplan.disabled"), false);
+                }
+                QuotaTiers.Tier t = rawTier(i + 1);
+                String win = pendingWindow[i] != null ? pendingWindow[i] : (t == null ? "" : t.window());
+                boolean winExpanded = dimDropdownOpen && dimDropdownPage == 5
+                        && toggleTierDim == null && toggleTierRow == i;
+                if (!winExpanded) {
+                    drawSelectBar(g, tierWindowRect[i][0], tierWindowRect[i][1], tierWindowRect[i][2],
+                            tierWindowRect[i][3], Component.literal(win.isEmpty() ? "—" : win),
+                            !tierWindowClickable[i]);
                 }
             }
             gy = 36 + 4 * 32 + 6;
@@ -1642,20 +2014,19 @@ public final class ChunkPlanGuiScreen extends Screen {
             return true; // 弹窗期间拦截底层点击
         }
         if (dimDropdownOpen) {
-            // 维度真下拉：命中行选中；点击列表外关闭
-            int sx = dropSrcX;
+            List<String> items = dropdownLabels();
             int sy = dropSrcY + dropSrcH + 2;
-            int sW = Math.max(dropSrcW, 120);
-            List<String> dims = dropdownDims();
             int maxRows = Math.max(1, (height - sy - 6) / SUGGEST_ROW_H);
-            int rows = Math.min(dims.size(), maxRows);
+            int rows = Math.min(items.size(), maxRows);
             for (int i = 0; i < rows; i++) {
-                if (inRect(mouseX, mouseY, sx, sy + i * SUGGEST_ROW_H, sW, SUGGEST_ROW_H)) {
+                int h = SUGGEST_ROW_H + (i == rows - 1 ? 2 : 0); // 末行含底部补白
+                if (inRect(mouseX, mouseY, dropSrcX, sy + i * SUGGEST_ROW_H,
+                        Math.max(dropSrcW, 120), h)) {
                     acceptDimDropdown(i);
                     return true;
                 }
             }
-            dimDropdownOpen = false;
+            closeDimDropdown();
             return true;
         }
         // 用量页维度下拉按钮（手绘控件，非 Button）
@@ -1664,12 +2035,44 @@ public final class ChunkPlanGuiScreen extends Screen {
             openDimDropdown(0, dimDropX, dimDropY, dimDropW, dimDropH);
             return true;
         }
+        // 维度页：重定向槽位 / 档位开关与窗口（手绘下拉条）
+        if (page == 2 && status != null && status.dimConfig() != null) {
+            for (int s = 0; s < 3; s++) {
+                if (inRect(mouseX, mouseY, slotBarRect[s])) {
+                    openRedirectSlot(s);
+                    return true;
+                }
+            }
+            for (int i = 0; i < 4; i++) {
+                if (inRect(mouseX, mouseY, dimTierToggleRect[i])) {
+                    toggleDimTier(selectedDim, i + 1);
+                    return true;
+                }
+                if (dimTierWindowClickable[i] && inRect(mouseX, mouseY, dimTierWindowRect[i])) {
+                    cycleDimWindow(selectedDim, i + 1);
+                    return true;
+                }
+            }
+        }
+        // 管理页：档位开关与窗口（手绘下拉条）
+        if (page == 1 && isAdmin() && status != null && status.dimensionMode() != 1) {
+            for (int i = 0; i < 4; i++) {
+                if (inRect(mouseX, mouseY, tierToggleRect[i])) {
+                    toggleTier(i + 1);
+                    return true;
+                }
+                if (tierWindowClickable[i] && inRect(mouseX, mouseY, tierWindowRect[i])) {
+                    cycleWindow(i + 1);
+                    return true;
+                }
+            }
+        }
         if (!resetSuggestions.isEmpty()) {
-            int sH = resetSuggestions.size() * SUGGEST_ROW_H;
             int paneY = resetTargetY + resetTargetH + 2;
             for (int i = 0; i < resetSuggestions.size(); i++) {
+                int h = SUGGEST_ROW_H + (i == resetSuggestions.size() - 1 ? 2 : 0); // 末行含底部补白
                 if (inRect(mouseX, mouseY, resetTargetX, paneY + i * SUGGEST_ROW_H,
-                        Math.max(resetTargetW + 30, 120), SUGGEST_ROW_H)) {
+                        Math.max(resetTargetW + 30, 120), h)) {
                     acceptResetSuggestion(i);
                     return true;
                 }
@@ -1697,10 +2100,10 @@ public final class ChunkPlanGuiScreen extends Screen {
             return true;
         }
         if (dimDropdownOpen) {
-            List<String> dims = dropdownDims();
+            List<String> items = dropdownLabels();
             int sy = dropSrcY + dropSrcH + 2;
             int maxRows = Math.max(1, (height - sy - 6) / SUGGEST_ROW_H);
-            int rows = Math.min(dims.size(), maxRows);
+            int rows = Math.min(items.size(), maxRows);
             switch (keyCode) {
                 case org.lwjgl.glfw.GLFW.GLFW_KEY_UP -> {
                     dimDropdownSelected = rows == 0 ? -1
@@ -1718,7 +2121,7 @@ public final class ChunkPlanGuiScreen extends Screen {
                     return true;
                 }
                 case org.lwjgl.glfw.GLFW.GLFW_KEY_ESCAPE -> {
-                    dimDropdownOpen = false;
+                    closeDimDropdown();
                     return true;
                 }
                 default -> {

@@ -18,6 +18,7 @@ import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 
 import dev.chunkplan.common.DurationParser;
 import dev.chunkplan.common.FeeLogFile;
+import dev.chunkplan.common.DimensionStore;
 import dev.chunkplan.common.NumericParser;
 import dev.chunkplan.common.PresetStore;
 import dev.chunkplan.common.QuotaConfig;
@@ -148,6 +149,8 @@ public final class QuotaCommands {
                                                         .suggests(QuotaCommands::suggestOnOff)
                                                         .executes(ctx -> configDimBilling(ctx))))
                                         .then(Commands.literal("spawn")
+                                                .then(Commands.literal("clear")
+                                                        .executes(ctx -> configDimSpawnClear(ctx)))
                                                 .then(Commands.argument("x", StringArgumentType.word())
                                                         .then(Commands.argument("y", StringArgumentType.word())
                                                                 .then(Commands.argument("z", StringArgumentType.word())
@@ -892,8 +895,8 @@ public final class QuotaCommands {
         String mode = StringArgumentType.getString(ctx, "mode");
         if (!mode.equals("shared") && !mode.equals("independent")) {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
-                    "模式需为 shared（共享全局额度线）或 independent（每维度独立）",
-                    "Mode must be shared (global quota lines) or independent (per-dimension)")));
+                    "模式需为 shared（全维度共享额度）或 independent（每维度独立）",
+                    "Mode must be shared (quota shared across dimensions) or independent (per-dimension)")));
             return 0;
         }
         List<String> liveDims = ChunkPlanFabric.liveDims(ctx.getSource().getServer());
@@ -985,6 +988,25 @@ public final class QuotaCommands {
         ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
                 "§a已设置维度 " + dim + " 的默认落地坐标：§b" + x + ", " + y + ", " + z,
                 "§aSet the landing coordinates of dimension " + dim + " to §b" + x + ", " + y + ", " + z)), true);
+        return 1;
+    }
+
+    /** /chunkplan config dimension <dim> spawn clear：清空默认落地坐标（计费开关与额度线保留） */
+    private static int configDimSpawnClear(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        String dim = requireLiveDim(ctx, eng, net.minecraft.commands.arguments.ResourceLocationArgument.getId(ctx, "dim").toString());
+        if (dim == null) {
+            return 0;
+        }
+        eng.clearDimensionSpawn(dim);
+        ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
+                "§a已清空维度 " + dim + " 的默认落地坐标（独立模式需重新配置才能作为重定向落点）",
+                "§aCleared the landing coordinates of dimension " + dim
+                        + " (per-dimension mode requires them again for redirect)")), true);
         return 1;
     }
 
@@ -1261,8 +1283,16 @@ public final class QuotaCommands {
                 return 0;
             }
         }
-        eng.setRedirectTarget(slot, dim);
+        DimensionStore.RedirectResult result = eng.setRedirectTarget(slot, dim);
         String[] slotNames = {t(ctx, "首选", "primary"), t(ctx, "次选", "secondary"), t(ctx, "备选", "tertiary")};
+        if (result != DimensionStore.RedirectResult.OK) {
+            ctx.getSource().sendFailure(Component.literal(result == DimensionStore.RedirectResult.DUPLICATE
+                    ? t(ctx, "§c维度 " + dim + " 已占用其它槽位（首选/次选/备选不可重复）",
+                            "§cDimension " + dim + " already occupies another slot (primary/secondary/tertiary must differ)")
+                    : t(ctx, "§c请先填写前置槽位（首选为空时不能填次选/备选）",
+                            "§cFill the preceding slot first (secondary needs primary, tertiary needs secondary)")));
+            return 0;
+        }
         final String dimFinal = dim;
         ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
                 "§a已设置" + slotNames[slot] + "维度：§b" + (dimFinal == null ? "无" : dimFinal),
@@ -1288,12 +1318,26 @@ public final class QuotaCommands {
         return suggestFromList(builder, List.of("primary", "secondary", "tertiary"));
     }
 
-    /** 重定向目标补全：live 维度 + none（清空槽位） */
+    /** 重定向目标补全：live 维度 + none（清空槽位）；已占用其它槽位的维度不再建议（不可重复选） */
     private static CompletableFuture<Suggestions> suggestRedirectTargetValues(CommandContext<CommandSourceStack> ctx, SuggestionsBuilder builder) {
         QuotaEngine eng = ChunkPlanFabric.engine;
         List<String> values = new ArrayList<>();
         if (eng != null) {
             values.addAll(ChunkPlanFabric.liveDims(ctx.getSource().getServer()));
+            String slotArg = StringArgumentType.getString(ctx, "slot");
+            int slot = switch (slotArg) {
+                case "primary" -> 0;
+                case "secondary" -> 1;
+                case "tertiary" -> 2;
+                default -> -1;
+            };
+            if (slot >= 0) {
+                for (int i = 0; i < 3; i++) {
+                    if (i != slot) {
+                        values.remove(eng.getDimensionStore().redirectTarget(i));
+                    }
+                }
+            }
         }
         values.add("none");
         return suggestFromList(builder, values);

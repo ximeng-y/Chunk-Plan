@@ -53,15 +53,15 @@ class DimensionStoreTest {
         assertEquals(3, order.size());
         assertNull(order.get(0));
         assertNull(order.get(2));
-        // 已配置槽与 null 槽并存时快照同样可用
-        store.setRedirectTarget(1, NETHER);
-        assertEquals(NETHER, store.redirectOrder().get(1));
-        assertNull(store.redirectOrder().get(0));
+        // 已配置槽与 null 槽并存时快照同样可用（槽位须自首选起连续：先占首选，再占次选）
+        store.setRedirectTarget(0, NETHER);
+        assertEquals(NETHER, store.redirectOrder().get(0));
+        assertNull(store.redirectOrder().get(1));
         // 快照是独立副本：库内后续变更不回溯影响先前快照
         List<String> before = store.redirectOrder();
-        store.setRedirectTarget(0, OVERWORLD);
-        assertEquals(OVERWORLD, store.redirectOrder().get(0));
-        assertNull(before.get(0));
+        store.setRedirectTarget(1, OVERWORLD);
+        assertEquals(OVERWORLD, store.redirectOrder().get(1));
+        assertNull(before.get(1));
     }
 
     @Test
@@ -71,7 +71,7 @@ class DimensionStoreTest {
         store.setMode(DimensionStore.MODE_INDEPENDENT);
         store.setRedirectOnExhaust(true);
         store.setRedirectTarget(0, NETHER);
-        store.setRedirectTarget(2, END);
+        store.setRedirectTarget(1, END);
         store.setBilling(OVERWORLD, false);
         assertTrue(store.setSpawn(OVERWORLD, 1.5, 64.0, -3.0));
         assertTrue(store.setTiers(NETHER, fourTiers()));
@@ -80,8 +80,8 @@ class DimensionStoreTest {
         assertTrue(reloaded.isIndependent());
         assertTrue(reloaded.redirectOnExhaust());
         assertEquals(NETHER, reloaded.redirectTarget(0));
-        assertNull(reloaded.redirectTarget(1));
-        assertEquals(END, reloaded.redirectTarget(2));
+        assertEquals(END, reloaded.redirectTarget(1));
+        assertNull(reloaded.redirectTarget(2));
         assertFalse(reloaded.isBillingEnabled(OVERWORLD));
         assertEquals(new DimensionStore.SpawnPoint(1.5, 64.0, -3.0), reloaded.spawn(OVERWORLD));
         assertEquals(fourTiers(), reloaded.tiers(NETHER));
@@ -202,5 +202,77 @@ class DimensionStoreTest {
         DimensionStore store = new DimensionStore(tmp.resolve("dimensions.json"));
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
                 () -> store.setMode("weird"));
+    }
+
+    @Test
+    void redirectSlotsRejectDuplicatesAndRequireContiguousFill() {
+        DimensionStore store = new DimensionStore(tmp.resolve("dimensions.json"));
+        // 前置槽为空时不得填写后续槽（首选空 -> 次选不可选，次选空 -> 备选不可选）
+        assertEquals(DimensionStore.RedirectResult.GAP, store.setRedirectTarget(1, NETHER));
+        assertEquals(DimensionStore.RedirectResult.GAP, store.setRedirectTarget(2, END));
+        assertNull(store.redirectTarget(1));
+
+        assertEquals(DimensionStore.RedirectResult.OK, store.setRedirectTarget(0, OVERWORLD));
+        assertEquals(DimensionStore.RedirectResult.GAP, store.setRedirectTarget(2, END));
+
+        // 同一维度不得占两个槽位（用户存档曾出现 [overworld, the_end, the_end]）
+        assertEquals(DimensionStore.RedirectResult.OK, store.setRedirectTarget(1, NETHER));
+        assertEquals(DimensionStore.RedirectResult.DUPLICATE, store.setRedirectTarget(2, NETHER));
+        assertEquals(DimensionStore.RedirectResult.DUPLICATE, store.setRedirectTarget(1, OVERWORLD));
+        assertEquals(NETHER, store.redirectTarget(1)); // 拒绝时不改动原值
+
+        // 同一槽位重写为自身不算重复
+        assertEquals(DimensionStore.RedirectResult.OK, store.setRedirectTarget(1, NETHER));
+
+        // 清空某槽：其后槽位连带清空（防"首选空而次选有值"的矛盾态）
+        assertEquals(DimensionStore.RedirectResult.OK, store.setRedirectTarget(2, END));
+        assertEquals(DimensionStore.RedirectResult.OK, store.setRedirectTarget(0, null));
+        assertNull(store.redirectTarget(0));
+        assertNull(store.redirectTarget(1));
+        assertNull(store.redirectTarget(2));
+    }
+
+    @Test
+    void loadNormalizesLegacyDuplicateAndGappedSlots() throws Exception {
+        Path file = tmp.resolve("dimensions.json");
+        Files.writeString(file, """
+                {"version":1,"mode":"independent","redirectOnExhaust":true,
+                 "redirectOrder":["minecraft:overworld","minecraft:the_end","minecraft:the_end"],
+                 "dimensions":{}}
+                """, StandardCharsets.UTF_8);
+        DimensionStore store = new DimensionStore(file);
+        // 重复维度只保留首次出现的位置，后续槽位前移补位
+        assertEquals(OVERWORLD, store.redirectTarget(0));
+        assertEquals(END, store.redirectTarget(1));
+        assertNull(store.redirectTarget(2));
+
+        // 空洞（首槽空、次槽有值）归一为连续填写
+        Files.writeString(file, """
+                {"version":1,"mode":"shared","redirectOnExhaust":false,
+                 "redirectOrder":[null,"minecraft:the_nether","minecraft:the_end"],
+                 "dimensions":{}}
+                """, StandardCharsets.UTF_8);
+        DimensionStore gapped = new DimensionStore(file);
+        assertEquals(NETHER, gapped.redirectTarget(0));
+        assertEquals(END, gapped.redirectTarget(1));
+        assertNull(gapped.redirectTarget(2));
+    }
+
+    @Test
+    void clearSpawnKeepsBillingAndTiers() {
+        DimensionStore store = new DimensionStore(tmp.resolve("dimensions.json"));
+        store.setBilling(OVERWORLD, false);
+        store.setTiers(OVERWORLD, fourTiers());
+        assertTrue(store.setSpawn(OVERWORLD, 1.0, 64.0, 2.0));
+
+        store.clearSpawn(OVERWORLD);
+        assertNull(store.spawn(OVERWORLD));
+        assertFalse(store.isBillingEnabled(OVERWORLD)); // 计费开关保留
+        assertEquals(fourTiers(), store.tiers(OVERWORLD)); // 额度线快照保留
+        // 清空后即视为未配置：独立模式门槛校验重新报缺
+        assertEquals(List.of(OVERWORLD), store.validateIndependentReady(List.of(OVERWORLD)));
+        // 无坐标的维度 clearSpawn 幂等（不抛错、不落盘）
+        store.clearSpawn(OVERWORLD);
+        assertNull(store.spawn(OVERWORLD));
     }
 }
