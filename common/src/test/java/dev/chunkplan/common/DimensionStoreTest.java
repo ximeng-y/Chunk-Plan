@@ -45,6 +45,26 @@ class DimensionStoreTest {
     }
 
     @Test
+    void redirectOrderSnapshotToleratesUnconfiguredNullSlots() {
+        // 0.3.0 GUI 回归：未配置槽位为 null，快照不得抛 NPE（List.copyOf 拒绝 null 元素）——
+        // 该 NPE 曾令管理员打开 GUI 时服务端异常，客户端显示"未检测到服务器"
+        DimensionStore store = new DimensionStore(tmp.resolve("dimensions.json"));
+        List<String> order = store.redirectOrder();
+        assertEquals(3, order.size());
+        assertNull(order.get(0));
+        assertNull(order.get(2));
+        // 已配置槽与 null 槽并存时快照同样可用
+        store.setRedirectTarget(1, NETHER);
+        assertEquals(NETHER, store.redirectOrder().get(1));
+        assertNull(store.redirectOrder().get(0));
+        // 快照是独立副本：库内后续变更不回溯影响先前快照
+        List<String> before = store.redirectOrder();
+        store.setRedirectTarget(0, OVERWORLD);
+        assertEquals(OVERWORLD, store.redirectOrder().get(0));
+        assertNull(before.get(0));
+    }
+
+    @Test
     void roundTripPersistsAllFields() {
         Path file = tmp.resolve("dimensions.json");
         DimensionStore store = new DimensionStore(file);

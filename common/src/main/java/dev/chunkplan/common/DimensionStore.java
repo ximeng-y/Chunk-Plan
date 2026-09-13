@@ -93,9 +93,11 @@ public final class DimensionStore {
         save();
     }
 
-    /** 重定向槽位快照（3 项，元素可为 null，只读） */
+    /** 重定向槽位快照（3 项，元素可为 null = 未配置，只读）。
+     *  不可用 List.copyOf：其拒绝 null 元素，而槽位默认 [null, null, null]，
+     *  未配置时调用即 NPE（0.3.0 GUI「未检测到服务器」回归的根因） */
     public synchronized List<String> redirectOrder() {
-        return List.copyOf(redirectOrder);
+        return java.util.Collections.unmodifiableList(new ArrayList<>(redirectOrder));
     }
 
     public synchronized String redirectTarget(int slot) {
