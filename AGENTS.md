@@ -255,6 +255,19 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **提示分工**：保存区原有红字 `dim.coords_missing`（"有维度缺合法落地坐标，暂无法启用独立计费"）保留，持续显示在按钮右侧——它现在纯属提示，与按钮可点性解耦；`missingSpawnDims()` 随之只服务该提示与保存时跳过非法维度。
     - **验证**：common 173 测试不变（纯壳层）；根构建 + fabric-multi 三版本 build 全绿；五端镜像自检 MIRROR OK（严格模式：port_gui.py 内存变换结果与磁盘文件逐字节一致）；产物 jar 刷新至 `.XMTEMP/jars-0.3.0/`。GUI 渲染仍需用户实机复测（坑 #11 系列盲区）。
 
+49. **维度页交互一轮修正（坑 #49，2026-09-13，用户 NeoForge 实机截图反馈，版本保持 0.3.0）**：一次提交闭环 9 项，其中 5 项是同一批根因的不同表现。
+    - **根因一：原版 EditBox 聚焦即回调 responder**（`AbstractWidget.mouseClicked` → `EditBox.onClick` → `moveCursorTo` → `onValueChange`，EditBox.java:243 无条件调用）。原先 responder 里无条件打「未保存」标记 → **点一下输入框（哪怕不改字）就红字报未保存**（管理页 tier2/tier3 与维度坐标框均中招）。修复：删掉所有 responder 里的脏标记，未保存状态改为**现算**——`dimCoordsDirty()` 逐维度把「本地编辑值 vs 服务端值」比对（管理页 `markTierDirtyIfChanged`、维度页 `markDimTierDirtyIfChanged` 同思路）。副作用：改了又改回原值会自动回到干净态（符合预期）。
+    - **根因二：保存是异步派发 + 服务端每条命令都回推状态**（`ChunkPlanNetwork.handleCommand` 末行恒 `sendStatus`）。原 `saveDimCoords` 在**派发前**就清乐观值 → 首个回包到达时界面已回落到旧服务端值，表现为**「切回共享后改坐标保存，只有模式切了、坐标被回退」**。修复：派发**只发命令、不动乐观值**，乐观值由 `buildDimensions` 按「服务端值 == 乐观值」**逐项消费**（清空亦然：服务端已无坐标且本地为空即消费），未确认期间红字照常显示。同一批命令里的模式切换也走这条（`pendingDimMode` 由「服务端模式已一致」消费）。
+    - **根因三：坐标只存一份，但共享模式下改不动也清不掉**。坐标本就只对独立计费有意义，不该按模式分两套存（用户拍板：独立保存无意义）。真正的缺陷是**没有清除入口**：三格填空时 `dimCoordsValid` 为 false、旧代码直接 `continue` 静默跳过，而 `config dimension <dim> spawn` 只接受 3 个数字 → 用户无法把已配坐标改回未配置。修复：新增命令 **`/chunkplan config dimension <dim> spawn clear`**（四端同步；`DimensionStore.clearSpawn` 保留计费开关与额度线快照、`QuotaEngine.clearDimensionSpawn` 转发），GUI 三格全空即派发该命令；共享模式下坐标列照常可见可改（这正是"能清掉"的前提）。
+    - **①重定向 3 槽位改真下拉**（用户点名的交互要求）。原先点一下循环「空 → 各维度 → 空」且**只校验维度是否 live、不查跨槽重复**——用户存档实证 `["minecraft:overworld","minecraft:the_end","minecraft:the_end"]`。改为复用真下拉（新增 `dimDropdownPage == 3`，候选 = 全部维度去掉其它槽已占用者，首项 `—` = 清空），并落地三条不变量：**不可重复、须自首选起连续填写**（首选空 → 次选灰、次选空 → 备选灰），清空某槽连带清空其后槽位。服务端同步拒绝（`DimensionStore.setRedirectTarget` 返回 `RedirectResult{OK,DUPLICATE,GAP}`，命令层按结果报错；补全建议也过滤已占用维度），`load()` 对旧数据做同样归一（防"槽位灰着却有值"的矛盾画面）。
+    - **④每维度「计费」开关改为保存后生效**：原先点击即发命令，与同排的坐标/额度线（都需保存）不一致。改为 `pendingBilling` 本地待保存，随「保存」按钮与坐标/模式**同批派发**（并在 `saveDimCoords` 里逐维度产出，不再依赖 map 遍历顺序）。
+    - **⑤用量页下拉展开导致可视化整片消失**：原实现是 `renderUsage` 里刻意 `return`（坑 #47 为绕开"文本层浮于填充之上"而选择不画）。用户要的是能同时看到。改为**把额度内容整体下移到下拉列表之下**（`dropdownRect()` 复用渲染侧同一高度推导），矮窗口（下移后放不下）才退回不画。
+    - **⑥开关/窗口控件统一为手绘下拉条**：用户反馈「额度线规则虽然是下拉框，但组件不像下拉框，期望和用量页维度选择器一样」。抽出 `drawSelectBar`（黑底 + 四边白描边 + 右端 ▼），替换管理页/维度页的 `<button>`，并升级为**真下拉选择**（新增 `dimDropdownPage == 4` 开关、`== 5` 窗口时长）；管理页额度未保存红字移到档位行下方（原位置会被新条压住）。**下拉展开时被覆盖的行不建控件**（沿用坑 #47 环境事实；逐行 `coveredByDropdown` 判定而非整段 break，`closeDimDropdown` 会 `rebuild` 恢复）。
+    - **⑧文案**：`gui.chunkplan.tab.dimensions` 维度 → **维度独立计费**（en `Dims` → `Per-dim billing`）；`gui.chunkplan.dim.mode` 维度模式 → **计费模式**；新增 `gui.chunkplan.dim.spawn_hint`（坐标留空保存即清除）×12 lang。
+    - **⑦模式切换的计时语义（用户未测试，代码实证）**：**不重置、不重新计时、不暂停、不报错、互不干扰**。`setDimensionMode` 只写模式位 + 清提示状态，两套账本（共享 `tiers` / 维度 `dimTiers`）并存冻结；周期锚点是绝对时刻，`effectiveSpent` 按当前墙钟现算（过期即返回 0 并在下次消费重锚）；判满与恢复时间只遍历当前模式那一套。观感上会出现「独立显示 2.05、切回共享显示 3.55」——两套账本并存，非 bug。**注意**：关某档窗口的 `clearTierSpendForAll` 会连带清空所有维度桶的同一档位（刻意设计）。
+    - **日志核验（用户附带请求）**：用户整合包 `latest.log` 里 4.7 万条 `OpenGLDebug id=1282` **与本 mod 无关**——滤掉后 51766 行只剩 8 行提到 chunkplan；该报错在 2026-08-02（本 mod 尚未装入该整合包）的日志里已有 41052 条且 chunkplan 提及数为 0，上下文是 xaero 地图纹理上传 + `super_resolution` DLSS-G；六模块源码里除 `GLFW_KEY_*` 常量与 `GuiGraphics` 参数类型外**零 GL 调用**。
+    - **验证**：common 176 测试（+3：重定向槽位不变量 / 旧数据归一 / clearSpawn 保留他项）；根构建 + fabric-multi 三版本 build 全绿；五端镜像自检 MIRROR OK（新增 `mirror_check.py`：port 变换结果与磁盘文件严格比对）；neoforge rcon 冒烟——spawn 设置/清空落盘、重复槽位被拒、前置槽未填被拒、清空首选连带清空后续槽、共享模式下改坐标→切独立后保留、越界坐标拒绝。GUI 渲染仍需用户实机复测（坑 #11 系列盲区）。
+
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
 - 各端配置结构保持一致（TOML 与 JSON 字段一一对应；forge 与 neoforge 的 TOML 键完全相同）

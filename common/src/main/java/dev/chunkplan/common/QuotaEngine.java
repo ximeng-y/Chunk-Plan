@@ -439,6 +439,11 @@ public final class QuotaEngine {
         return dimStore.setSpawn(dimKey, x, y, z);
     }
 
+    /** 清空维度落地坐标（该维度转为"未配置"；独立模式下须重新配置才可作为重定向落点） */
+    public void clearDimensionSpawn(String dimKey) {
+        dimStore.clearSpawn(dimKey);
+    }
+
     /** 设置维度四档额度线（独立模式）；校验失败返回 false；变更后清该维度提示状态 */
     public boolean setDimensionTiers(String dimKey, List<QuotaTiers.Tier> tiers) {
         if (!dimStore.setTiers(dimKey, tiers)) {
@@ -452,8 +457,9 @@ public final class QuotaEngine {
         dimStore.setRedirectOnExhaust(v);
     }
 
-    public void setRedirectTarget(int slot, String dim) {
-        dimStore.setRedirectTarget(slot, dim);
+    /** 设置重定向槽位；返回 {@link DimensionStore.RedirectResult}，非 OK 时槽位不变（命令层据此报错） */
+    public DimensionStore.RedirectResult setRedirectTarget(int slot, String dim) {
+        return dimStore.setRedirectTarget(slot, dim);
     }
 
     /** 豁免判定：默认 OP + 配置名单豁免；exemptByDefault=false 时全员受限 */
