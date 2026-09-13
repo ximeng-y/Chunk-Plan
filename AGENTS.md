@@ -275,6 +275,16 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **④`setRedirectTarget` 判定顺序防御性加固（NITPICK）**：DUPLICATE 提到 GAP 之前（若两态同时成立真实冲突是重复）。**推演发现当前不变量下（前缀连续 + 清空级联 + load 归一）两态实际互斥**——不可构造同时成立的可达用例，纯防御加固，测试不变（曾试补顺序断言后撤回）。
     - **验证**：common 176 测试全绿（无新增）；根构建 + fabric-multi 三版本 build 全绿；五端 port_gui.py 重生成 + mirror_check.py 严格自检 MIRROR OK；版本保持 0.3.0，六端 jar 刷新 `.XMTEMP/jars-0.3.0/`。GUI 渲染仍需实机复测（坑 #11 系列盲区）。
 
+51. **下拉浮层化 + tier 开关还原点击切换（坑 #51，2026-09-13，用户 NeoForge 实机截图反馈，直接 main 提交）**：坑 #47/#49 的「被覆盖内容不建/不画」与「用量页内容下移」两类 workaround 被用户否决——用户要的是**真正的 z 上层浮层**：黑底盖住底下照常渲染的内容（不是把内容隐藏或挤走），且源控件展开时必须继续显示。同批拍板：**tier 的开关状态恢复点击切换 Button**（坑 #49 ⑥ 曾统一成手绘下拉条，用户明确开关不是下拉）。
+    - **浮层置顶的实现（分代差异，javap 实证）**：
+      - **1.21.1/1.20.1（旧立即管线）**：`GuiGraphics.flush()`（= disableDepthTest + bufferSource.endBatch + enableDepthTest）——renderDimDropdown/renderResetSuggestions **画浮层前 flush**（把此前内容连同字体合批 mod 延迟提交的文本批次强制落到帧缓冲，之后画的黑底才是真覆盖）+ **画后 flush**（浮层文本立即提交），仿原版 tooltip 的 drawManaged 语义。
+      - **1.21.11/26.x（新 stratum 管线）**：GuiGraphics/GuiGraphicsExtractor **均无 flush**（javap 实证，1.21.11 起渲染已迁移 GuiRenderState）→ 改 `g.nextStratum()`（画浮层前新开分层，stratum 复合顺序即 z 序，等效浮层；画后无需处理）。port_gui.py 已加对应替换（flush 两行 → 1.21.11/26.x 的 nextStratum/删除；forge/fabric 1.21.1 保留 flush）。
+      - **flush 是否真能治用户环境的文字透出未实机验证**：坑 #47 的透出根因是合批 mod 延迟文本提交，flush/endBatch 是其唯一钩子点（ImmediatelyFast 类 mod 必须响应 endBatch 否则原版聊天建议列表早坏了），理论成立但**待用户实机复测**；若仍透出则该环境的文本提交绕过 endBatch，需再议。
+    - **删除的逻辑**：`coveredByDropdown()` 与 `dropdownRect()` 两方法及全部调用点（管理页 tier 行、维度列表行/档位行、保存区文字、重定向槽位条、用量页额度行）；用量页展开时内容下移 + 矮窗口退回不画；管理页 reset 提示行在补全弹出期间隐藏的逻辑（全部还原为照常渲染/固定布局）。
+    - **源控件常显**：所有下拉（用量页维度、维度页编辑器/重定向槽位/窗口）展开时源手绘条照常画（列表从源条下方 2px 起，本就不重叠）。
+    - **tier 开关 Button 化**：管理页与维度页各 4 档开关从手绘条改回原生 Button（文案 已开启/已关闭 = `gui.chunkplan.enabled/disabled`，点击即 `setTierEnabled(tier, !effEnabled(tier))` / `setDimTierEnabled(...)` 切换待应用状态，仍须点「设置」落盘）；管理页恒可点，维度页 `active = independent && live`；`tierToggleRect`/`dimTierToggleRect` 字段、`toggleTier`/`toggleDimTier` 方法、dimDropdownPage==4 的 label/value/accept 分支全部删除（**编号 4 废弃不复用**，5=档位窗口保留）；mouseClicked 里两个开关命中分支删除（Button 自管点击）。
+    - **验证**：common 176 测试不变（纯客户端 GUI 改动）；根构建 + fabric-multi 三版本 build 全绿；五端 port 重生成 + mirror_check 严格自检 MIRROR OK；六端 jar 刷新 `.XMTEMP/jars-0.3.0/`。**浮层遮挡效果必须用户实机复测**（坑 #11 盲区 + flush 依赖合批 mod 行为）。
+
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
 - 各端配置结构保持一致（TOML 与 JSON 字段一一对应；forge 与 neoforge 的 TOML 键完全相同）
