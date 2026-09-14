@@ -295,6 +295,8 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **范围**：`renderDimDropdown`（用量页维度 / 维度页编辑器 / 重定向槽位 / 档位窗口 四种真下拉共用同一方法）与 `renderResetSuggestions`（reset 补全）两处，六端镜像；`port_gui.py` 新增 `port_overlay_top`（新世代删 flush、pose 块换 `nextStratum`、删 popPose），`mirror_check.py` 严格自检 MIRROR OK
     - **验证**：common 176 测试不变；根构建 + fabric-multi 三版本 build 全绿；**dev 客户端实机确认**（neoforge 1.21.1，用量页独立模式维度下拉）：黑底完整覆盖其下额度行、无文字透出、条目文字清晰（javap 复核产物 jar 含且仅含两处 `float 350.0f`）；六端 jar 刷新 `.XMTEMP/jars-0.3.0/`（版本仍 0.3.0）
 
+53. **维度选择条改手绘下拉条（坑 #53，2026-09-14 用户实机截图指出，纯样式）**：维度页底部编辑器的「选择维度」原为原生 `Button`（圆角高亮条，与同页别的下拉观感不一致），用户要求改成与重定向槽位（`首选: overworld ▼`）一致的样子。修复：删除 `dimEditCycle` 字段与对应的 `addButton`，改 `setRect(dimSelectRect, left, et, 150, 18)`（与 slotBarRect 同款命中区字段）+ `renderDimensions` 里 `drawSelectBar(...)` 绘制（黑底 + 四边白描边 + 右端 ▼，标签为完整维度 key，由 drawSelectBar 按 `w-20` 截断，与旧 Button 的 `plainSubstrByWidth(...,140)` 等效）+ `mouseClicked` 的 page 2 分支内加命中开 `openDimDropdown(2, dimSelectRect)`。**行为不变**（可点性与旧 Button 一致，恒可点；未加灰显门禁）——本次只改样式，不引入新 lang 键。六端镜像（改动行无版本差异，`port_gui.py` 无需新规则），`mirror_check.py` 严格自检 MIRROR OK。**按用户要求本次未构建**（编译未单独验证）、common 测试无涉。
+
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
 - 各端配置结构保持一致（TOML 与 JSON 字段一一对应；forge 与 neoforge 的 TOML 键完全相同）

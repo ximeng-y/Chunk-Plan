@@ -113,7 +113,8 @@ public final class ChunkPlanGuiScreen extends Screen {
     /** 重定向 3 槽位手绘下拉条命中区（[slot] = {x,y,w,h}）与可点性（须自首选起连续） */
     private final int[][] slotBarRect = new int[3][4];
     private final boolean[] slotBarClickable = new boolean[3];
-    private Button dimEditCycle;
+    /** 维度页编辑器「选择维度」手绘下拉条命中区（与重定向槽位同一观感，坑 #53） */
+    private final int[] dimSelectRect = new int[4];
     private final EditBox[] dimTierLimit = new EditBox[4];
     private final Button[] dimTierSet = new Button[4];
     private final int[][] dimTierWindowRect = new int[4][4];
@@ -865,9 +866,8 @@ public final class ChunkPlanGuiScreen extends Screen {
 
         // 底部档位编辑器：选中维度 + 4 档（仅独立模式可编辑，共享模式灰显——服务端同语义）
         int et = dimEditorTop();
-        dimEditCycle = addButton(left, et, 150, 18,
-                Component.literal(selectedDim == null ? "—" : font.plainSubstrByWidth(selectedDim, 140)),
-                b -> openDimDropdown(2, left, et, 150, 18));
+        // 选择维度：手绘下拉条（黑底+白描边+▼，与重定向槽位/窗口条统一观感，坑 #53），命中在 mouseClicked
+        setRect(dimSelectRect, left, et, 150, 18);
         if (selectedDim == null) {
             return;
         }
@@ -1311,8 +1311,10 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (effIndependent && !missingSpawnDims().isEmpty()) {
             g.text(font, Component.translatable("gui.chunkplan.dim.coords_missing"), x + 300, saveY + 6, COL_RED);
         }
-        // 编辑器标签
+        // 编辑器标签 + 维度选择条（手绘下拉条，展开时源条照常显示）
         int et = dimEditorTop();
+        drawSelectBar(g, dimSelectRect[0], dimSelectRect[1], dimSelectRect[2], dimSelectRect[3],
+                Component.literal(selectedDim == null ? "—" : selectedDim), false);
         g.text(font, Component.translatable("gui.chunkplan.dim.tier_title"), x + 156, et + 6, COL_TEXT);
         if (!independent) {
             g.text(font, Component.translatable("gui.chunkplan.dim.shared_mode_hint"), x + 240, et + 6, COL_GRAY);
@@ -1948,13 +1950,17 @@ public final class ChunkPlanGuiScreen extends Screen {
             openDimDropdown(0, dimDropX, dimDropY, dimDropW, dimDropH);
             return true;
         }
-        // 维度页：重定向槽位 / 档位窗口（开关是 Button 自管点击）
+        // 维度页：重定向槽位 / 维度选择条 / 档位窗口（开关是 Button 自管点击）
         if (page == 2 && status != null && status.dimConfig() != null) {
             for (int s = 0; s < 3; s++) {
                 if (inRect(event.x(), event.y(), slotBarRect[s])) {
                     openRedirectSlot(s);
                     return true;
                 }
+            }
+            if (inRect(event.x(), event.y(), dimSelectRect)) {
+                openDimDropdown(2, dimSelectRect);
+                return true;
             }
             for (int i = 0; i < 4; i++) {
                 if (dimTierWindowClickable[i] && inRect(event.x(), event.y(), dimTierWindowRect[i])) {
