@@ -304,6 +304,12 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **修复**：新增 `private int presetIndexOf(List<String> names) { return selectedPreset == null ? -1 : names.indexOf(selectedPreset); }`（方法注释写明不可退回裸 `indexOf` 的 JDK 原因），`currentPresetOrNull()` / `cyclePreset()` 两处改调它；`idx < 0` 的既有回落逻辑不变，行 1 按钮显示首个预设、首次点击即选中它。六端同步（`port_gui.py` 生成五端 + `mirror_check.py` 严格自检 **MIRROR OK**）；纯客户端 GUI，common/协议/lang 零改动。
     - **同类隐患（本次未修，现不可达）**：`isLiveDim` 的 `status.dimensions().contains(dim)` 同样拒绝 null 实参（也是 `List.copyOf` 产出的不可变列表），现调用点均传非空值（`selectedDim == null` 已被前置分支挡掉）。
 
+55. **预设选择改真下拉 + 标签更名「选择预设」（坑 #55，2026-09-14，用户 NeoForge 实机截图要求，直接 main 提交，纯客户端 GUI + 文案）**：管理页预设区行 1 的「预设」标签 → **「选择预设」**（`gui.chunkplan.preset_title` 只改值不改 key：zh 预设→选择预设、en Preset→Select preset，**×12 份 lang**；key 名保留同坑 #43 先例），右侧原为**循环切换的原生 Button**（点一下换下一个预设）→ 改**手绘下拉条 + 真下拉**（用户点名的下拉框观感）：
+    - **实现**：删 `presetCycle` Button 字段与 `cyclePreset()`，改 `presetSelectRect` 命中区（`setRect(presetSelectRect, left + 96, gy, 84, 20)`，几何与旧 Button 完全一致，未动其余列）+ `renderAdmin` 里 `drawSelectBar(...)` 绘制（黑底 + 四边白描边 + 右端 ▼，与维度选择条/重定向槽位同款）+ `mouseClicked`（page 1 且 isAdmin）命中开 `openPresetDropdown()`。真下拉复用既有机制：`dimDropdownPage` 新增 **6 = 管理页预设选择**（编号接在 5 后；4 仍废弃不复用，坑 #51），`dropdownLabels()` case 6 返回 `presetNames()`，`dropdownValues()` 走 default 即同值，`acceptDimDropdown` case 6 = `selectedPreset = value`（条是手绘控件，无需 rebuild 即显新值，同 page 0 用法）
+    - **灰显与可点性成对**：列表为空时条灰（`drawSelectBar(..., presetNames().isEmpty())`）且 `openPresetDropdown()` 早退——与旧 Button「空列表点不动」等价，只是观感更诚实；有预设时条常显白，浮层宽度取 `max(84,120)=120`（截断余量同其余下拉）
+    - **行为面不变**：`selectedPreset` 语义、`currentPresetOrNull()` 回落逻辑、应用到全体/删除/按玩家分配三处调用点、`presetIndexOf`（坑 #54 的 NPE 防御）全部原样；浮层展开/关闭走坑 #51 的 z=350 浮层语义（下方保存/分配行照常渲染，被黑底盖住）
+    - **验证**：六端镜像（改动行无版本差异，`port_gui.py` 无需新规则）+ `mirror_check.py` 严格自检 **MIRROR OK**；12 份 lang JSON 解析通过且 CRLF 保持。**按用户要求本次未构建**（编译与实机渲染待复测）、common 测试无涉未跑。版本仍 0.3.0。
+
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
 - 各端配置结构保持一致（TOML 与 JSON 字段一一对应；forge 与 neoforge 的 TOML 键完全相同）

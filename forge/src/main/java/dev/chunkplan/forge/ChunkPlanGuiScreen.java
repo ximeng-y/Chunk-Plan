@@ -76,7 +76,8 @@ public final class ChunkPlanGuiScreen extends Screen {
     private EditBox resetTarget;
     private int resetTier; // 0 = all，1..4
     // 预设区控件（issue #1、#2）
-    private Button presetCycle;
+    /** 预设选择条命中区（手绘下拉条 + 真下拉；原为循环切换的 Button，用户要求改成下拉框观感） */
+    private final int[] presetSelectRect = new int[4];
     private EditBox presetNameEdit;
     private EditBox presetTarget;
 
@@ -136,6 +137,7 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     // 维度真下拉（用量页查看维度 + 维度页编辑器选维度 + 重定向槽位 + 档位窗口，共用一套展开状态）
     // dimDropdownPage：0 = 用量页维度 1 = 管理页补全（未用） 2 = 维度页编辑器 3 = 重定向槽 5 = 档位窗口
+    //                  6 = 管理页预设选择
     //（4 曾是档位开关下拉，坑 #51 起开关改回点击切换，编号废弃不复用）
     private boolean dimDropdownOpen;
     private int dimDropdownPage;
@@ -342,9 +344,9 @@ public final class ChunkPlanGuiScreen extends Screen {
 
         // ---------- 预设区（issue #1、#2） ----------
         gy += 28;
-        // 行 1：循环选择预设 → 应用到全体（写全局配置，需确认；独立模式下全局额度线不生效，按钮隐藏）
-        // / 删除（本地确认，无服务端 confirm 流）
-        presetCycle = addButton(left + 96, gy, 84, 20, Component.literal(selectedPresetName()), b -> cyclePreset());
+        // 行 1：选择预设（手绘下拉条 + 真下拉）→ 应用到全体（写全局配置，需确认；独立模式下全局额度线
+        // 不生效，按钮隐藏）/ 删除（本地确认，无服务端 confirm 流）
+        setRect(presetSelectRect, left + 96, gy, 84, 20);
         if (!independent) {
             addButton(left + 186, gy, 66, 20, Component.translatable("gui.chunkplan.preset_apply"),
                     b -> applyPresetAll());
@@ -626,16 +628,12 @@ public final class ChunkPlanGuiScreen extends Screen {
         return cur == null ? "—" : cur;
     }
 
-    private void cyclePreset() {
-        List<String> names = presetNames();
-        if (names.isEmpty()) {
+    /** 选择预设：展开真下拉，候选即预设名列表（列表空时条为灰、点不动） */
+    private void openPresetDropdown() {
+        if (presetNames().isEmpty()) {
             return;
         }
-        int idx = presetIndexOf(names);
-        selectedPreset = names.get((idx + 1) % names.size());
-        if (presetCycle != null) {
-            presetCycle.setMessage(Component.literal(selectedPresetName()));
-        }
+        openDimDropdown(6, presetSelectRect);
     }
 
     /** 应用当前选中预设到全体（写全局配置）：服务端 apply 需 confirm，走批量派发 + 补 confirm */
@@ -1392,6 +1390,8 @@ public final class ChunkPlanGuiScreen extends Screen {
                 return labels;
             case 5:
                 return toggleTierRow < 0 ? List.of() : presets(toggleTierRow + 1);
+            case 6:
+                return presetNames();
             default:
                 return dimensionKeys();
         }
@@ -1499,6 +1499,7 @@ public final class ChunkPlanGuiScreen extends Screen {
                 }
                 rebuild();
             }
+            case 6 -> selectedPreset = value; // 条为手绘控件，无需重建即显新值
             default -> rebuild();
         }
     }
@@ -1855,6 +1856,9 @@ public final class ChunkPlanGuiScreen extends Screen {
         g.drawString(font, Component.translatable("gui.chunkplan.preset_title"), x, gy + 146, COL_TEXT);
         g.drawString(font, Component.translatable("gui.chunkplan.preset_save_label"), x, gy + 174, COL_TEXT);
         g.drawString(font, Component.translatable("gui.chunkplan.preset_assign_label"), x, gy + 202, COL_TEXT);
+        // 预设选择条（手绘下拉条：与其余下拉同观感；列表为空时灰显且点不动）
+        drawSelectBar(g, presetSelectRect[0], presetSelectRect[1], presetSelectRect[2], presetSelectRect[3],
+                Component.literal(selectedPresetName()), presetNames().isEmpty());
         g.drawString(font, Component.translatable("gui.chunkplan.reset_hint"), x + 296, gy + 124, COL_GRAY);
     }
 
@@ -1991,6 +1995,11 @@ public final class ChunkPlanGuiScreen extends Screen {
                     return true;
                 }
             }
+        }
+        // 管理页：预设选择条（手绘下拉条，展开真下拉）
+        if (page == 1 && isAdmin() && inRect(mouseX, mouseY, presetSelectRect)) {
+            openPresetDropdown();
+            return true;
         }
         if (!resetSuggestions.isEmpty()) {
             int paneY = resetTargetY + resetTargetH + 2;
