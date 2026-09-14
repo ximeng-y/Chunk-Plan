@@ -609,8 +609,16 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (names.isEmpty()) {
             return null;
         }
-        int idx = names.indexOf(selectedPreset);
+        int idx = presetIndexOf(names);
         return names.get(idx >= 0 ? idx : 0);
+    }
+
+    /** 预设名在列表中的下标；从未选中过任何预设（selectedPreset 为 null）时返回 -1。
+     *  不可直接写 names.indexOf(selectedPreset)：status.presets() 是 List.copyOf 产出的不可变列表，
+     *  其 indexOf(null) 会抛 NPE（JDK ImmutableCollections 拒绝 null 实参，普通 ArrayList 才返回 -1），
+     *  有预设后会在 buildAdmin 里炸掉整个预设区控件（坑 #54） */
+    private int presetIndexOf(List<String> names) {
+        return selectedPreset == null ? -1 : names.indexOf(selectedPreset);
     }
 
     private String selectedPresetName() {
@@ -623,7 +631,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (names.isEmpty()) {
             return;
         }
-        int idx = names.indexOf(selectedPreset);
+        int idx = presetIndexOf(names);
         selectedPreset = names.get((idx + 1) % names.size());
         if (presetCycle != null) {
             presetCycle.setMessage(Component.literal(selectedPresetName()));
