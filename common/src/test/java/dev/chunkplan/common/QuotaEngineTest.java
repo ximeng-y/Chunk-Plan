@@ -1303,6 +1303,30 @@ class QuotaEngineTest {
     }
 
     @Test
+    void independentModeReentryIntoExhaustedDimRedirectsAgain() {
+        enableIndependentMode();
+        engine.setRedirectOnExhaust(true);
+        engine.setRedirectTarget(0, OVERWORLD);
+        // 末地消费至上限（每踏新块 1.0，上限 2.0）
+        engine.onPlayerTick(player, false, END, 0, 64, 0, LIVE_DIMS);
+        engine.onPlayerTick(player, false, END, 16, 64, 0, LIVE_DIMS);
+        engine.onPlayerTick(player, false, END, 32, 64, 0, LIVE_DIMS);
+        var r = engine.onPlayerTick(player, false, END, 48, 64, 0, LIVE_DIMS);
+        assertEquals(QuotaEngine.ResultType.REDIRECT, r.type());
+        assertEquals(OVERWORLD, r.redirectDim());
+        // 壳层按配置坐标落地主世界（该落点照常计费）
+        assertEquals(QuotaEngine.ResultType.NONE,
+                engine.onPlayerTick(player, false, OVERWORLD, 1, 64, 1, LIVE_DIMS).type());
+        // 玩家再经传送门/指令回到末地：下一 tick 即再次重定向回主世界（既不放行也不封禁）
+        var again = engine.onPlayerTick(player, false, END, 16, 64, 16, LIVE_DIMS);
+        assertEquals(QuotaEngine.ResultType.REDIRECT, again.type());
+        assertEquals(OVERWORLD, again.redirectDim());
+        // 原地不动也每 tick 判满（坑 #30）：传送落点后即便不再移动，同样在下一 tick 被传回
+        assertEquals(QuotaEngine.ResultType.REDIRECT,
+                engine.onPlayerTick(player, false, END, 16, 64, 16, LIVE_DIMS).type());
+    }
+
+    @Test
     void independentModeAllDimsExhaustedBansWithEarliestRecovery() {
         enableIndependentMode();
         engine.setRedirectOnExhaust(true);

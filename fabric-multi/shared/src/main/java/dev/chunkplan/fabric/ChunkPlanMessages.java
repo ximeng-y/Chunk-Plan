@@ -103,7 +103,7 @@ public final class ChunkPlanMessages {
     }
 
     /**
-     * 耗尽重定向公告（issue #3）：排版仿 ban 公告（坑 #26 模板），口径换成
+     * 耗尽传送其它维度公告（issue #3）：排版仿 ban 公告（坑 #26 模板），口径换成
      * "原维度额度耗尽、已被传送到目标维度"——标题黄色（非惩罚性动作），
      * 线状态为原维度的额度情况（额度重置后可返回原维度）。
      */
@@ -358,7 +358,7 @@ public final class ChunkPlanMessages {
                     + "§f维度计费模式：§a/chunkplan config dimensionMode <shared | independent>§f，独立模式要求每个维度先配置落地坐标\n"
                     + "§f维度配置：§a/chunkplan config dimension <维度> billing <on | off> | spawn <x> <y> <z>§f（计费开关两种模式通用）\n"
                     + "§f维度额度线：§a/chunkplan config dimension <维度> window | windowTime | windowLimit ...§f（仅独立模式，参数同全局 window 命令族）\n"
-                    + "§f耗尽重定向：§a/chunkplan config redirect <on | off>§f 与 §a/chunkplan config redirectTarget <primary | secondary | tertiary> <维度 | none>§f（仅独立模式）\n"
+                    + "§f耗尽传送其它维度：§a/chunkplan config redirect <on | off>§f 与 §a/chunkplan config redirectTarget <primary | secondary | tertiary> <维度 | none>§f（仅独立模式）\n"
                     + "§f重载配置：§a/chunkplan reload\n"
                     + "§7数值允许整数或最多 2 位小数；所有修改写入配置文件并立即生效";
         }
@@ -378,7 +378,7 @@ public final class ChunkPlanMessages {
                 + "§fDimension billing mode: §a/chunkplan config dimensionMode <shared | independent>§f - independent mode requires every dimension to have landing coordinates configured first\n"
                 + "§fDimension config: §a/chunkplan config dimension <dim> billing <on | off> | spawn <x> <y> <z>§f (the billing toggle works in both modes)\n"
                 + "§fDimension quota lines: §a/chunkplan config dimension <dim> window | windowTime | windowLimit ...§f (independent mode only; same arguments as the global window commands)\n"
-                + "§fExhaustion redirect: §a/chunkplan config redirect <on | off>§f and §a/chunkplan config redirectTarget <primary | secondary | tertiary> <dim | none>§f (independent mode only)\n"
+                + "§fTeleport on exhaust: §a/chunkplan config redirect <on | off>§f and §a/chunkplan config redirectTarget <primary | secondary | tertiary> <dim | none>§f (independent mode only)\n"
                 + "§fReload: §a/chunkplan reload\n"
                 + "§7Numbers may be integers or up to 2 decimals; all changes are written to the config file and take effect immediately";
     }

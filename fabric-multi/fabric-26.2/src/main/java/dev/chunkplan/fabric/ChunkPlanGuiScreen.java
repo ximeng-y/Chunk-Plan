@@ -41,6 +41,8 @@ public final class ChunkPlanGuiScreen extends Screen {
     private static final int COL_RED = 0xFFFF5555;
     private static final int COL_ACCENT = 0xFF55FFFF;
     private static final int COL_PANEL = 0xE0303030;
+    /** 管理页分区分界线：与页签分隔线同色，克制不抢眼（用户要求"不过度引起注意"） */
+    private static final int COL_DIVIDER = 0xFF555555;
     /** 补全建议框每行高度 */
     private static final int SUGGEST_ROW_H = 12;
     /** 补全建议最多行数（显示在输入框下方，防小窗口溢出） */
@@ -1480,6 +1482,36 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
     }
 
+    /**
+     * 「耗尽传送其它维度」开关的悬停说明：随鼠标的手绘浮层。
+     * 不用 Button.setTooltip——原版 isMouseOver 带 active 判定，共享模式下该开关灰显就再也看不到说明，
+     * 而"为什么点不动"恰恰最需要这段解释。置顶同下拉浮层（旧管线 z=350 / 新管线 nextStratum，坑 #51/#52）。
+     */
+    private void renderRedirectTooltip(GuiGraphicsExtractor g, int mouseX, int mouseY) {
+        if (page != 2 || status == null || status.dimConfig() == null || redirectButton == null
+                || !inRect(mouseX, mouseY, redirectButton.getX(), redirectButton.getY(),
+                        redirectButton.getWidth(), redirectButton.getHeight())) {
+            return;
+        }
+        List<FormattedCharSequence> lines = font.split(
+                Component.translatable("gui.chunkplan.dim.redirect_hint"), 220);
+        int w = 232;
+        int h = lines.size() * font.lineHeight + 8;
+        int bx = Math.max(4, Math.min(mouseX + 12, width - w - 4));
+        int by = Math.max(4, Math.min(mouseY + 12, height - h - 4));
+        g.nextStratum(); // 浮层置顶：新开分层（stratum）复合在既有层之上
+        g.fill(bx, by, bx + w, by + h, COL_PANEL);
+        g.fill(bx, by, bx + w, by + 1, 0xFFFFFFFF);
+        g.fill(bx, by + h - 1, bx + w, by + h, 0xFFFFFFFF);
+        g.fill(bx, by, bx + 1, by + h, 0xFFFFFFFF);
+        g.fill(bx + w - 1, by, bx + w, by + h, 0xFFFFFFFF);
+        int ty = by + 4;
+        for (FormattedCharSequence line : lines) {
+            g.text(font, line, bx + 6, ty, COL_TEXT);
+            ty += font.lineHeight;
+        }
+    }
+
     private void acceptDimDropdown(int idx) {
         List<String> values = dropdownValues();
         if (idx < 0 || idx >= values.size()) {
@@ -1703,6 +1735,7 @@ public final class ChunkPlanGuiScreen extends Screen {
             renderResetSuggestions(g, mouseX, mouseY);
         }
         renderDimDropdown(g, mouseX, mouseY);
+        renderRedirectTooltip(g, mouseX, mouseY);
         if (pendingConfirm) {
             renderConfirm(g);
         }
@@ -1859,6 +1892,8 @@ public final class ChunkPlanGuiScreen extends Screen {
                         !tierWindowClickable[i]);
             }
             gy = 36 + 4 * 32 + 6;
+            // 分区线：档位额度线区 | 费率与重置区（独立模式下档位区隐藏，此线随之消失）
+            g.fill(0, gy - 7, width, gy - 6, COL_DIVIDER);
             g.text(font, Component.translatable("gui.chunkplan.all_windows"), x, gy + 6, COL_TEXT);
             gy += 28;
         }
@@ -1867,6 +1902,8 @@ public final class ChunkPlanGuiScreen extends Screen {
         g.text(font, Component.translatable("gui.chunkplan.fee_explored"), x, gy + 34, COL_TEXT);
         g.text(font, Component.translatable("gui.chunkplan.speed_mult"), x, gy + 62, COL_TEXT);
         g.text(font, Component.translatable("gui.chunkplan.reset_quota"), x, gy + 118, COL_TEXT);
+        // 分区线：费率与重置区 | 预设区（gy + 136 = 重置行底与其下预设行首的中点，两种模式同式）
+        g.fill(0, gy + 136, width, gy + 137, COL_DIVIDER);
         // 预设区标签（行 1 选择/应用/删除、行 2 保存、行 3 按玩家分配）
         g.text(font, Component.translatable("gui.chunkplan.preset_title"), x, gy + 146, COL_TEXT);
         g.text(font, Component.translatable("gui.chunkplan.preset_save_label"), x, gy + 174, COL_TEXT);

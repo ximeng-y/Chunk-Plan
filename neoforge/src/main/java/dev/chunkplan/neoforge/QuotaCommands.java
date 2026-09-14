@@ -1224,7 +1224,7 @@ public final class QuotaCommands {
         return 1;
     }
 
-    /** /chunkplan config redirect <on|off>：耗尽重定向开关（仅独立模式） */
+    /** /chunkplan config redirect <on|off>：耗尽传送其它维度开关（仅独立模式） */
     private static int configRedirect(CommandContext<CommandSourceStack> ctx) {
         QuotaEngine eng = ChunkPlanNeoForge.engine;
         if (eng == null) {
@@ -1233,8 +1233,8 @@ public final class QuotaCommands {
         }
         if (!eng.isIndependentMode()) {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
-                    "§c耗尽重定向仅在维度独立模式下可用",
-                    "§cThe exhaustion redirect is only available in per-dimension mode")));
+                    "§c耗尽传送其它维度仅在维度独立模式下可用",
+                    "§cTeleport-on-exhaust is only available in per-dimension mode")));
             return 0;
         }
         String stateArg = StringArgumentType.getString(ctx, "state");
@@ -1245,10 +1245,10 @@ public final class QuotaCommands {
         boolean enable = stateArg.equals("on");
         eng.setRedirectOnExhaust(enable);
         ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
-                enable ? "§a已开启耗尽重定向（额度耗尽的玩家将被传送到可进维度，全部不可进才封禁）"
-                       : "§a已关闭耗尽重定向（额度耗尽的玩家将被封禁）",
-                enable ? "§aEnabled the exhaustion redirect (exhausted players are teleported to an enterable dimension; banned only when none is enterable)"
-                       : "§aDisabled the exhaustion redirect (exhausted players are banned)")), true);
+                enable ? "§a已开启耗尽传送其它维度（额度耗尽的玩家将被传送到可进维度，全部不可进才封禁）"
+                       : "§a已关闭耗尽传送其它维度（额度耗尽的玩家将被封禁）",
+                enable ? "§aEnabled teleport-on-exhaust (exhausted players are teleported to an enterable dimension; banned only when none is enterable)"
+                       : "§aDisabled teleport-on-exhaust (exhausted players are banned)")), true);
         return 1;
     }
 
