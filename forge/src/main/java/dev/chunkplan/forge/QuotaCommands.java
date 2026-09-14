@@ -50,33 +50,52 @@ public final class QuotaCommands {
     /** 待确认动作（命令在服务端主线程串行执行，静态字段即可；单槽，新动作覆盖旧动作） */
     private static volatile PendingAction pending;
 
-    /** 待确认动作类型：reset / 关闭窗口（tier 0 = 全部）/ 调低额度 */
+    /** 待确认动作（命令在服务端主线程串行执行，静态字段即可；单槽，新动作覆盖旧动作）。
+     *  owner（坑 #58）：发起者 UUID，控制台/rcon 为 null（不校验）——防管理员 B 在 60 秒内
+     *  点掉管理员 A 发起的待确认动作。 */
     private sealed interface PendingAction {
         long expireMillis();
 
+        /** 发起者 UUID；null = 控制台/rcon（不校验，rcon 冒烟依赖此路径） */
+        UUID owner();
+
         /** reset：目标玩家 UUID + 档位集合（null = 全部档位） */
-        record Reset(List<UUID> targets, Set<Integer> tiers, long expireMillis) implements PendingAction {
+        record Reset(List<UUID> targets, Set<Integer> tiers, long expireMillis, UUID owner) implements PendingAction {
         }
 
         /** 关闭窗口（tier=0 表示全部窗口；关闭会清空该窗口所有玩家记录） */
-        record DisableWindow(int tier, long expireMillis) implements PendingAction {
+        record DisableWindow(int tier, long expireMillis, UUID owner) implements PendingAction {
         }
 
         /** 调低额度：档位 + 新值原文（可能引发在线玩家无警告踢出） */
-        record LowerLimit(int tier, String rawValue, long expireMillis) implements PendingAction {
+        record LowerLimit(int tier, String rawValue, long expireMillis, UUID owner) implements PendingAction {
         }
 
-        /** 应用预设到全体：写入全局配置（可能关档清记录/调低上限踢人，issue #1） */
-        record ApplyPreset(String name, long expireMillis) implements PendingAction {
+        /**
+         * 应用预设到全体：仅写全局配置（12 值），<b>不改动玩家消费记录</b>。
+         * 被关闭的档位记录保留，重新开启后若周期未过则继承原有消费——固定周期账本（坑 #40，
+         * 数据 v3/v4）与档位开关完全解耦：周期存在 tiers[档位]（独立模式 dimTiers[维度][档位]），
+         * 读路径按当前配置窗口长现算、过期即从 0 起，故本动作无需清档或任何补偿机制；
+         * 显式"关掉并从 0 重来"是另一条路径：config window &lt;tier|all&gt; off
+         * （{@link DisableWindow}）与维度版（{@link DisableDimWindow}），坑 #58。
+         */
+        record ApplyPreset(String name, long expireMillis, UUID owner) implements PendingAction {
         }
 
         /** 关闭维度窗口（issue #3，tier=0 表示该维度全部窗口；清空该维度该窗口所有玩家记录） */
-        record DisableDimWindow(String dim, int tier, long expireMillis) implements PendingAction {
+        record DisableDimWindow(String dim, int tier, long expireMillis, UUID owner) implements PendingAction {
         }
 
         /** 调低维度额度上限（issue #3）：维度 + 档位 + 新值原文（可能引发在线玩家无警告踢出） */
-        record LowerDimLimit(String dim, int tier, String rawValue, long expireMillis) implements PendingAction {
+        record LowerDimLimit(String dim, int tier, String rawValue, long expireMillis, UUID owner)
+                implements PendingAction {
         }
+    }
+
+    /** 待确认动作发起者：控制台/rcon 无玩家（返回 null 即不校验，保证 rcon 可自测，坑 #58） */
+    private static UUID ownerOf(CommandContext<CommandSourceStack> ctx) {
+        ServerPlayer p = ctx.getSource().getPlayer();
+        return p == null ? null : p.getUUID();
     }
 
     private QuotaCommands() {
@@ -193,7 +212,8 @@ public final class QuotaCommands {
                                 .executes(ctx -> presetList(ctx)))
                         .then(Commands.literal("save")
                                 .requires(s -> s.hasPermission(2))
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("args", StringArgumentType.greedyString())
+                                        .suggests(QuotaCommands::suggestPresetSave)
                                         .executes(ctx -> presetSave(ctx))))
                         .then(Commands.literal("delete")
                                 .requires(s -> s.hasPermission(2))
@@ -337,7 +357,7 @@ public final class QuotaCommands {
         for (GameProfile gp : targets) {
             uuids.add(gp.getId());
         }
-        pending = new PendingAction.Reset(uuids, tiers, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS);
+        pending = new PendingAction.Reset(uuids, tiers, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx));
         boolean zh = isZh(ctx);
         String zhScope;
         String enScope;
@@ -378,6 +398,19 @@ public final class QuotaCommands {
         if (req == null) {
             ctx.getSource().sendFailure(Component.literal(t(ctx, "当前没有待确认的操作", "No pending action to confirm.")));
             return 0;
+        }
+        // 发起者校验（坑 #58）：待确认动作单槽全局共享，不校验则管理员 B 可在 60 秒内点掉
+        // 管理员 A 的动作。校验刻意置于 pending = null <b>之前</b>——校验失败保留原动作，
+        // 不毁掉别人的待确认项；代价是"已过期且非本人"时报身份错误而非过期错误（该动作不被
+        // 消费，可重新发起），可接受。owner 为 null（控制台/rcon 发起）不校验，否则 rcon 无法自测。
+        if (req.owner() != null) {
+            ServerPlayer confirmer = ctx.getSource().getPlayer();
+            if (confirmer == null || !confirmer.getUUID().equals(req.owner())) {
+                ctx.getSource().sendFailure(Component.literal(t(ctx,
+                        "§c该待确认操作不属于你（可能已被其他管理员的动作取代）",
+                        "§cThis pending action belongs to another admin (or was replaced)")));
+                return 0;
+            }
         }
         pending = null; // 先消费再执行（单发，避免重复确认）
         if (req.expireMillis() < System.currentTimeMillis()) {
@@ -543,11 +576,11 @@ public final class QuotaCommands {
                 return 0;
             }
             try {
-                // 应用前已启用的档位：写入后 enabled→disabled 的档位须清空该档所有玩家记录
-                Set<Integer> wasEnabled = new HashSet<>();
-                for (QuotaConfig.Line line : eng.getConfig().lines()) {
-                    wasEnabled.add(line.tier());
-                }
+                // 仅写 12 值到全局配置（坑 #58）：不再对被关闭的档位 clearTierSpendForAll——
+                // 固定周期账本与档位开关解耦（周期存 tiers[档位]/dimTiers[维度][档位]，读路径按
+                // 当前窗口长现算、过期自然从 0 起），关档保留记录后重新开启，周期未过即继承原有
+                // 消费（用户要的"试做预设不改现状"）。"关掉并从 0 重来"是显式动作：
+                // config window <tier|all> off（PendingAction.DisableWindow）及其维度版
                 for (int tier = 1; tier <= 4; tier++) {
                     QuotaTiers.Tier t = p.tiers().get(tier - 1);
                     ForgeConfig.writeTierEnabled(resolveConfigFile(ctx), tier, t.enabled());
@@ -555,12 +588,6 @@ public final class QuotaCommands {
                     ForgeConfig.writeTierLimit(resolveConfigFile(ctx), tier, t.limit());
                 }
                 List<String> warnings = loadAndApplyConfig(ctx);
-                // 关档清记录：与 config window off 语义一致（坑 #30，重开从 0 起）
-                for (int tier = 1; tier <= 4; tier++) {
-                    if (wasEnabled.contains(tier) && !p.tiers().get(tier - 1).enabled()) {
-                        eng.clearTierSpendForAll(tier);
-                    }
-                }
                 // 零线（坑 #31）：立即解除 ChunkPlan 来源临时封禁
                 if (eng.getConfig().lines().isEmpty()) {
                     ChunkPlanForge.GameEvents.scanBans(ctx.getSource().getServer());
@@ -653,7 +680,7 @@ public final class QuotaCommands {
             }
         }
         // 关闭：清空该窗口所有玩家记录 -> confirm
-        pending = new PendingAction.DisableWindow(tier, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS);
+        pending = new PendingAction.DisableWindow(tier, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx));
         String tierName = all ? (zh ? "全部窗口" : "all windows") : "tier" + tier;
         Component msg = Component.literal(t(ctx,
                 "§a将关闭 " + tierName + "，并清空该窗口所有玩家的记录，",
@@ -854,15 +881,17 @@ public final class QuotaCommands {
         }
         if (p.value() < line.limit()) {
             // 调低：可能引发在线玩家无警告踢出 -> confirm
-            pending = new PendingAction.LowerLimit(tier, raw, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS);
+            pending = new PendingAction.LowerLimit(tier, raw, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx));
             boolean zh = isZh(ctx);
             // 坑 #32：前置提示窗口名化（与 reset 确认提示一致）
             String winZh = ChunkPlanMessages.windowName(line.windowSeconds(), true);
             String winEn = ChunkPlanMessages.windowName(line.windowSeconds(), false).toLowerCase();
             Component msg = Component.literal(t(ctx,
-                    "§a将把 " + winZh + " 额度从 §b" + line.limit() + "§a 调低至 §b" + raw + "§a，可能引发部分玩家被无警告踢出，",
+                    "§a将把 " + winZh + " 额度从 §b" + line.limit() + "§a 调低至 §b" + raw
+                            + "§a，可能引发部分玩家被无警告踢出；低于部分玩家当前用量时会当场生效，",
                     "§aThis will lower " + winEn + " limit from §b" + line.limit() + "§a to §b" + raw
-                            + "§a; some players may be kicked without warning, "))
+                            + "§a; some players may be kicked without warning. If it is below a player's current "
+                            + "usage it takes effect immediately, "))
                     .append(ChunkPlanMessages.confirmLink(zh));
             ctx.getSource().sendSuccess(() -> msg, true);
             return 1;
@@ -1073,7 +1102,7 @@ public final class QuotaCommands {
             return 1;
         }
         // 关闭：清空该维度该窗口所有玩家记录 -> confirm
-        pending = new PendingAction.DisableDimWindow(dim, tier, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS);
+        pending = new PendingAction.DisableDimWindow(dim, tier, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx));
         String tierName = all ? (zh ? "全部窗口" : "all windows") : "tier" + tier;
         Component msg = Component.literal(t(ctx,
                 "§a将关闭维度 " + dim + " 的 " + tierName + "，并清空该维度该窗口所有玩家的记录，",
@@ -1193,15 +1222,16 @@ public final class QuotaCommands {
         QuotaTiers.Tier current = tiers.get(tier - 1);
         if (p.value() < current.limit()) {
             // 调低：可能引发在线玩家无警告踢出 -> confirm
-            pending = new PendingAction.LowerDimLimit(dim, tier, raw, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS);
+            pending = new PendingAction.LowerDimLimit(dim, tier, raw, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx));
             boolean zh = isZh(ctx);
             String winZh = windowLabelOf(current.window(), true);
             String winEn = windowLabelOf(current.window(), false).toLowerCase();
             Component msg = Component.literal(t(ctx,
                     "§a将把维度 " + dim + " 的 " + winZh + " 额度从 §b" + current.limit() + "§a 调低至 §b" + raw
-                            + "§a，可能引发部分玩家被无警告踢出，",
+                            + "§a，可能引发部分玩家被无警告踢出；低于部分玩家当前用量时会当场生效，",
                     "§aThis will lower the " + winEn + " limit of dimension " + dim + " from §b" + current.limit()
-                            + "§a to §b" + raw + "§a; some players may be kicked without warning, "))
+                            + "§a to §b" + raw + "§a; some players may be kicked without warning. If it is below a "
+                            + "player's current usage it takes effect immediately, "))
                     .append(ChunkPlanMessages.confirmLink(zh));
             ctx.getSource().sendSuccess(() -> msg, true);
             return 1;
@@ -1375,21 +1405,45 @@ public final class QuotaCommands {
         return 1;
     }
 
-    /** /chunkplan preset save <名称>：把当前全局配置（readRawTiers 原值，含禁用档）存为预设 */
+    /**
+     * /chunkplan preset save &lt;名称&gt; [12 值]（坑 #58，issue #1）：
+     * 一个词 = 旧语义（把当前全局配置 readRawTiers 原值，含禁用档，快照为预设）；
+     * 13 个词 = 显式 12 值（enabled window limit × 4 档，如
+     * {@code p1 true 5h 500 true 24h 2000 false 7d 10000 false 30d 40000}），
+     * <b>只写预设文件、不写全局配置</b>——用户要的"做一个不立刻应用的预设"。
+     * 参数用 greedyString 同串解析（含 @ 的合法类型，坑 #30 先例）。
+     */
     private static int presetSave(CommandContext<CommandSourceStack> ctx) {
         QuotaEngine eng = ChunkPlanForge.engine;
         if (eng == null) {
             ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
             return 0;
         }
-        String name = StringArgumentType.getString(ctx, "name");
+        String[] parts = ctx.getArgument("args", String.class).trim().split("\\s+");
+        if (parts.length == 0 || parts[0].isEmpty()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, USAGE_PRESET_SAVE_ZH, USAGE_PRESET_SAVE_EN)));
+            return 0;
+        }
+        String name = parts[0];
         if (!PresetStore.NAME_PATTERN.matcher(name).matches()) {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
                     "§c预设名只能包含字母、数字、下划线、连字符（1~32 字符）",
                     "§cPreset name may only contain letters, digits, underscores and hyphens (1-32 chars)")));
             return 0;
         }
-        List<QuotaTiers.Tier> raw = ForgeConfig.readRawTiers(resolveConfigFile(ctx));
+        List<QuotaTiers.Tier> raw = parts.length == 1 ? ForgeConfig.readRawTiers(resolveConfigFile(ctx)) : null;
+        if (parts.length == 13) {
+            // 显式 12 值：字段级校验（错误信息精确到"第 N 档哪个字段非法"），只写预设文件
+            List<QuotaTiers.Tier> explicit = parseExplicitTiers(ctx, parts);
+            if (explicit == null) {
+                return 0;
+            }
+            raw = explicit;
+        } else if (parts.length != 1) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, USAGE_PRESET_SAVE_ZH, USAGE_PRESET_SAVE_EN)));
+            return 0;
+        }
+        boolean explicitValues = parts.length == 13;
         if (raw == null || raw.size() != 4) {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
                     "§c读取当前配置失败，详见服务端日志",
@@ -1403,10 +1457,89 @@ public final class QuotaCommands {
                     "§cFailed to save preset (tier validation failed; see server log)")));
             return 0;
         }
-        ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
-                "§a已保存预设 §b" + name + "§a（基于当前全局配置）" + (existed ? "，已覆盖同名预设" : ""),
-                "§aSaved preset §b" + name + "§a (from the current global config)" + (existed ? ", overwriting the existing preset" : ""))), true);
+        String tail = existed ? t(ctx, "，已覆盖同名预设", ", overwriting the existing preset") : "";
+        ctx.getSource().sendSuccess(() -> Component.literal(explicitValues
+                ? t(ctx,
+                        "§a已保存预设 §b" + name + "§a（来自指定 12 值，未改动全局配置）" + tail,
+                        "§aSaved preset §b" + name + "§a (from the given 12 values; the global config was not modified)" + tail)
+                : t(ctx,
+                        "§a已保存预设 §b" + name + "§a（基于当前全局配置）" + tail,
+                        "§aSaved preset §b" + name + "§a (from the current global config)" + tail)), true);
         return 1;
+    }
+
+    /** preset save 用法（命令参数与解析错误共用文案） */
+    private static final String USAGE_PRESET_SAVE_ZH =
+            "参数格式: /chunkplan preset save <名称> [12 值: 开关 窗口 上限 × 4 档]";
+    private static final String USAGE_PRESET_SAVE_EN =
+            "Usage: /chunkplan preset save <name> [12 values: enabled window limit x 4 tiers]";
+
+    /**
+     * 解析显式 12 值（parts[1..12] = 4 组 enabled/window/limit）；非法时 sendFailure 并返回 null。
+     * 字段级校验：开关 true/false/on/off（大小写不敏感），另接受带档位前缀的 t1on/t2off 等写法
+     * （两种拼写等价，便于按档填写时自解释）；窗口须为该档预置（与 toLines 口径一致，也复用
+     * DurationParser 解析）；额度走 NumericParser.parseLimit。
+     */
+    private static List<QuotaTiers.Tier> parseExplicitTiers(CommandContext<CommandSourceStack> ctx, String[] parts) {
+        List<QuotaTiers.Tier> tiers = new ArrayList<>(4);
+        for (int tier = 1; tier <= 4; tier++) {
+            String rawEnabled = parts[(tier - 1) * 3 + 1];
+            String window = parts[(tier - 1) * 3 + 2];
+            String rawLimit = parts[(tier - 1) * 3 + 3];
+            String bare = rawEnabled.toLowerCase();
+            String prefixed = "t" + tier;
+            boolean enabled;
+            if (bare.equals("true") || bare.equals("on") || bare.equals(prefixed + "on")) {
+                enabled = true;
+            } else if (bare.equals("false") || bare.equals("off") || bare.equals(prefixed + "off")) {
+                enabled = false;
+            } else {
+                ctx.getSource().sendFailure(Component.literal(t(ctx,
+                        "§c第 " + tier + " 档开关非法：可选 true / false / on / off（当前值 " + rawEnabled + "）",
+                        "§cInvalid enable flag for tier " + tier + ": use true / false / on / off (got " + rawEnabled + ")")));
+                return null;
+            }
+            List<String> presets = presetsOf(tier);
+            long secs;
+            try {
+                secs = DurationParser.parseSeconds(window);
+            } catch (IllegalArgumentException e) {
+                secs = -1;
+            }
+            if (secs <= 0 || !presets.contains(window)) {
+                ctx.getSource().sendFailure(Component.literal(t(ctx,
+                        "§c第 " + tier + " 档窗口非法：可选 " + String.join(" / ", presets),
+                        "§cInvalid window for tier " + tier + ": choose from " + String.join(" / ", presets))));
+                return null;
+            }
+            NumericParser.Parsed p = NumericParser.parseLimit(rawLimit);
+            if (!p.isOk()) {
+                ctx.getSource().sendFailure(Component.literal(t(ctx,
+                        "§c第 " + tier + " 档额度非法：需为 1.00~999999999.99 的数字，最多 2 位小数",
+                        "§cInvalid limit for tier " + tier + ": a number between 1.00 and 999999999.99 with at most 2 decimals")));
+                return null;
+            }
+            tiers.add(new QuotaTiers.Tier(enabled, window, p.value()));
+        }
+        return tiers;
+    }
+
+    /**
+     * preset save 参数补全（坑 #58）：<b>只在第 1 词给建议</b>（已有预设名，便于同名覆盖），
+     * 出现空格后返回空建议——第 2 词起是 12 值（开关/窗口/额度），逐词建议既无意义，
+     * 又会把"第 2 词=预设名"的旧输入习惯引导成套娃（坑 #35 教训）。
+     */
+    private static CompletableFuture<Suggestions> suggestPresetSave(CommandContext<CommandSourceStack> ctx,
+                                                                    SuggestionsBuilder builder) {
+        String remaining = builder.getRemaining();
+        if (remaining.isEmpty() || remaining.indexOf(' ') >= 0 || remaining.indexOf('\t') >= 0) {
+            return builder.buildFuture();
+        }
+        QuotaEngine eng = ChunkPlanForge.engine;
+        if (eng == null) {
+            return builder.buildFuture();
+        }
+        return suggestFromList(builder, eng.getPresetStore().all().stream().map(PresetStore.Preset::name).toList());
     }
 
     /** /chunkplan preset delete <名称>：删除预设并解除相关分配（default 即全局配置，不可删） */
@@ -1467,10 +1600,15 @@ public final class QuotaCommands {
             return 0;
         }
         boolean zh = isZh(ctx);
-        pending = new PendingAction.ApplyPreset(name, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS);
+        pending = new PendingAction.ApplyPreset(name, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx));
         Component msg = Component.literal(t(ctx,
-                "§a将把预设 §b" + name + "§a（" + tiersSummary(p.tiers(), zh) + "）写入全局配置，对全体玩家生效，",
-                "§aThis will write preset §b" + name + "§a (" + tiersSummary(p.tiers(), zh) + ") to the global config, effective for all players, "))
+                "§a将把预设 §b" + name + "§a（" + tiersSummary(p.tiers(), zh) + "）写入全局配置，对全体玩家生效；"
+                        + "被关闭的档位不会清空玩家已消费记录，重新开启后若仍在窗口内将继承原有消费；"
+                        + "调整后可能在下一 tick 使超限玩家被当场踢出/传送，",
+                "§aThis will write preset §b" + name + "§a (" + tiersSummary(p.tiers(), zh) + ") to the global config, "
+                        + "effective for all players; disabling a tier does NOT clear players' spent records, and "
+                        + "re-enabling it inherits the spend while the cycle is still inside its window; players over "
+                        + "the limit may be kicked/teleported on the next tick, "))
                 .append(ChunkPlanMessages.confirmLink(zh));
         ctx.getSource().sendSuccess(() -> msg, true);
         return 1;
