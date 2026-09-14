@@ -438,13 +438,15 @@ public final class ChunkPlanGuiScreen extends Screen {
     }
 
     /**
-     * 预设区脏状态门禁：有未保存的档位意图时，预设四个动作（应用/删除/保存/分配）置灰。
+     * 预设区脏状态门禁：有未保存的档位意图时，预设的应用/删除/分配三个动作置灰。
      * 理由：这些动作会与「尚未落盘的档位意图」产生歧义（把两种意图组合成用户没想过的结果）；
      * 用灰显 + 悬停说明（renderControlHoverHint）而不是弹窗拦截——不打断手头操作，也照样可查原因。
+     * 「保存为预设」刻意**不参与门禁**：它以界面当前值为准（见 savePreset），未保存的意图正是要存进
+     * 预设的内容——置灰它会把「先草拟档位、存成另一个预设」这条正常路径堵死。
      */
     private void refreshPresetGate() {
         boolean blocked = tiersDirty();
-        for (Button b : new Button[]{presetApplyBtn, presetDeleteBtn, presetSaveBtn, presetAssignBtn}) {
+        for (Button b : new Button[]{presetApplyBtn, presetDeleteBtn, presetAssignBtn}) {
             if (b != null) {
                 b.active = !blocked;
             }
@@ -2549,9 +2551,9 @@ public final class ChunkPlanGuiScreen extends Screen {
     private void renderControlHoverHint(GuiGraphics g, int mouseX, int mouseY) {
         Component hint = null;
         if (page == 1 && tiersDirty()) {
-            // 预设四动作置灰原因（setTooltip 在灰显按钮上不触发，故手绘）
+            // 预设三动作置灰原因（setTooltip 在灰显按钮上不触发，故手绘）；「保存为预设」不受门禁
             if (hoverButton(presetApplyBtn, mouseX, mouseY) || hoverButton(presetDeleteBtn, mouseX, mouseY)
-                    || hoverButton(presetSaveBtn, mouseX, mouseY) || hoverButton(presetAssignBtn, mouseX, mouseY)) {
+                    || hoverButton(presetAssignBtn, mouseX, mouseY)) {
                 hint = Component.translatable("gui.chunkplan.preset_gate_reason");
             }
         } else if (page == 2 && status != null && status.dimConfig() != null) {

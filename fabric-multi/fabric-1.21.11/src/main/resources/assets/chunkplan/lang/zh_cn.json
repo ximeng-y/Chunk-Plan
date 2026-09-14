@@ -87,7 +87,7 @@
   "gui.chunkplan.preset_discard": "放弃未保存更改",
   "gui.chunkplan.preset_from_ui": "当前为界面值（未保存的更改会一并存入预设）",
   "gui.chunkplan.preset_gate_hint": "有未保存的档位更改，请先保存或放弃",
-  "gui.chunkplan.preset_gate_reason": "有未保存的档位更改：预设的应用/删除/保存/分配已暂时禁用，请先点「设置」保存或「放弃未保存更改」",
+  "gui.chunkplan.preset_gate_reason": "有未保存的档位更改：预设的应用/删除/分配已暂时禁用，请先点「设置」保存或「放弃未保存更改」",
   "gui.chunkplan.preset_global_values": "全局配置值：%s",
   "gui.chunkplan.preset_save": "保存",
   "gui.chunkplan.preset_save_label": "保存为预设",

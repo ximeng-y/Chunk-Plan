@@ -87,7 +87,7 @@
   "gui.chunkplan.preset_discard": "Discard unsaved",
   "gui.chunkplan.preset_from_ui": "Uses the values shown here (unsaved edits are stored too)",
   "gui.chunkplan.preset_gate_hint": "Unsaved tier changes; save or discard them first",
-  "gui.chunkplan.preset_gate_reason": "Unsaved tier changes: preset apply/delete/save/assign are disabled; use \"Set\" to save or \"Discard unsaved\"",
+  "gui.chunkplan.preset_gate_reason": "Unsaved tier changes: preset apply/delete/assign are disabled; use \"Set\" to save or \"Discard unsaved\"",
   "gui.chunkplan.preset_global_values": "Global config: %s",
   "gui.chunkplan.preset_save": "Save",
   "gui.chunkplan.preset_save_label": "Save as preset",
