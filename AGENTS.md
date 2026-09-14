@@ -310,6 +310,13 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **行为面不变**：`selectedPreset` 语义、`currentPresetOrNull()` 回落逻辑、应用到全体/删除/按玩家分配三处调用点、`presetIndexOf`（坑 #54 的 NPE 防御）全部原样；浮层展开/关闭走坑 #51 的 z=350 浮层语义（下方保存/分配行照常渲染，被黑底盖住）
     - **验证**：六端镜像（改动行无版本差异，`port_gui.py` 无需新规则）+ `mirror_check.py` 严格自检 **MIRROR OK**；12 份 lang JSON 解析通过且 CRLF 保持。**按用户要求本次未构建**（编译与实机渲染待复测）、common 测试无涉未跑。版本仍 0.3.0。
 
+56. **「按玩家应用」行重构：输入框占位提示 + 行内预设下拉 + 去「恢复默认」（坑 #56，2026-09-14，用户实机截图要求，直接 main 提交）**：用户反馈该行「逻辑有点乱」——原为 `[目标输入框][分配][恢复默认]`，而预设取自行 1 的选中项（界面上看不出这种隐含耦合）。重构为 **`[玩家名输入框][该行自有的预设下拉][分配]`**，并删掉「恢复默认」按钮：
+    - **行内预设下拉**：`assignSelectRect`（`left+176, 76×20`，与行 1 同款手绘条）+ `assignPreset` 状态（**行 3 自有，与行 1 选择互不影响**；未选过或选中项已删除时 `assignPresetOrNull()` **回落行 1 当前选中** → 不动这个下拉时旧行为完全成立）+ 真下拉复用既有机制，新增 **`dimDropdownPage = 7`**（编号接 6 后）。「分配」按钮移到 `left+258, 52×20`，右边缘与行 1「删除」对齐（310）
+    - **输入框占位提示**：空框时 `renderAdmin` 手绘灰字 `gui.chunkplan.preset_target_hint`（zh 输入玩家名 / en Enter player name，**新增 key ×12 份 lang**，按字母序插在 `preset_save_label` 与 `preset_title` 之间）。**刻意不用 `EditBox.setHint`**：其可用性未跨六端 javap 核实，手绘只依赖 `drawString` + `translatable`（六端均已移植）→ 零新增版本差异行；视觉与原生 hint 一致（同画在 `x+4, y+6`，即 EditBox 文本内边距）
+    - **`presetIndexOf` 改 2 参**（`presetIndexOf(List<String> names, String name)`）：行 1 与行 3 共用同一处「null 即 -1」的 NPE 防御（坑 #54），避免出现第二份裸 `indexOf`
+    - 删除 `clearPresetAssign()`（GUI 入口取消；命令 `/chunkplan preset player <目标> default` 仍在，服务端四端不动）；lang 键 `gui.chunkplan.preset_clear` 成为**孤儿键，保留未删**（仅记录）
+    - **验证从简**（用户要求"不需要过多验证"）：六端镜像 `port_gui.py` 重生成 + `mirror_check.py` **MIRROR OK**；12 份 lang JSON 解析通过、键序与 CRLF 保持；另用 `javac` 单独验证"字段 `assignPreset` 与同名方法 `assignPreset()` 共存合法"（JLS 字段/方法分属不同命名空间）。**未构建**（编译与实机渲染待复测），common 测试无涉未跑。版本仍 0.3.0。
+
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
 - 各端配置结构保持一致（TOML 与 JSON 字段一一对应；forge 与 neoforge 的 TOML 键完全相同）

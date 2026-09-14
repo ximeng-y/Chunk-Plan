@@ -63,6 +63,7 @@
   "gui.chunkplan.preset_delete": "Delete",
   "gui.chunkplan.preset_save": "Save",
   "gui.chunkplan.preset_save_label": "Save as preset",
+  "gui.chunkplan.preset_target_hint": "Enter player name",
   "gui.chunkplan.preset_title": "Select preset",
   "gui.chunkplan.refresh": "Refresh",
   "gui.chunkplan.reset": "Reset",

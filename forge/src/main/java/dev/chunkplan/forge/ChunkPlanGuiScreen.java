@@ -78,6 +78,8 @@ public final class ChunkPlanGuiScreen extends Screen {
     // 预设区控件（issue #1、#2）
     /** 预设选择条命中区（手绘下拉条 + 真下拉；原为循环切换的 Button，用户要求改成下拉框观感） */
     private final int[] presetSelectRect = new int[4];
+    /** 「按玩家应用」行的预设选择条命中区（行 3 自有的下拉，与行 1 各自独立） */
+    private final int[] assignSelectRect = new int[4];
     private EditBox presetNameEdit;
     private EditBox presetTarget;
 
@@ -97,8 +99,10 @@ public final class ChunkPlanGuiScreen extends Screen {
     private EditBox suggestOwner;
 
     // 预设区状态（issue #1、#2）
-    /** 当前选中预设名（跨重建保留；null/不在列表时显示首个） */
+    /** 行 1 当前选中预设名（跨重建保留；null/不在列表时显示首个） */
     private String selectedPreset;
+    /** 「按玩家应用」行选中的预设名（null/已失效时回落行 1 的当前选中） */
+    private String assignPreset;
     // 用户输入保留（跨状态刷新重建不丢字）；命令生效后回显服务端确认值
     private final String[] savedLimit = new String[4];
     private String savedMult;
@@ -137,7 +141,7 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     // 维度真下拉（用量页查看维度 + 维度页编辑器选维度 + 重定向槽位 + 档位窗口，共用一套展开状态）
     // dimDropdownPage：0 = 用量页维度 1 = 管理页补全（未用） 2 = 维度页编辑器 3 = 重定向槽 5 = 档位窗口
-    //                  6 = 管理页预设选择
+    //                  6 = 管理页预设选择 7 = 管理页分配预设选择
     //（4 曾是档位开关下拉，坑 #51 起开关改回点击切换，编号废弃不复用）
     private boolean dimDropdownOpen;
     private int dimDropdownPage;
@@ -362,15 +366,16 @@ public final class ChunkPlanGuiScreen extends Screen {
         addButton(left + 176, gy, 52, 20, Component.translatable("gui.chunkplan.preset_save"),
                 b -> savePreset());
         gy += 28;
-        // 行 3：按玩家应用/恢复默认（目标默认在线玩家补全；预设名取行 1 当前选中）
+        // 行 3：按玩家应用（目标默认在线玩家补全）＝ 玩家名输入框 + 行内预设下拉 + 分配
+        // 空框灰字提示「输入玩家名」由 renderAdmin 手绘（不用 EditBox.setHint：跨六端 API 未核实）
         presetTarget = new EditBox(font, left + 96, gy, 74, 20, Component.empty());
         presetTarget.setValue(savedPresetTarget != null ? savedPresetTarget : "");
         presetTarget.setResponder(v -> savedPresetTarget = v);
         addRenderableWidget(presetTarget);
-        addButton(left + 176, gy, 52, 20, Component.translatable("gui.chunkplan.preset_assign"),
+        // 「分配用预设」下拉条：行 3 自有状态，与行 1 的选择互不影响
+        setRect(assignSelectRect, left + 176, gy, 76, 20);
+        addButton(left + 258, gy, 52, 20, Component.translatable("gui.chunkplan.preset_assign"),
                 b -> assignPreset());
-        addButton(left + 234, gy, 56, 20, Component.translatable("gui.chunkplan.preset_clear"),
-                b -> clearPresetAssign());
     }
 
     private Button addButton(int x, int y, int w, int h, Component msg, Button.OnPress onPress) {
@@ -611,16 +616,26 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (names.isEmpty()) {
             return null;
         }
-        int idx = presetIndexOf(names);
+        int idx = presetIndexOf(names, selectedPreset);
         return names.get(idx >= 0 ? idx : 0);
     }
 
-    /** 预设名在列表中的下标；从未选中过任何预设（selectedPreset 为 null）时返回 -1。
-     *  不可直接写 names.indexOf(selectedPreset)：status.presets() 是 List.copyOf 产出的不可变列表，
+    /** 「按玩家应用」行选中的预设（未选过/选中项已失效时回落行 1 的当前选中；列表空返回 null） */
+    private String assignPresetOrNull() {
+        List<String> names = presetNames();
+        if (names.isEmpty()) {
+            return null;
+        }
+        int idx = presetIndexOf(names, assignPreset);
+        return idx >= 0 ? names.get(idx) : currentPresetOrNull();
+    }
+
+    /** 预设名在列表中的下标；name 为 null（从未选中过任何预设）时返回 -1。
+     *  不可直接写 names.indexOf(name)：status.presets() 是 List.copyOf 产出的不可变列表，
      *  其 indexOf(null) 会抛 NPE（JDK ImmutableCollections 拒绝 null 实参，普通 ArrayList 才返回 -1），
      *  有预设后会在 buildAdmin 里炸掉整个预设区控件（坑 #54） */
-    private int presetIndexOf(List<String> names) {
-        return selectedPreset == null ? -1 : names.indexOf(selectedPreset);
+    private int presetIndexOf(List<String> names, String name) {
+        return name == null ? -1 : names.indexOf(name);
     }
 
     private String selectedPresetName() {
@@ -628,12 +643,25 @@ public final class ChunkPlanGuiScreen extends Screen {
         return cur == null ? "—" : cur;
     }
 
-    /** 选择预设：展开真下拉，候选即预设名列表（列表空时条为灰、点不动） */
+    private String assignPresetLabel() {
+        String cur = assignPresetOrNull();
+        return cur == null ? "—" : cur;
+    }
+
+    /** 行 1 选择预设：展开真下拉，候选即预设名列表（列表空时条为灰、点不动） */
     private void openPresetDropdown() {
         if (presetNames().isEmpty()) {
             return;
         }
         openDimDropdown(6, presetSelectRect);
+    }
+
+    /** 行 3 分配用的预设：同一候选列表，选择结果只影响「分配」 */
+    private void openAssignDropdown() {
+        if (presetNames().isEmpty()) {
+            return;
+        }
+        openDimDropdown(7, assignSelectRect);
     }
 
     /** 应用当前选中预设到全体（写全局配置）：服务端 apply 需 confirm，走批量派发 + 补 confirm */
@@ -669,20 +697,12 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     private void assignPreset() {
         String target = presetTarget.getValue().trim();
-        String name = currentPresetOrNull();
+        String name = assignPresetOrNull();
         if (target.isEmpty() || name == null) {
             return;
         }
         sendCommand("chunkplan preset player " + target + " " + name);
         // 保留目标输入：便于对多名玩家连续分配
-    }
-
-    private void clearPresetAssign() {
-        String target = presetTarget.getValue().trim();
-        if (target.isEmpty()) {
-            return;
-        }
-        sendCommand("chunkplan preset player " + target + " default");
     }
 
     // ---------- 维度页（issue #3） ----------
@@ -1391,6 +1411,7 @@ public final class ChunkPlanGuiScreen extends Screen {
             case 5:
                 return toggleTierRow < 0 ? List.of() : presets(toggleTierRow + 1);
             case 6:
+            case 7:
                 return presetNames();
             default:
                 return dimensionKeys();
@@ -1500,6 +1521,7 @@ public final class ChunkPlanGuiScreen extends Screen {
                 rebuild();
             }
             case 6 -> selectedPreset = value; // 条为手绘控件，无需重建即显新值
+            case 7 -> assignPreset = value;
             default -> rebuild();
         }
     }
@@ -1859,6 +1881,13 @@ public final class ChunkPlanGuiScreen extends Screen {
         // 预设选择条（手绘下拉条：与其余下拉同观感；列表为空时灰显且点不动）
         drawSelectBar(g, presetSelectRect[0], presetSelectRect[1], presetSelectRect[2], presetSelectRect[3],
                 Component.literal(selectedPresetName()), presetNames().isEmpty());
+        // 「按玩家应用」行：空框灰字提示 + 该行自有的预设选择条（分配用）
+        if (presetTarget != null && presetTarget.getValue().isEmpty()) {
+            g.drawString(font, Component.translatable("gui.chunkplan.preset_target_hint"),
+                    presetTarget.getX() + 4, presetTarget.getY() + 6, COL_GRAY);
+        }
+        drawSelectBar(g, assignSelectRect[0], assignSelectRect[1], assignSelectRect[2], assignSelectRect[3],
+                Component.literal(assignPresetLabel()), presetNames().isEmpty());
         g.drawString(font, Component.translatable("gui.chunkplan.reset_hint"), x + 296, gy + 124, COL_GRAY);
     }
 
@@ -1996,9 +2025,13 @@ public final class ChunkPlanGuiScreen extends Screen {
                 }
             }
         }
-        // 管理页：预设选择条（手绘下拉条，展开真下拉）
+        // 管理页：预设选择条 /「按玩家应用」预设选择条（手绘下拉条，展开真下拉）
         if (page == 1 && isAdmin() && inRect(mouseX, mouseY, presetSelectRect)) {
             openPresetDropdown();
+            return true;
+        }
+        if (page == 1 && isAdmin() && inRect(mouseX, mouseY, assignSelectRect)) {
+            openAssignDropdown();
             return true;
         }
         if (!resetSuggestions.isEmpty()) {

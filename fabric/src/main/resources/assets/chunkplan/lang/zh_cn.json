@@ -63,6 +63,7 @@
   "gui.chunkplan.preset_delete": "删除",
   "gui.chunkplan.preset_save": "保存",
   "gui.chunkplan.preset_save_label": "保存为预设",
+  "gui.chunkplan.preset_target_hint": "输入玩家名",
   "gui.chunkplan.preset_title": "选择预设",
   "gui.chunkplan.refresh": "刷新",
   "gui.chunkplan.reset": "重置",
