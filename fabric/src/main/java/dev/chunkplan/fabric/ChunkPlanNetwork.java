@@ -214,6 +214,7 @@ public final class ChunkPlanNetwork {
                 qs.lines(), qs.allExceeded(), qs.recoveryMillis(), worst,
                 presetNames, eng.getPlayerPresetName(uuid),
                 independent ? 1 : 0, currentDim, liveDims, dimLines, dimConfig,
+                null, List.of(),
                 ChunkPlanFabric.MOD_VERSION, false);
     }
 }

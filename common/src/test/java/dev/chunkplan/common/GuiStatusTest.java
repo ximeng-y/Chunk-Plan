@@ -30,6 +30,7 @@ class GuiStatusTest {
                 false, -1, 50,
                 List.of("pvp", "relax"), "pvp",
                 dimensionMode, currentDim, dims, dimLines, dimConfig,
+                null, List.of(),
                 "0.3.0", false);
     }
 
@@ -68,6 +69,7 @@ class GuiStatusTest {
                 List.of(), true, 999L, -1,
                 List.of(), null,
                 0, null, List.of(), List.of(), null,
+                null, List.of(),
                 "0.3.0", false);
         GuiStatus d = GuiStatus.decode(withNull.encode());
         assertNotNull(d);
@@ -79,6 +81,7 @@ class GuiStatusTest {
                 List.of(), List.of(), false, -1, -1,
                 List.of("pvp", "relax"), "pvp",
                 0, null, List.of(), List.of(), null,
+                null, List.of(),
                 "0.3.0", false);
         GuiStatus d2 = GuiStatus.decode(withNames.encode());
         assertNotNull(d2);
@@ -122,6 +125,7 @@ class GuiStatusTest {
                 true, false, false, true,
                 List.of(), List.of(), false, -1, -1, List.of(), null,
                 1, "minecraft:overworld", List.of("minecraft:overworld"), List.of(), cfg,
+                null, List.of(),
                 "0.3.0", false);
         GuiStatus d = GuiStatus.decode(admin.encode());
         assertNotNull(d);
@@ -141,6 +145,7 @@ class GuiStatusTest {
                 true, false, false, false,
                 List.of(), List.of(), false, -1, -1, List.of(), null,
                 1, "minecraft:overworld", List.of("minecraft:overworld"), List.of(), cfg,
+                null, List.of(),
                 "0.3.0", false);
         GuiStatus d2 = GuiStatus.decode(plain.encode());
         assertNotNull(d2);
@@ -237,6 +242,7 @@ class GuiStatusTest {
                 List.of(), true, 999L, -1,
                 List.of(), null,
                 0, null, List.of(), List.of(), null,
+                null, List.of(),
                 "0.3.0", false);
         GuiStatus d = GuiStatus.decode(s.encode());
         assertNotNull(d);
@@ -254,6 +260,90 @@ class GuiStatusTest {
     @Test
     void decodeRejectsNegativeLineCount() {
         assertNull(GuiStatus.decode(craftHeader(0, -1)));
+    }
+
+    @Test
+    void v5FeedbackAndPresetInfosRoundTrip() {
+        // v5：命令反馈（present + success + 文本）与预设内容（名 + 恒 4 档含禁用档）
+        GuiStatus s = new GuiStatus(1.0, 0.05, 0.5, 2.0,
+                true, false, true, true,
+                List.of(), List.of(), false, -1, -1,
+                List.of("pvp"), null,
+                0, "minecraft:overworld", List.of("minecraft:overworld"), List.of(), null,
+                new GuiStatus.GuiFeedback("已保存预设 pvp", true),
+                List.of(new GuiStatus.PresetInfo("pvp", List.of(
+                        new QuotaTiers.Tier(true, "5h", 500.0),
+                        new QuotaTiers.Tier(true, "24h", 2000.0),
+                        new QuotaTiers.Tier(false, "7d", 10000.0),
+                        new QuotaTiers.Tier(false, "30d", 40000.0)))),
+                "0.3.0", false);
+        GuiStatus d = GuiStatus.decode(s.encode());
+        assertNotNull(d);
+        assertNotNull(d.feedback());
+        assertEquals("已保存预设 pvp", d.feedback().text());
+        assertTrue(d.feedback().success());
+        assertEquals(1, d.presetInfos().size());
+        assertEquals("pvp", d.presetInfos().get(0).name());
+        assertEquals(4, d.presetInfos().get(0).tiers().size());
+        assertFalse(d.presetInfos().get(0).tiers().get(2).enabled());
+        assertEquals(10000.0, d.presetInfos().get(0).tiers().get(2).limit(), 1e-9);
+    }
+
+    @Test
+    void v5AbsentFeedbackDecodesNullAndFailureTextKept() {
+        // present=false → feedback 为 null；失败反馈文本照常透传
+        GuiStatus none = GuiStatus.decode(sample().encode());
+        assertNotNull(none);
+        assertNull(none.feedback());
+        assertTrue(none.presetInfos().isEmpty());
+
+        GuiStatus fail = new GuiStatus(1.0, 0.05, 0.5, 2.0,
+                true, false, true, false,
+                List.of(), List.of(), false, -1, -1, List.of(), null,
+                0, null, List.of(), List.of(), null,
+                new GuiStatus.GuiFeedback("§c写入配置失败，详见服务端日志", false),
+                List.of(), "0.3.0", false);
+        GuiStatus df = GuiStatus.decode(fail.encode());
+        assertNotNull(df);
+        assertNotNull(df.feedback());
+        assertFalse(df.feedback().success());
+        assertEquals("§c写入配置失败，详见服务端日志", df.feedback().text());
+    }
+
+    @Test
+    void decodeRejectsInvalidPresetInfoCount() {
+        // 防御损坏数据：预设内容条数越界直接拒绝
+        GuiStatus s = sample();
+        byte[] full = s.encode();
+        // 覆写 presetInfos 的计数（末尾两字段之前）不便定位，故直接用越界计数手工构造前缀
+        byte[] head = craftHeader(0, 0);
+        try {
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            java.io.DataOutputStream out = new java.io.DataOutputStream(bos);
+            out.write(head);
+            out.writeBoolean(false);     // allExceeded
+            out.writeLong(-1L);          // recoveryMillis
+            out.writeInt(-1);            // worstPercent
+            out.writeInt(0);             // presets
+            out.writeUTF("");            // playerPreset
+            out.writeInt(0);             // dimensionMode
+            out.writeUTF("");            // currentDim
+            out.writeInt(0);             // dimensions
+            out.writeInt(0);             // dimLines
+            // isAdmin=true（craftHeader 第 4 个 boolean）→ dimConfig 分支
+            out.writeBoolean(false);     // redirectOnExhaust
+            out.writeUTF("");
+            out.writeUTF("");
+            out.writeUTF("");
+            out.writeInt(0);             // dim entries
+            out.writeBoolean(false);     // feedback present
+            out.writeInt(9999);          // presetInfos 越界
+            out.flush();
+            assertNull(GuiStatus.decode(bos.toByteArray()));
+            assertNotNull(full);
+        } catch (java.io.IOException e) {
+            throw new AssertionError(e);
+        }
     }
 
     /** 构造合法头部（版本 + 服务端版本 + 4 double + 4 boolean）后写入指定的 tierCount/lineCount */
