@@ -1423,7 +1423,9 @@ public final class ChunkPlanGuiScreen extends Screen {
             resetDropdownState(); // 渲染路径内不 rebuild（会重入）；下个 tick 自然恢复
             return;
         }
-        g.nextStratum(); // 浮层置顶：新开分层（stratum）复合在既有层之上，等效 z 上层浮层
+        // 浮层置顶：整体抬到 z=350——同 z 下后画的填充盖不住先画的文字（本机无第三方 mod 亦复现），
+        // 必须靠 z 分层把浮层放到页面内容之上；原版 tooltip 占 z=400，取 350 让 tooltip 仍在最前
+        g.nextStratum(); // 浮层置顶：新开分层（stratum）复合在既有层之上
         int sx = dropSrcX;
         int sy = dropSrcY + dropSrcH + 2;
         int sW = Math.max(dropSrcW, 120);
@@ -1576,7 +1578,9 @@ public final class ChunkPlanGuiScreen extends Screen {
         // 底部多留 2px：末行文字下缘原与下边框零间距（与维度下拉同规则）
         int sH = resetSuggestions.size() * SUGGEST_ROW_H + 2;
         int sy = resetTargetY + resetTargetH + 2;
-        g.nextStratum(); // 浮层置顶：新开分层（stratum）复合在既有层之上，等效 z 上层浮层
+        // 浮层置顶：整体抬到 z=350——同 z 下后画的填充盖不住先画的文字（本机无第三方 mod 亦复现），
+        // 必须靠 z 分层把浮层放到页面内容之上；原版 tooltip 占 z=400，取 350 让 tooltip 仍在最前
+        g.nextStratum(); // 浮层置顶：新开分层（stratum）复合在既有层之上
         g.fill(sx, sy, sx + sW, sy + sH, 0xFF000000);
         g.fill(sx, sy, sx + sW, sy + 1, 0xFFFFFFFF);
         g.fill(sx, sy + sH - 1, sx + sW, sy + sH, 0xFFFFFFFF);

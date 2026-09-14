@@ -285,6 +285,16 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **tier 开关 Button 化**：管理页与维度页各 4 档开关从手绘条改回原生 Button（文案 已开启/已关闭 = `gui.chunkplan.enabled/disabled`，点击即 `setTierEnabled(tier, !effEnabled(tier))` / `setDimTierEnabled(...)` 切换待应用状态，仍须点「设置」落盘）；管理页恒可点，维度页 `active = independent && live`；`tierToggleRect`/`dimTierToggleRect` 字段、`toggleTier`/`toggleDimTier` 方法、dimDropdownPage==4 的 label/value/accept 分支全部删除（**编号 4 废弃不复用**，5=档位窗口保留）；mouseClicked 里两个开关命中分支删除（Button 自管点击）。
     - **验证**：common 176 测试不变（纯客户端 GUI 改动）；根构建 + fabric-multi 三版本 build 全绿；五端 port 重生成 + mirror_check 严格自检 MIRROR OK；六端 jar 刷新 `.XMTEMP/jars-0.3.0/`。**浮层遮挡效果必须用户实机复测**（坑 #11 盲区 + flush 依赖合批 mod 行为）。
 
+52. **浮层置顶靠 z 抬层（坑 #52，2026-09-14，用户 NeoForge 实机反馈，直接 main 提交）**：坑 #47/#49/#51 三轮都没治好"下拉浮层文字透出"——本轮先做 mod 归因，再定位到真实机制。
+    - **mod 归因结论：与 ImmediatelyFast / AcceleratedRendering 都无关**。用户怀疑 IF（通用合批）与 AR（字体加速），且实测关掉 IF 合批、AR 字体加速均无效。反编译比对（IF `BatchableBufferSource` 只在单次 `endBatch` 窗口内按图层序重排、`endBatch()` 提交全部；AR 的 `isRenderingGui` 窗口只覆盖 `AbstractContainerScreen`/HUD/物品批处理，普通 `Screen` 不在其内，AR 也不改 `endBatch` 语义）后做 **dev 客户端四臂二分**（同一存档、同一界面、同一展开状态）：IF+AR / 仅 AR / 仅 IF / 都不装（仅 chunkplan+NeoForge 共 3 mods）→ **四臂全部复现且像素级相同**，故两个 mod 都不是成因（这也正是用户开关无效的原因）。送检 jar 未改动（副本在 `.XMTEMP/modarms/`）。
+    - **真实机制（染色实验定位）**：不透明填充与其上方文字**同 z 时盖不住先画的文字**——把浮层黑底染成不透明绿色、条目文字染成品红后可见：页面白色的 `0.0 / 500.0` 字形压绿底之上与品红条目糊在一起；**零第三方 mod 亦复现**，所以不是字体合批延迟（坑 #47 归因于"字体合批 mod 环境"是错的）
+    - **修复**：浮层整体做姿态 z 位移（原版 tooltip 的 z=400 惯例）取 **350**（高于页面内容 0，低于 tooltip 400 让 tooltip 仍在最前）→ 覆盖干净、条目文字完整（dev 实机截图确认）
+      - 旧世（neoforge / fabric 1.21.1 / forge 1.20.1）：`g.pose().pushPose(); g.pose().translate(0.0F, 0.0F, 350.0F); … g.pose().popPose();`
+      - 新世（1.21.11/26.x）：分层渲染管线，保留坑 #51 引入的单行 `g.nextStratum()`（该世代无 `GuiGraphics.flush`）
+      - 坑 #51 的前后 `flush()` 在旧世**实测无效**（坏/好两臂都带 flush），现仅保留为"把浮层批次与页面内容分开提交、防合批 mod 混排"，不再是置顶手段，注释已更正为实际作用
+    - **范围**：`renderDimDropdown`（用量页维度 / 维度页编辑器 / 重定向槽位 / 档位窗口 四种真下拉共用同一方法）与 `renderResetSuggestions`（reset 补全）两处，六端镜像；`port_gui.py` 新增 `port_overlay_top`（新世代删 flush、pose 块换 `nextStratum`、删 popPose），`mirror_check.py` 严格自检 MIRROR OK
+    - **验证**：common 176 测试不变；根构建 + fabric-multi 三版本 build 全绿；**dev 客户端实机确认**（neoforge 1.21.1，用量页独立模式维度下拉）：黑底完整覆盖其下额度行、无文字透出、条目文字清晰（javap 复核产物 jar 含且仅含两处 `float 350.0f`）；六端 jar 刷新 `.XMTEMP/jars-0.3.0/`（版本仍 0.3.0）
+
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
 - 各端配置结构保持一致（TOML 与 JSON 字段一一对应；forge 与 neoforge 的 TOML 键完全相同）

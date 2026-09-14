@@ -1423,7 +1423,11 @@ public final class ChunkPlanGuiScreen extends Screen {
             resetDropdownState(); // 渲染路径内不 rebuild（会重入）；下个 tick 自然恢复
             return;
         }
-        g.flush(); // 浮层置顶（画前）：强制提交此前内容——字体合批 mod 延迟的文本批次一并落帧，黑底才盖得住
+        g.flush(); // 提交此前内容：浮层与页面内容分开成批，不被合批 mod 混排
+        // 浮层置顶：整体抬到 z=350——同 z 下后画的填充盖不住先画的文字（本机无第三方 mod 亦复现），
+        // 必须靠 z 分层把浮层放到页面内容之上；原版 tooltip 占 z=400，取 350 让 tooltip 仍在最前
+        g.pose().pushPose();
+        g.pose().translate(0.0F, 0.0F, 350.0F);
         int sx = dropSrcX;
         int sy = dropSrcY + dropSrcH + 2;
         int sW = Math.max(dropSrcW, 120);
@@ -1445,7 +1449,8 @@ public final class ChunkPlanGuiScreen extends Screen {
             g.drawString(font, Component.literal(font.plainSubstrByWidth(items.get(i), sW - 12)),
                     sx + 6, rowY + 2, COL_TEXT);
         }
-        g.flush(); // 浮层置顶（画后）：浮层文本批次立即提交，钉在本帧最上层
+        g.pose().popPose();
+        g.flush(); // 提交浮层内容
     }
 
     private void acceptDimDropdown(int idx) {
@@ -1577,7 +1582,11 @@ public final class ChunkPlanGuiScreen extends Screen {
         // 底部多留 2px：末行文字下缘原与下边框零间距（与维度下拉同规则）
         int sH = resetSuggestions.size() * SUGGEST_ROW_H + 2;
         int sy = resetTargetY + resetTargetH + 2;
-        g.flush(); // 浮层置顶（画前）：强制提交此前内容——字体合批 mod 延迟的文本批次一并落帧，黑底才盖得住
+        g.flush(); // 提交此前内容：浮层与页面内容分开成批，不被合批 mod 混排
+        // 浮层置顶：整体抬到 z=350——同 z 下后画的填充盖不住先画的文字（本机无第三方 mod 亦复现），
+        // 必须靠 z 分层把浮层放到页面内容之上；原版 tooltip 占 z=400，取 350 让 tooltip 仍在最前
+        g.pose().pushPose();
+        g.pose().translate(0.0F, 0.0F, 350.0F);
         g.fill(sx, sy, sx + sW, sy + sH, 0xFF000000);
         g.fill(sx, sy, sx + sW, sy + 1, 0xFFFFFFFF);
         g.fill(sx, sy + sH - 1, sx + sW, sy + sH, 0xFFFFFFFF);
@@ -1591,7 +1600,8 @@ public final class ChunkPlanGuiScreen extends Screen {
             }
             g.drawString(font, Component.literal(resetSuggestions.get(i)), sx + 6, rowY + 2, COL_TEXT);
         }
-        g.flush(); // 浮层置顶（画后）：浮层文本批次立即提交，钉在本帧最上层
+        g.pose().popPose();
+        g.flush(); // 提交浮层内容
     }
 
     // ---------- 状态接收 ----------
