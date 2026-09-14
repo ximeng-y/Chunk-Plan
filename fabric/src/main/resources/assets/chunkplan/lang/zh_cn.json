@@ -6,7 +6,7 @@
   "gui.chunkplan.admin_independent_hint": "维度独立计费已启用：各维度额度线请到「维度」页配置，这里的全局档位设置暂不生效",
   "gui.chunkplan.all_off": "全部关闭",
   "gui.chunkplan.all_on": "全部开启",
-  "gui.chunkplan.all_windows": "全部窗口",
+  "gui.chunkplan.all_windows": "全部计费窗口操作",
   "gui.chunkplan.close": "关闭",
   "gui.chunkplan.confirm.apply_preset": "将把预设 %s 写入全局配置，对全体玩家生效，",
   "gui.chunkplan.confirm.cancel": "取消",
