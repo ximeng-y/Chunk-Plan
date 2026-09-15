@@ -268,7 +268,7 @@ public final class DimensionStore {
      * 命中第一个"可进且已有合法落地坐标"的维度；重定向开关关闭或全部不可进返回 null。
      * 当前维度无需显式排除——玩家被重定向正因其不可进，enterable 判定天然为 false。
      */
-    public String resolveRedirectTarget(List<String> liveDims, Predicate<String> enterable) {
+    public synchronized String resolveRedirectTarget(List<String> liveDims, Predicate<String> enterable) {
         if (!redirectOnExhaust()) {
             return null;
         }

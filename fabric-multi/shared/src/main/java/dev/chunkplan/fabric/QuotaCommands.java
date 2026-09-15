@@ -4,10 +4,12 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
 import com.mojang.authlib.GameProfile;
@@ -36,7 +38,8 @@ import net.minecraft.server.level.ServerPlayer;
  * /chunkplan 命令族：check、rules、reset <target> [tier]、confirm、config
  * （exemptByDefault / window / windowTime / windowLimit / highSpeedMultiplier）、help、reload。
  * reset/confirm/reload 与 config 写操作需要权限等级 2（OP）。
- * 待确认动作单槽 + 60 秒超时（新动作覆盖旧动作，无队列），确认以超链接形式发起（坑 #30）。
+ * 待确认动作按发起者分槽 + 60 秒超时（同一发起者的新动作覆盖自己的旧动作，无队列），
+ * 确认以超链接形式发起（坑 #30）。
  * 所有玩家可见文案按执行者客户端语言渲染（中/英，坑 #22）。
  */
 public final class QuotaCommands {
@@ -44,12 +47,21 @@ public final class QuotaCommands {
     /** 待确认动作超时（毫秒） */
     private static final long CONFIRM_WINDOW_MILLIS = 60_000;
 
-    /** 待确认动作（命令在服务端主线程串行执行，静态字段即可；单槽，新动作覆盖旧动作） */
-    private static volatile PendingAction pending;
+    /** 控制台/rcon 发起的待确认动作归集槽位（owner 为 null 时用作 key） */
+    private static final UUID CONSOLE_SLOT = new UUID(0, 0);
 
-    /** 待确认动作（命令在服务端主线程串行执行，静态字段即可；单槽，新动作覆盖旧动作）。
-     *  owner（坑 #58）：发起者 UUID，控制台/rcon 为 null（不校验）——防管理员 B 在 60 秒内
-     *  点掉管理员 A 发起的待确认动作。 */
+    /**
+     * 待确认动作（命令在服务端主线程串行执行）按发起者分槽：单槽时代管理员 B 发起动作会
+     * 静默覆盖管理员 A 的待确认项（A 确认时报"无待确认操作"），分槽后各发起者互不干扰；
+     * 同一发起者的新动作仍覆盖自己的旧动作（无队列，60 秒超时，确认后即移除）。
+     */
+    private static final Map<UUID, PendingAction> PENDING = new ConcurrentHashMap<>();
+
+    /**
+     * 待确认动作。
+     *  owner（坑 #58）：发起者 UUID，控制台/rcon 为 null（归入 {@link #CONSOLE_SLOT} 槽，
+     *  任何 OP 可确认——rcon 冒烟依赖此路径）。
+     */
     private sealed interface PendingAction {
         long expireMillis();
 
@@ -93,6 +105,11 @@ public final class QuotaCommands {
     private static UUID ownerOf(CommandContext<CommandSourceStack> ctx) {
         ServerPlayer p = ctx.getSource().getPlayer();
         return p == null ? null : p.getUUID();
+    }
+
+    /** 登记待确认动作：按发起者分槽（控制台/rcon 归 CONSOLE_SLOT），同发起者新动作覆盖旧动作 */
+    private static void putPending(PendingAction action) {
+        PENDING.put(action.owner() == null ? CONSOLE_SLOT : action.owner(), action);
     }
 
     private QuotaCommands() {
@@ -268,10 +285,18 @@ public final class QuotaCommands {
                 ctx.getSource().sendFailure(Component.literal(t(ctx,
                         "维度独立模式下暂无该玩家的维度记录",
                         "Per-dimension mode: no dimension record for this player yet")));
+                if (online == null) {
+                    // 离线目标的数据是本次检查懒加载的，不会再触发登出事件——用完即回收
+                    eng.unloadPlayerData(profile.id());
+                }
                 return 0;
             }
         }
         sendStatus(ctx, profile.id(), profileName(profile), false, online != null && DevCommands.hasPermission(online, 2), dimKey);
+        if (eng != null && online == null) {
+            // 同上：离线目标数据用完即回收（数据已是最新，无需落盘的改动也会被跳过）
+            eng.unloadPlayerData(profile.id());
+        }
         return 1;
     }
 
@@ -354,7 +379,7 @@ public final class QuotaCommands {
         for (GameProfile gp : targets) {
             uuids.add(gp.id());
         }
-        pending = new PendingAction.Reset(uuids, tiers, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx));
+        putPending(new PendingAction.Reset(uuids, tiers, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx)));
         boolean zh = isZh(ctx);
         String zhScope;
         String enScope;
@@ -384,32 +409,25 @@ public final class QuotaCommands {
         return 1;
     }
 
-    /** /chunkplan confirm：执行单槽待确认动作（60 秒超时；消费后即清，单发） */
+    /** /chunkplan confirm：执行发起者槽位中的待确认动作（60 秒超时；消费后即清，单发） */
     private static int confirm(CommandContext<CommandSourceStack> ctx) {
         QuotaEngine eng = ChunkPlanFabric.engine;
         if (eng == null) {
             ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
             return 0;
         }
-        PendingAction req = pending;
+        // 按发起者分槽取出（先消费再执行，单发避免重复确认）：玩家从自己的槽取；
+        // 自己槽为空时回退控制台槽——控制台/rcon 发起的动作任何 OP 均可确认（坑 #58 语义保留）。
+        // 分槽后管理员之间互不可见对方的待确认项，天然不可能点掉别人的动作。
+        ServerPlayer confirmer = ctx.getSource().getPlayer();
+        PendingAction req = PENDING.remove(confirmer == null ? CONSOLE_SLOT : confirmer.getUUID());
+        if (req == null && confirmer != null) {
+            req = PENDING.remove(CONSOLE_SLOT);
+        }
         if (req == null) {
             ctx.getSource().sendFailure(Component.literal(t(ctx, "当前没有待确认的操作", "No pending action to confirm.")));
             return 0;
         }
-        // 发起者校验（坑 #58）：待确认动作单槽全局共享，不校验则管理员 B 可在 60 秒内点掉
-        // 管理员 A 的动作。校验刻意置于 pending = null <b>之前</b>——校验失败保留原动作，
-        // 不毁掉别人的待确认项；代价是"已过期且非本人"时报身份错误而非过期错误（该动作不被
-        // 消费，可重新发起），可接受。owner 为 null（控制台/rcon 发起）不校验，否则 rcon 无法自测。
-        if (req.owner() != null) {
-            ServerPlayer confirmer = ctx.getSource().getPlayer();
-            if (confirmer == null || !confirmer.getUUID().equals(req.owner())) {
-                ctx.getSource().sendFailure(Component.literal(t(ctx,
-                        "§c该待确认操作不属于你（可能已被其他管理员的动作取代）",
-                        "§cThis pending action belongs to another admin (or was replaced)")));
-                return 0;
-            }
-        }
-        pending = null; // 先消费再执行（单发，避免重复确认）
         if (req.expireMillis() < System.currentTimeMillis()) {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
                     "待确认操作已过期，请重新发起命令",
@@ -448,6 +466,9 @@ public final class QuotaCommands {
                     target.sendSystemMessage(Component.literal(tzh
                             ? "您的" + zhScope + "探索额度已被管理员重置"
                             : "Your exploration quota (" + enScope + ") has been reset by an administrator."));
+                } else {
+                    // 离线目标的数据是本次重置懒加载的（resetSpend 已落盘），用完即回收
+                    eng.unloadPlayerData(uuid);
                 }
             }
             String who = r.targets().size() == 1
@@ -677,7 +698,7 @@ public final class QuotaCommands {
             }
         }
         // 关闭：清空该窗口所有玩家记录 -> confirm
-        pending = new PendingAction.DisableWindow(tier, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx));
+        putPending(new PendingAction.DisableWindow(tier, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx)));
         String tierName = all ? (zh ? "全部窗口" : "all windows") : "tier" + tier;
         Component msg = Component.literal(t(ctx,
                 "§a将关闭 " + tierName + "，并清空该窗口所有玩家的记录，",
@@ -878,7 +899,7 @@ public final class QuotaCommands {
         }
         if (p.value() < line.limit()) {
             // 调低：可能引发在线玩家无警告踢出 -> confirm
-            pending = new PendingAction.LowerLimit(tier, raw, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx));
+            putPending(new PendingAction.LowerLimit(tier, raw, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx)));
             boolean zh = isZh(ctx);
             // 坑 #32：前置提示窗口名化（与 reset 确认提示一致）
             String winZh = ChunkPlanMessages.windowName(line.windowSeconds(), true);
@@ -1099,7 +1120,7 @@ public final class QuotaCommands {
             return 1;
         }
         // 关闭：清空该维度该窗口所有玩家记录 -> confirm
-        pending = new PendingAction.DisableDimWindow(dim, tier, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx));
+        putPending(new PendingAction.DisableDimWindow(dim, tier, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx)));
         String tierName = all ? (zh ? "全部窗口" : "all windows") : "tier" + tier;
         Component msg = Component.literal(t(ctx,
                 "§a将关闭维度 " + dim + " 的 " + tierName + "，并清空该维度该窗口所有玩家的记录，",
@@ -1219,7 +1240,7 @@ public final class QuotaCommands {
         QuotaTiers.Tier current = tiers.get(tier - 1);
         if (p.value() < current.limit()) {
             // 调低：可能引发在线玩家无警告踢出 -> confirm
-            pending = new PendingAction.LowerDimLimit(dim, tier, raw, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx));
+            putPending(new PendingAction.LowerDimLimit(dim, tier, raw, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx)));
             boolean zh = isZh(ctx);
             String winZh = windowLabelOf(current.window(), true);
             String winEn = windowLabelOf(current.window(), false).toLowerCase();
@@ -1597,7 +1618,7 @@ public final class QuotaCommands {
             return 0;
         }
         boolean zh = isZh(ctx);
-        pending = new PendingAction.ApplyPreset(name, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx));
+        putPending(new PendingAction.ApplyPreset(name, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx)));
         Component msg = Component.literal(t(ctx,
                 "§a将把预设 §b" + name + "§a（" + tiersSummary(p.tiers(), zh) + "）写入全局配置，对全体玩家生效；"
                         + "被关闭的档位不会清空玩家已消费记录，重新开启后若仍在窗口内将继承原有消费；"

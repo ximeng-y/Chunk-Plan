@@ -359,7 +359,8 @@ public final class ChunkPlanForge {
             try {
                 List<String> liveDims = liveDims(server);
                 UserBanList bans = server.getPlayerList().getBans();
-                for (ManagedBanStore.Entry entry : engine.getBanStore().all()) {
+                List<ManagedBanStore.Entry> entries = engine.getBanStore().all();
+                for (ManagedBanStore.Entry entry : entries) {
                     if (!engine.shouldStayBanned(entry.uuid(), liveDims)) {
                         GameProfile profile = new GameProfile(entry.uuid(), "");
                         // 仅解除 ChunkPlan 自己加的 ban；服主手动 ban 的条目（来源非 ChunkPlan）保留
@@ -372,6 +373,13 @@ public final class ChunkPlanForge {
                     }
                 }
                 engine.getBanStore().removeExpired(System.currentTimeMillis());
+                // 回收懒加载的离线封禁玩家数据：被封玩家离线时不会再触发登出事件，
+                // 不显式回收其数据将常驻内存直至关服（在线玩家数据由 tick/登出管理，不动）
+                for (ManagedBanStore.Entry entry : entries) {
+                    if (server.getPlayerList().getPlayer(entry.uuid()) == null) {
+                        engine.unloadPlayerData(entry.uuid());
+                    }
+                }
             } catch (Exception e) {
                 LOG.error("解 ban 扫描异常", e);
             }
