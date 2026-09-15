@@ -372,21 +372,43 @@ public final class PlayerQuotaData {
                     if (ranges == null) {
                         continue;
                     }
+                    // 收集合法区间（非法区间跳过，不崩溃）。坐标上限按原版世界边界 ±30M 方块
+                    // 取整到区块（±1.875M）再留余量：越界区间整条丢弃，保证内存中的行坐标有界
+                    List<Range> loaded = new ArrayList<>(ranges.length);
                     for (int[] range : ranges) {
-                        // 非法区间（null/长度不对/起点大于终点/超出世界边界换算的区块坐标）跳过，不崩溃。
-                        // 坐标上限按原版世界边界 ±30M 方块取整到区块（±1.875M）再留余量——
-                        // 损坏/篡改的存档若含超大区间（如 ±2^31），逐块展开会长时间卡住加载
                         if (range == null || range.length != 2 || range[0] > range[1]
                                 || range[0] < -MAX_CHUNK_COORD || range[0] > MAX_CHUNK_COORD
                                 || range[1] < -MAX_CHUNK_COORD || range[1] > MAX_CHUNK_COORD) {
                             continue;
                         }
-                        // 展开整段区间逐块标记：走增量合并（加载时顺带规范化相邻区间并置 dirty，
-                        // 下次保存写回规范格式）；加载开销 O(区块数)，与旧 Set 格式一致
-                        for (int x = range[0]; x <= range[1]; x++) {
-                            p.markExplored(dim.getKey(), ChunkPosPacker.pack(x, z));
-                        }
+                        loaded.add(new Range(range[0], range[1]));
                     }
+                    if (loaded.isEmpty()) {
+                        continue;
+                    }
+                    // 规范化：按 startX 排序后合并重叠/相邻区间，产出与 {@link #markExplored}
+                    // 增量合并同构的形态（同 z 行内不重叠、不相邻）。不逐块展开——内存里本就是
+                    // 区间表示，逐块展开在集合较大时是纯开销
+                    loaded.sort(Comparator.comparingInt(Range::startX));
+                    List<Range> merged = new ArrayList<>(loaded.size());
+                    for (Range r : loaded) {
+                        int last = merged.size() - 1;
+                        if (last >= 0 && merged.get(last).endX() + 1 >= r.startX()) {
+                            Range prev = merged.get(last);
+                            if (r.endX() > prev.endX()) {
+                                merged.set(last, new Range(prev.startX(), r.endX()));
+                            }
+                            continue;
+                        }
+                        merged.add(r);
+                    }
+                    // 仅当落盘区间确实被改写（乱序/重叠/相邻/含被丢弃的非法条目）才置脏，
+                    // 下次保存顺带写回规范格式；规范数据（toDto 的常规产物）加载后保持干净——
+                    // 否则 scanBans 这类"加载即驱逐"路径会把每轮扫描变成一次内容完全相同的落盘
+                    if (!isCanonical(ranges, merged)) {
+                        p.dirty = true;
+                    }
+                    p.exploredByDim.computeIfAbsent(dim.getKey(), k -> new HashMap<>()).put(z, merged);
                 }
             }
         }
@@ -431,5 +453,20 @@ public final class PlayerQuotaData {
         // v1 minuteBuckets / v2 tierBuckets 有意不读取：见类注释（迁移语义：explored 保留、消费丢弃）
         // v3 -> v4 无损：全局 tiers 保留（切回共享模式仍用），dimTiers/lastDim 从空起
         return p;
+    }
+
+    /** 落盘区间是否已是规范形态（排序、互不相邻、无非法条目即无需改写） */
+    private static boolean isCanonical(int[][] raw, List<Range> merged) {
+        if (raw.length != merged.size()) {
+            return false; // 有非法/越界区间被丢弃
+        }
+        for (int i = 0; i < raw.length; i++) {
+            int[] r = raw[i];
+            Range m = merged.get(i);
+            if (r == null || r.length != 2 || r[0] != m.startX() || r[1] != m.endX()) {
+                return false; // 乱序/重叠/相邻被合并，或本就不是规范的两元素区间
+            }
+        }
+        return true;
     }
 }

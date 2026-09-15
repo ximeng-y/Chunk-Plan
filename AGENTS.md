@@ -354,6 +354,12 @@ export JAVA_HOME="D:\Games\ABOUT_MINECRAFT\JAVA\zulu21.44.17-ca-jdk21.0.8-win_x6
     - **计数口径统一（MINOR-2，对应 #8 复核报告）**：坑 #58 的「common 180 → 188」改为标注**相对 main 是 177 → 188**（骨架提交 `2120717` 贡献 3、后端 PR 贡献 8），避免与骨架基线混淆
     - **验证**：common **188 测试全绿**（独立统计 XML 结果 tests=188 / failures=0 / errors=0）；根构建四模块 `BUILD SUCCESSFUL`；`fabric-multi` 三版本 `BUILD SUCCESSFUL`；五端 `mirror_check.py` **MIRROR OK**
 
+61. **PR #10 复核报告非阻塞项落地：explored 加载不再置脏（坑 #61，2026-09-15，直接 main 提交）**：#10（`4708560`，MEDIUM 1 + LOW 4）以 merge commit 合入 main（`18ca580`），随后落地复核报告唯一的 MINOR 项
+    - **症状（复核实测）**：被封禁的**离线**玩家，其 `players/<uuid>.json` 每轮 `scanBans` 都被重写一次且内容逐字节不变（`banScanIntervalSec=10` 便于观察时每 10 秒一次；`.bak` 与主文件 md5 相同）。根因是 #10 新增的驱逐循环（`scanBans` 末尾 `unloadPlayerData`）：`shouldStayBanned` → `loadOrCreate` 的 `computeIfAbsent` 重新装载数据，而 `fromDto` 逐块展开区间时经 `markExplored` 一律置 `dirty` → 紧随其后的 `savePlayer` 见脏即写。改动前同一份数据只在 5 分钟周期的 `saveAll` 落盘，量级放大约 10 倍；30 万区块的玩家单次是 ~3.4MB JSON / 序列化 ~200ms / 写 ~9ms（含 `.bak` 复制），每轮扫描一次
+    - **修复（common `PlayerQuotaData.fromDto`）**：explored 按行**直接构造区间列表**——收集合法区间（非法/越界整条丢弃）→ 按 startX 排序 → 合并重叠/相邻，产出与 `markExplored` 增量合并同构的形态（同 z 行内不重叠、不相邻）；**仅在落盘区间确实被改写时才置脏**（新增 `isCanonical(int[][], List<Range>)` 逐项比对原数组与归一结果）。规范数据（`toDto` 的常规产物）加载后保持干净，`scanBans` 的"加载即驱逐"不再产生落盘；非规范数据仍会归一化并置脏，下一轮保存写回后收敛
+    - **顺带的收益**：加载不再逐块展开（内存里本就是区间表示），30 万区块 16ms → 10ms，且规避了"超大但合法区间"逐块展开的 O(区块数) 开销
+    - **验证**：common 190 → **192** 测试全绿（新增 `fromDtoKeepsCanonicalExploredClean` 规范化数据加载不脏、变更后仍脏；`fromDtoNormalizesNonCanonicalExploredAndMarksDirty` 乱序/重叠/相邻归一为 `[[1,8],[20,21]]` 且置脏、再过一轮已收敛不脏）；**变异验证**（把 `isCanonical` 判定退回无条件置脏）两个新测试立即 FAILED；根构建四模块 + `fabric-multi` 三版本 `BUILD SUCCESSFUL`；实机（neoforge dev，`banScanIntervalSec=10`）：封禁后离线玩家文件 mtime 在 80 秒内恒为封禁时刻（改动前同样条件下每 10 秒重写），手工注入乱序+相邻区间后**只归一化一次**（`[[6,9]]`）、随后 mtime 稳定不再变
+
 - 代码注释默认中文；common 不 import 任何 MC/加载器类（单测在 common 模块）
 - 壳层薄：业务逻辑全部在 common，壳只做事件接线 / 配置映射 / ban 执行
 - 各端配置结构保持一致（TOML 与 JSON 字段一一对应；forge 与 neoforge 的 TOML 键完全相同）

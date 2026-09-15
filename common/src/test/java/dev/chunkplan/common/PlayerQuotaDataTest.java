@@ -250,6 +250,50 @@ class PlayerQuotaDataTest {
     }
 
     @Test
+    void fromDtoKeepsCanonicalExploredClean() {
+        // 规范化数据（toDto 的常规产物）加载后不置脏：否则"加载即驱逐"的路径
+        // （scanBans 懒加载离线封禁玩家）会把每轮扫描变成一次内容完全相同的落盘（PR #10 复核 MINOR-1）
+        PlayerQuotaData p = new PlayerQuotaData();
+        p.markExplored("d", chunk(1, 2));
+        p.markExplored("d", chunk(2, 2));   // 与上一块相邻 -> 合并为 [1,2]
+        p.recordDimSpend("d", 1, 1000L * 60000, 3.0);
+        p.setLastDim("d");
+        p.clearDirty();
+
+        PlayerQuotaData back = PlayerQuotaData.fromDto(p.toDto());
+        assertTrue(back.isExplored("d", chunk(1, 2)));
+        assertTrue(back.isExplored("d", chunk(2, 2)));
+        assertFalse(back.isDirty()); // 已是规范形态 -> 干净
+        assertEquals(3.0, back.effectiveDimSpent("d", 1, 1000L * 60000 + 1000, 3600), 1e-9);
+        assertEquals("d", back.lastDim());
+
+        // 触发一次真实变更后仍置脏（新语义没有把脏标记整体弱化）
+        back.markExplored("d", chunk(9, 9));
+        assertTrue(back.isDirty());
+    }
+
+    @Test
+    void fromDtoNormalizesNonCanonicalExploredAndMarksDirty() {
+        // 乱序 + 重叠 + 相邻的落盘区间：加载时归一化为与 markExplored 同构的形态，并置脏以便写回
+        PlayerQuotaData.Dto dto = new PlayerQuotaData.Dto();
+        dto.explored = Map.of(
+                "d", Map.of("10", new int[][]{{7, 8}, {1, 3}, {4, 6}, {2, 2}, {20, 21}}));
+        PlayerQuotaData p = PlayerQuotaData.fromDto(dto);
+        assertTrue(p.isDirty());
+        assertEquals("[[1, 8], [20, 21]]", java.util.Arrays.deepToString(
+                p.toDto().explored.get("d").get("10"))); // 重叠/相邻全部合拢，且按 startX 升序
+        assertTrue(p.isExplored("d", chunk(5, 10)));
+        assertFalse(p.isExplored("d", chunk(9, 10)));
+        assertTrue(p.isExplored("d", chunk(20, 10)));
+
+        // 归一化后再过一轮：已规范 -> 不脏（收敛，不会每轮扫描反复写盘）
+        PlayerQuotaData again = PlayerQuotaData.fromDto(p.toDto());
+        assertFalse(again.isDirty());
+        assertEquals("[[1, 8], [20, 21]]", java.util.Arrays.deepToString(
+                again.toDto().explored.get("d").get("10")));
+    }
+
+    @Test
     void fromDtoSkipsInvalidRanges() {
         PlayerQuotaData.Dto dto = new PlayerQuotaData.Dto();
         dto.explored = Map.of(
