@@ -2,15 +2,20 @@ package dev.chunkplan.neoforge;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+import dev.chunkplan.common.FeedbackText;
 import dev.chunkplan.common.GuiStatus;
 import dev.chunkplan.common.PresetStore;
 import dev.chunkplan.common.QuotaConfig;
 import dev.chunkplan.common.QuotaEngine;
 import dev.chunkplan.common.QuotaTiers;
+import net.minecraft.commands.CommandSource;
+import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.chat.Component;
 import net.minecraft.network.codec.ByteBufCodecs;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
@@ -132,14 +137,24 @@ public final class ChunkPlanNetwork {
                 return;
             }
             // 命令透传：权限等级由 createCommandSourceStack() 从服务端 ops 系统读取（客户端不可伪造），
-            // requires(s.hasPermission(2)) 正常生效；反馈走聊天（与手输命令一致，含确认超链接）
+            // requires(s.hasPermission(2)) 正常生效；反馈既走聊天（与手输命令一致，含确认超链接），
+            // 又经 FeedbackSource 抄一份文本塞进本次回推的 GuiStatus（坑 #58：GUI 挡着聊天框看不到结果）
+            CommandSourceStack base = player.createCommandSourceStack();
+            // 委托源：旧世代（1.20.1/1.21.1）Entity 即 CommandSource，玩家实体本身可作命令源
+            FeedbackSource fb = new FeedbackSource(player);
+            int result;
             try {
-                player.getServer().getCommands().getDispatcher().execute(cmd, player.createCommandSourceStack());
+                result = player.getServer().getCommands().getDispatcher().execute(cmd, base.withSource(fb));
             } catch (Exception e) {
-                // 命令解析/执行失败：GUI 只拼合法命令，此处仅防御（玩家侧由状态刷新兜底）
+                // 命令解析/执行失败：GUI 只拼合法命令，此处仅防御。异常路径不回反馈文本
+                // （feedback = null，界面不显示反馈面板）：异常原因各式各样，复用"写入配置失败"
+                // 口径会误导，而新增一条通用失败文案需再引入 4 端文案同步面；异常详情已进服务端日志
                 LOG.debug("GUI 命令执行失败: {}", cmd, e);
+                sendStatus(player, null);
+                return;
             }
-            sendStatus(player);
+            // 成功/失败判据用 Brigadier 返回值：本 mod 命令体全部"失败 return 0、成功 return 1"
+            sendStatus(player, fb.toFeedback(result > 0));
         });
     }
 
@@ -176,22 +191,81 @@ public final class ChunkPlanNetwork {
         return context.player() instanceof ServerPlayer sp ? sp : null;
     }
 
+    /**
+     * 捕获命令反馈的命令源（坑 #58）：转发给原命令源（聊天照旧，必须有这一步，否则反馈只在
+     * GUI 出现、聊天丢失）并抄一份文本供 GUI 展示。
+     *
+     * <p>机制（javap 实证 1.20.1/1.21.1/1.21.11/26.x 四代一致）：{@code CommandSourceStack.withSource}
+     * 为 public；{@code sendSuccess}/{@code sendFailure} 最终都经
+     * {@code CommandSource.sendSystemMessage(Component)} 落到 {@code source} 字段
+     * （sendFailure 会追加红色样式，本类逐字转发后由 {@code FeedbackText} 剥离）。
+     * {@code withCallback(CommandResultCallback)} 只携带 (boolean,int) 无文本，不适用。
+     */
+    private static final class FeedbackSource implements CommandSource {
+        private final CommandSource delegate;
+        private final List<String> captured = new ArrayList<>();
+
+        private FeedbackSource(CommandSource delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public void sendSystemMessage(Component component) {
+            delegate.sendSystemMessage(component);
+            captured.add(component == null ? "" : component.getString());
+        }
+
+        @Override
+        public boolean acceptsSuccess() {
+            return delegate.acceptsSuccess();
+        }
+
+        @Override
+        public boolean acceptsFailure() {
+            return delegate.acceptsFailure();
+        }
+
+        @Override
+        public boolean shouldInformAdmins() {
+            return delegate.shouldInformAdmins();
+        }
+
+        /** 无反馈文本（未产生任何消息）返回 null = 界面不显示反馈面板；首条非空反馈经 common 清洗 */
+        private GuiStatus.GuiFeedback toFeedback(boolean success) {
+            for (String raw : captured) {
+                String text = FeedbackText.sanitize(raw);
+                if (text != null) {
+                    return new GuiStatus.GuiFeedback(text, success);
+                }
+            }
+            return null;
+        }
+    }
+
     /** 玩家登出时清除其状态请求冷却条目（防 LAST_REQUEST 无界增长） */
     public static void onPlayerDisconnect(UUID uuid) {
         LAST_REQUEST.remove(uuid);
     }
 
     private static void sendStatus(ServerPlayer player) {
+        sendStatus(player, null);
+    }
+
+    private static void sendStatus(ServerPlayer player, GuiStatus.GuiFeedback feedback) {
         QuotaEngine eng = ChunkPlanNeoForge.engine;
         if (eng == null) {
             return;
         }
-        GuiStatus status = buildGuiStatus(eng, player);
+        GuiStatus status = buildGuiStatus(eng, player, feedback);
         PacketDistributor.sendToPlayer(player, new GuiStatusPayload(status.encode()));
     }
 
-    /** 由引擎 + 配置文件构建客户端 GUI 状态（用量页/管理页/维度页数据源） */
     public static GuiStatus buildGuiStatus(QuotaEngine eng, ServerPlayer player) {
+        return buildGuiStatus(eng, player, null);
+    }
+
+    /** 由引擎 + 配置文件构建客户端 GUI 状态（用量页/管理页/维度页数据源；feedback 见坑 #58） */
+    public static GuiStatus buildGuiStatus(QuotaEngine eng, ServerPlayer player, GuiStatus.GuiFeedback feedback) {
         UUID uuid = player.getUUID();
         QuotaConfig cfg = eng.getConfig();
         boolean isAdmin = player.hasPermissions(2);
@@ -230,6 +304,13 @@ public final class ChunkPlanNetwork {
             dimConfig = new GuiStatus.DimConfigStatus(eng.getDimensionStore().redirectOnExhaust(),
                     eng.getDimensionStore().redirectOrder(), entries);
         }
+        // v5（issue #1、#2）：预设内容（名 + 四档，恒 4 项）仅管理员下发，与 presets 同策略；
+        // tiers() 理论上非 null，仍防御性兜底（坑 #54 的不可变列表 NPE 教训）
+        List<GuiStatus.PresetInfo> presetInfos = isAdmin
+                ? eng.getPresetStore().all().stream()
+                        .map(p -> new GuiStatus.PresetInfo(p.name(), p.tiers() == null ? List.of() : p.tiers()))
+                        .toList()
+                : List.of();
         return new GuiStatus(
                 cfg.firstEntryFee(), cfg.familiarEntryFee(), cfg.highSpeedThreshold(), cfg.highSpeedMultiplier(),
                 cfg.exemptByDefault(), isExempt, inList, isAdmin,
@@ -237,6 +318,7 @@ public final class ChunkPlanNetwork {
                 qs.lines(), qs.allExceeded(), qs.recoveryMillis(), worst,
                 presetNames, eng.getPlayerPresetName(uuid),
                 independent ? 1 : 0, currentDim, liveDims, dimLines, dimConfig,
+                feedback, presetInfos,
                 ChunkPlanNeoForge.MOD_VERSION, false);
     }
 

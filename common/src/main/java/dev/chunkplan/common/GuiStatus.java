@@ -29,6 +29,8 @@ import java.util.List;
  *   <li>{@code dimensions}（v3）：服务器全部 live 维度 key（动态 getAllLevels，兼容 mod 注册维度）</li>
  *   <li>{@code dimLines}（v3）：各维度下该玩家的额度状态（用量页维度下拉；全体下发）</li>
  *   <li>{@code dimConfig}（v3）：维度管理配置（仅管理员；null = 非管理员不下发）</li>
+ *   <li>{@code feedback}（v5）：GUI 透传命令的反馈（null = 本批无反馈；见 {@link GuiFeedback}）</li>
+ *   <li>{@code presetInfos}（v5）：预设名 + 四档内容（仅管理员非空，与 {@code presets} 同策略）</li>
  *   <li>{@code serverModVersion}（v4）：服务端 mod 版本号（wire 格式第 2 字段，冻结头的一部分，
  *       供版本不匹配兜底页显示；正常状态同样携带，可为 null = 未知）</li>
  *   <li>{@code versionMismatch}：版本不匹配标志（<b>非序列化</b>，仅 decode 遇协议版本不符时为 true；
@@ -56,16 +58,20 @@ public record GuiStatus(
         List<String> dimensions,
         List<DimLines> dimLines,
         DimConfigStatus dimConfig,
+        GuiFeedback feedback,
+        List<PresetInfo> presetInfos,
         String serverModVersion,
         boolean versionMismatch) {
 
     /** 协议版本：两端不一致时 decode 返回版本横幅（versionMismatch=true，兜底页显示两端版本号）；
-     *  v3 增加维度字段（issue #3）；v4 在协议头插入 serverModVersion（版本不匹配兜底） */
-    public static final int PROTOCOL_VERSION = 4;
+     *  v3 增加维度字段（issue #3）；v4 在协议头插入 serverModVersion（版本不匹配兜底）；
+     *  v5 追加 feedback（GUI 命令反馈）与 presetInfos（预设内容），两者编在既有字段之后 */
+    public static final int PROTOCOL_VERSION = 5;
 
     /** 编解码防御上限（防损坏数据异常内存分配，与维度实际规模相比极宽松） */
     private static final int MAX_DIMS = 64;
     private static final int MAX_LINES_PER_DIM = 16;
+    private static final int MAX_PRESETS = 64;
 
     /** 单维度的玩家额度状态（issue #3，用量页维度下拉渲染用） */
     public record DimLines(String dim, List<QuotaEngine.LineStatus> lines, long recoveryMillis, int worstPercent) {
@@ -80,6 +86,15 @@ public record GuiStatus(
     public record DimConfigStatus(boolean redirectOnExhaust, List<String> redirectOrder, List<DimEntry> dims) {
     }
 
+    /** GUI 透传命令的反馈（v5）：由壳层捕获命令执行的反馈文本后回推，供界面内展示；
+     *  present=false（即 wire 首布尔为 false）表示本批无反馈，此时 text/success 无意义 */
+    public record GuiFeedback(String text, boolean success) {
+    }
+
+    /** 预设名 + 四档内容（v5）：管理页需展示预设内容（而非只有名字），仅管理员下发 */
+    public record PresetInfo(String name, List<QuotaTiers.Tier> tiers) {
+    }
+
     /**
      * 版本横幅（服务端在请求协议版本与本端不符时回发）：除 serverModVersion 外全部为空值，
      * 客户端 decode 走 mismatch 分支只读协议头两字段，其余内容不会解析——供兜底页显示两端版本号。
@@ -88,7 +103,7 @@ public record GuiStatus(
     public static GuiStatus versionBanner(String serverModVersion) {
         return new GuiStatus(0, 0, 0, 0, false, false, false, false,
                 List.of(), List.of(), false, -1, -1, List.of(), null,
-                0, null, List.of(), List.of(), null, serverModVersion, true);
+                0, null, List.of(), List.of(), null, null, List.of(), serverModVersion, true);
     }
 
     /** 序列化为字节数组（DataOutputStream，纯 Java）。
@@ -186,6 +201,26 @@ public record GuiStatus(
                             out.writeUTF(t.window() == null ? "" : t.window());
                             out.writeDouble(t.limit());
                         }
+                    }
+                }
+            }
+            // v5：GUI 命令反馈（present 布尔区分"无反馈"与"空文本反馈"）
+            out.writeBoolean(feedback != null);
+            if (feedback != null) {
+                out.writeBoolean(feedback.success());
+                out.writeUTF(feedback.text() == null ? "" : feedback.text());
+            }
+            // v5：预设内容（仅管理员下发，presetInfos 为空即无）
+            out.writeInt(presetInfos == null ? 0 : presetInfos.size());
+            if (presetInfos != null) {
+                for (PresetInfo pi : presetInfos) {
+                    out.writeUTF(pi.name() == null ? "" : pi.name());
+                    List<QuotaTiers.Tier> pt = pi.tiers() == null ? List.of() : pi.tiers();
+                    out.writeInt(pt.size());
+                    for (QuotaTiers.Tier t : pt) {
+                        out.writeBoolean(t.enabled());
+                        out.writeUTF(t.window() == null ? "" : t.window());
+                        out.writeDouble(t.limit());
                     }
                 }
             }
@@ -319,12 +354,36 @@ public record GuiStatus(
                 }
                 dimConfig = new DimConfigStatus(redirectOnExhaust, order, entries);
             }
+            // v5：命令反馈 + 预设内容
+            GuiFeedback feedback = null;
+            if (in.readBoolean()) {
+                boolean fbSuccess = in.readBoolean();
+                feedback = new GuiFeedback(in.readUTF(), fbSuccess);
+            }
+            int presetInfoCount = in.readInt();
+            if (presetInfoCount < 0 || presetInfoCount > MAX_PRESETS) {
+                return null;
+            }
+            List<PresetInfo> presetInfos = new ArrayList<>(presetInfoCount);
+            for (int i = 0; i < presetInfoCount; i++) {
+                String name = in.readUTF();
+                int pc = in.readInt();
+                if (pc < 0 || pc > 16) {
+                    return null;
+                }
+                List<QuotaTiers.Tier> pt = new ArrayList<>(pc);
+                for (int j = 0; j < pc; j++) {
+                    pt.add(new QuotaTiers.Tier(in.readBoolean(), in.readUTF(), in.readDouble()));
+                }
+                presetInfos.add(new PresetInfo(name, pt));
+            }
             return new GuiStatus(first, familiar, threshold, multiplier,
                     exemptByDefault, isExempt, inExemptList, isAdmin,
                     List.copyOf(tiers), List.copyOf(lines), allExceeded, recovery, worst,
                     List.copyOf(presets), playerPreset.isEmpty() ? null : playerPreset,
                     dimensionMode, currentDim.isEmpty() ? null : currentDim,
                     List.copyOf(dimensions), List.copyOf(dimLines), dimConfig,
+                    feedback, List.copyOf(presetInfos),
                     serverModVersion.isEmpty() ? null : serverModVersion, false);
         } catch (IOException | RuntimeException e) {
             return null; // 截断/损坏/版本不符：安全回退
