@@ -942,6 +942,50 @@ class QuotaEngineTest {
         assertEquals(1.0, engine2.quotaStatus(player).lines().get(1).spent(), 1e-9);
     }
 
+    // ---------- 坑 #58：档位开关不清消费记录（B2 机制护栏） ----------
+
+    @Test
+    void tierSpendSurvivesDisableEnableWithinWindow() {
+        // 坑 #58 回归：关档（lines 中不再出现该档）不得清空该档消费记录；周期未过时重新开启继承原有消费。
+        // 固定周期账本与档位开关解耦（周期存 tiers[档位]，读路径按当前窗口长现算）故无需任何补偿
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0); // tier1/tier2 各 1.0
+        assertEquals(1.0, engine.quotaStatus(player).lines().get(0).spent(), 1e-9);
+
+        // 关第一档（只剩 tier2）——模拟 preset apply 把一个已启用档关掉
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(new QuotaConfig.Line(2, 120, 3.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+        // 重新开启第一档（窗口未变、周期未过）
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(new QuotaConfig.Line(1, 60, 2.0), new QuotaConfig.Line(2, 120, 3.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+        // 继承原有消费（关档期间未被清空）
+        assertEquals(1.0, engine.quotaStatus(player).lines().get(0).spent(), 1e-9);
+    }
+
+    @Test
+    void tierSpendExpiresNaturallyAfterWindowWhenDisabled() {
+        // 坑 #58 回归：关档期间跨过窗口长，重开后从 0 起（自然过期，等价 reset，无需清档动作）
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0); // tier1 = 1.0（窗口 60s）
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(new QuotaConfig.Line(2, 120, 3.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+        clock.advanceMillis(120_000); // 跨过一个完整窗口（含整分对齐余量）
+        engine.setConfig(QuotaConfig.builder()
+                .lines(List.of(new QuotaConfig.Line(1, 60, 2.0), new QuotaConfig.Line(2, 120, 3.0)))
+                .highSpeedThreshold(1000)
+                .build(new ArrayList<>()));
+        assertEquals(0.0, engine.quotaStatus(player).lines().get(0).spent(), 1e-9);
+        // 重新计费：新周期只含本次消费（1.0），旧消费不复活
+        engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0);
+        assertEquals(1.0, engine.quotaStatus(player).lines().get(0).spent(), 1e-9);
+    }
+
     // ---------- 按玩家预设覆盖（issue #1、#2） ----------
 
     /** 仅第一档启用的预设（5h 窗口、可变上限），便于验证覆盖后的窗口/上限生效 */
