@@ -663,27 +663,56 @@ public final class QuotaEngine {
      * 最早可进时刻（issue #3 拍板口径）：各不可进维度的恢复时间的最小者——
      * 任一维度到点可进即应解封（独立模式全维度耗尽封禁时，ban 公告的恢复时间）。
      * liveDims 为空（无维度世界等退化输入）返回当前时刻，避免 ban(-1) 的无效公告。
+     *
+     * <p>"可进"按重定向落点口径（{@link #isDimRedirectable}：可进且已有落地坐标）——
+     * 无坐标的维度可进也无法承接重定向，若按它承诺"现在恢复"会生成创建即过期的 ban，
+     * 玩家重连后下 1 tick 再次被判满封禁（重连-被踢循环，公告恢复时间还显示"现在"）。
+     * 全服没有任何落地坐标时退化为全维度最早恢复（保底口径，此时重定向本就不可能）。
      */
     public long earliestRecoveryAcrossDims(UUID uuid, List<String> liveDims) {
-        long min = -1;
+        long minRedirectable = -1;
+        long minAny = -1;
         for (String dim : liveDims) {
-            if (isDimEnterable(uuid, dim)) {
+            boolean hasSpawn = dimStore.spawn(dim) != null;
+            if (hasSpawn && isDimEnterable(uuid, dim)) {
                 return clock.getAsLong();
             }
             long r = dimRecoveryMillis(uuid, dim);
-            if (r > 0 && (min < 0 || r < min)) {
-                min = r;
+            if (r > 0) {
+                if (hasSpawn && (minRedirectable < 0 || r < minRedirectable)) {
+                    minRedirectable = r;
+                }
+                if (minAny < 0 || r < minAny) {
+                    minAny = r;
+                }
             }
         }
-        return min < 0 ? clock.getAsLong() : min;
+        long t = minRedirectable >= 0 ? minRedirectable : minAny;
+        return t < 0 ? clock.getAsLong() : t;
+    }
+
+    /**
+     * 该维度当前能否作为重定向落点（{@link DimensionStore#resolveRedirectTarget} 的候选口径）：
+     * 可进且已有合法落地坐标。重定向开启时的封禁恢复/解封判定必须按此口径——只"可进"但无
+     * 坐标的维度无法承接传送，按它解封会让玩家重连后下 1 tick 再次被判满封禁。
+     */
+    private boolean isDimRedirectable(UUID uuid, String dimKey) {
+        return dimStore.spawn(dimKey) != null && isDimEnterable(uuid, dimKey);
     }
 
     /** scanBans/登录闸门共用：玩家是否应继续保持封禁（共享模式同现状；独立模式按拍板口径） */
     public boolean shouldStayBanned(UUID uuid, List<String> liveDims) {
         if (dimStore.isIndependent()) {
             if (dimStore.redirectOnExhaust()) {
-                // 重定向开启时封禁只在"全部维度不可进"下发生，恢复判定同口径
-                return !anyDimEnterable(uuid, liveDims);
+                // 重定向开启时封禁只在"无可重定向维度"下发生，解封判定同口径：任一维度恢复到
+                // "可作为重定向落点"（可进且有坐标）才解封——只按"可进"解封会把玩家放进
+                // "解封→重连→下 1 tick 再被封"的循环（与 earliestRecoveryAcrossDims 同源）
+                for (String dim : liveDims) {
+                    if (isDimRedirectable(uuid, dim)) {
+                        return false;
+                    }
+                }
+                return true;
             }
             // 重定向关闭：按玩家最后所在维度判定（该维度恢复才解封，其余维度可进也不放行）
             PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
@@ -851,6 +880,15 @@ public final class QuotaEngine {
 
     /** 玩家离线/被踢：落盘并释放内存 */
     public void onPlayerDisconnect(UUID uuid) {
+        unloadPlayerData(uuid);
+    }
+
+    /**
+     * 回收玩家内存数据（落盘后释放）。scanBans/离线 check/离线 reset 等路径会懒加载离线玩家
+     * 数据，而这些玩家不会再触发登出事件，若不显式回收将常驻内存直至关服。
+     * 调用方必须确保玩家当前不在线（在线玩家数据由 tick 持续读写，回收会导致反复加载）。
+     */
+    public void unloadPlayerData(UUID uuid) {
         savePlayer(uuid);
         tracking.remove(uuid);
         dataByPlayer.remove(uuid);

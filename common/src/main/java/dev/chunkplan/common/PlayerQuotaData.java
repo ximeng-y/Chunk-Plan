@@ -40,6 +40,12 @@ public final class PlayerQuotaData {
     /** 独立模式消费桶的维度数上限（防御损坏数据异常内存分配，与 GuiStatus 维度上限一致） */
     private static final int MAX_DIMS = 64;
 
+    /**
+     * 区块坐标绝对值上限：原版世界边界 ±30M 方块 ≈ ±1.875M 区块，留余量取 ±4M。
+     * 加载时据此拒绝损坏/篡改存档中的超大区间，避免逐块展开长时间卡住主线程。
+     */
+    private static final int MAX_CHUNK_COORD = 4_000_000;
+
     /** 行内区间（含端点）；不变量：同 z 行内不重叠、不相邻（相邻即合并） */
     record Range(int startX, int endX) {
     }
@@ -367,8 +373,12 @@ public final class PlayerQuotaData {
                         continue;
                     }
                     for (int[] range : ranges) {
-                        // 非法区间（null/长度不对/起点大于终点）跳过，不崩溃
-                        if (range == null || range.length != 2 || range[0] > range[1]) {
+                        // 非法区间（null/长度不对/起点大于终点/超出世界边界换算的区块坐标）跳过，不崩溃。
+                        // 坐标上限按原版世界边界 ±30M 方块取整到区块（±1.875M）再留余量——
+                        // 损坏/篡改的存档若含超大区间（如 ±2^31），逐块展开会长时间卡住加载
+                        if (range == null || range.length != 2 || range[0] > range[1]
+                                || range[0] < -MAX_CHUNK_COORD || range[0] > MAX_CHUNK_COORD
+                                || range[1] < -MAX_CHUNK_COORD || range[1] > MAX_CHUNK_COORD) {
                             continue;
                         }
                         // 展开整段区间逐块标记：走增量合并（加载时顺带规范化相邻区间并置 dirty，

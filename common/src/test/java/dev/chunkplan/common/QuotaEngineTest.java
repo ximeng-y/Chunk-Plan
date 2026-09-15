@@ -1394,6 +1394,33 @@ class QuotaEngineTest {
     }
 
     @Test
+    void independentModeRedirectWithoutSpawnBansWithRealRecovery() {
+        enableIndependentMode();
+        engine.setRedirectOnExhaust(true);
+        // 地狱/末地可进但未配置落地坐标（不能作为重定向落点）：主世界耗尽时应给出真实恢复
+        // 时间的 BAN，而非"恢复时间=现在"的创建即过期 ban（重连-被踢循环，review M-1）
+        engine.clearDimensionSpawn(NETHER);
+        engine.clearDimensionSpawn(END);
+        engine.onPlayerTick(player, false, OVERWORLD, 0, 64, 0, LIVE_DIMS);
+        engine.onPlayerTick(player, false, OVERWORLD, 16, 64, 0, LIVE_DIMS);  // 1.0
+        engine.onPlayerTick(player, false, OVERWORLD, 32, 64, 0, LIVE_DIMS);  // 2.0
+        long m0 = clock.now / 60000;
+        var r = engine.onPlayerTick(player, false, OVERWORLD, 48, 64, 0, LIVE_DIMS); // 3.0 > 2.0
+        assertEquals(QuotaEngine.ResultType.BAN, r.type());
+        // 恢复时间 = 主世界周期终点，而不是"现在"：可进但无坐标的维度不参与恢复承诺
+        assertEquals(m0 * 60000L + 3_600_000L, r.banUntilMillis());
+        // 解封判定同口径：地狱可进但无坐标 -> 保持封禁（否则解封后重连下 tick 再被封）
+        assertTrue(engine.shouldStayBanned(player, LIVE_DIMS));
+        // 补上落地坐标后：地狱成为可重定向落点 -> 应立即解封
+        engine.setDimensionSpawn(NETHER, 0, 64, 0);
+        assertFalse(engine.shouldStayBanned(player, LIVE_DIMS));
+        // 无坐标状态下周期到点：主世界恢复（有坐标）-> 同样解封
+        engine.clearDimensionSpawn(NETHER);
+        clock.advanceMillis(3_600_000L);
+        assertFalse(engine.shouldStayBanned(player, LIVE_DIMS));
+    }
+
+    @Test
     void independentModeLoginGateAllowsJoinWhenOtherDimEnterable() {
         enableIndependentMode();
         // 重定向开启 + 主世界满但地狱可进：登录闸门放行（tick 内自然重定向）

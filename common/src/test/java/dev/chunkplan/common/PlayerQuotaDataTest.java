@@ -269,6 +269,22 @@ class PlayerQuotaDataTest {
     }
 
     @Test
+    void fromDtoSkipsOutOfWorldBorderRanges() {
+        // 损坏/篡改存档的超大区间：端点超出区块坐标上限（±4M，世界边界 ±30M 方块换算+余量）
+        // 即整条跳过，避免逐块展开长时间卡住加载（review LOW-1）
+        PlayerQuotaData.Dto dto = new PlayerQuotaData.Dto();
+        dto.explored = Map.of(
+                "d", Map.of(
+                        "10", new int[][]{{Integer.MIN_VALUE, Integer.MAX_VALUE}, {1, 2}},
+                        "11", new int[][]{{4_000_001, 4_000_005}, {3_999_999, 4_000_000}}));
+        PlayerQuotaData p = PlayerQuotaData.fromDto(dto);
+        assertTrue(p.isExplored("d", chunk(1, 10)));
+        assertFalse(p.isExplored("d", chunk(0, 10)));         // 超大区间整条跳过
+        assertFalse(p.isExplored("d", chunk(4_000_001, 11))); // 端点越界整条跳过
+        assertTrue(p.isExplored("d", chunk(4_000_000, 11)));  // 界内贴边保留
+    }
+
+    @Test
     void fromDtoSkipsInvalidCycles() {
         PlayerQuotaData.Dto dto = new PlayerQuotaData.Dto();
         dto.tiers = Map.of(
