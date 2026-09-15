@@ -268,7 +268,7 @@ public final class ChunkPlanNetwork {
         String currentDim = player.level().dimension().location().toString();
         List<String> liveDims = ChunkPlanForge.GameEvents.liveDims(player.getServer());
         QuotaEngine.QuotaStatus qs = independent ? eng.quotaStatus(uuid, currentDim) : eng.quotaStatus(uuid);
-        boolean isAdmin = player.hasPermissions(2);;
+        boolean isAdmin = player.hasPermissions(2);
         boolean isExempt = eng.isExempt(uuid, isAdmin);
         boolean inList = cfg.exemptPlayers().contains(uuid);
         int worst = qs.worstAlert() == null ? -1 : qs.worstAlert().percent();

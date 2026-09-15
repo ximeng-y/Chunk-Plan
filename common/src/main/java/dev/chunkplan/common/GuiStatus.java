@@ -368,7 +368,7 @@ public record GuiStatus(
             for (int i = 0; i < presetInfoCount; i++) {
                 String name = in.readUTF();
                 int pc = in.readInt();
-                if (pc < 0 || pc > 16) {
+                if (pc < 0 || pc > MAX_LINES_PER_DIM) {
                     return null;
                 }
                 List<QuotaTiers.Tier> pt = new ArrayList<>(pc);

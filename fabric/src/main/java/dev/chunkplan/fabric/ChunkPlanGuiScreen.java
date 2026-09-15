@@ -1757,6 +1757,10 @@ public final class ChunkPlanGuiScreen extends Screen {
             st.dirty[i] = false;
             st.savedShown[i] = true;
             st.savedAtMillis[i] = System.currentTimeMillis();
+            // 与管理页 applyTier 对称：一次「设置」可能派发多条命令（开档 + 改窗口 + 改上限），
+            // 服务端每条各回推一次状态；不记静默期则首条回包到达时 reconcileDimTierIntent 会把
+            // 「窗口已改、额度未改」的中间态当成外部变更，丢弃本档意图并误报红字
+            reconcileSuppressUntilMillis = System.currentTimeMillis() + RECONCILE_SUPPRESS_MILLIS;
         }
     }
 
