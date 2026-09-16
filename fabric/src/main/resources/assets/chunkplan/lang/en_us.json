@@ -99,7 +99,7 @@
   "gui.chunkplan.reset_quota": "Reset quota",
   "gui.chunkplan.reset_scope_all": "all windows",
   "gui.chunkplan.reset_scope_all_dims": "all dimensions",
-  "gui.chunkplan.reset_target_hint": "Enter a player name or @a",
+  "gui.chunkplan.reset_target_hint": "Player name or @a",
   "gui.chunkplan.reset_tier_all": "All",
   "gui.chunkplan.rule_explored": "Explored chunk costs %s",
   "gui.chunkplan.rule_new": "New chunk costs %s",

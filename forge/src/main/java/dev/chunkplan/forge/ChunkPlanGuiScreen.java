@@ -44,6 +44,13 @@ public final class ChunkPlanGuiScreen extends Screen {
     private static final int COL_PANEL = 0xE0303030;
     /** 管理页分区分界线：与页签分隔线同色，克制不抢眼（用户要求"不过度引起注意"） */
     private static final int COL_DIVIDER = 0xFF555555;
+    /**
+     * 管理页两栏布局的分栏线 x：左列（档位/费率/重置）与右列（预设）的分界。
+     * 左列最宽控件（档位「设置」）止于 350，右列标签自 {@code ADMIN_COL2_X + 8} 起，两者间留 13px。
+     * 右列最宽一行是「按玩家应用」（分配按钮止于 {@code ADMIN_COL2_X + 276 + 52} = 691），
+     * 故两栏完整显示需 GUI 宽 ≥ 699；更窄时右列会被窗口右边裁掉（无横向滚动，与既有取舍一致）。
+     */
+    private static final int ADMIN_COL2_X = 363;
     /** 补全建议框每行高度 */
     private static final int SUGGEST_ROW_H = 12;
     /** 补全建议最多行数（显示在输入框下方，防小窗口溢出） */
@@ -57,6 +64,11 @@ public final class ChunkPlanGuiScreen extends Screen {
     private static final long SAVED_LINGER_MILLIS = 4000L;
     /** 自家命令派发后的调和静默期：此期间的中间态不回退（见 reconcileSuppressUntilMillis） */
     private static final long RECONCILE_SUPPRESS_MILLIS = 2000L;
+    /**
+     * 「保存为预设」待决作废的有效期：命令在途超时（丢包/服务端卡顿）后作废待决标记，
+     * 免得多时之后某条无关命令的成功反馈把它消费掉、误清管理员的档位草稿。
+     */
+    private static final long PRESET_DISCARD_WINDOW_MILLIS = 10000L;
     /** 数值输入框的最小/最大值文本（与服务端 NumericParser 的各入口范围同源，仅用于本地预校验文案） */
     private static final String MULT_MIN = "1.00";
     private static final String MULT_MAX = "1000.00";
@@ -89,6 +101,17 @@ public final class ChunkPlanGuiScreen extends Screen {
     private boolean pendingSkipConfirm;
     /** 本批确认后是否作废管理页全部待应用档位意图（「全部关闭」用：避免确认后又把某档打开） */
     private boolean pendingDiscardIntents;
+    /**
+     * 「保存为预设」已派发、等反馈回包确认：成功即作废管理页的档位草稿。
+     *
+     * <p>保存预设 = 把界面当前档位值收进预设（只写预设文件、不改全局配置），管理员这一步就结束了。
+     * 若不清草稿，档位行仍挂着红字「有未保存的更改」、预设的应用/删除/分配仍被置灰，
+     * 管理员被迫再点一次「放弃未保存更改」——用户实测反馈的误导路径。
+     * 失败则保留草稿，管理员可就地改数值重试。
+     */
+    private boolean presetSavePendingDiscard;
+    /** 上一笔待决「保存为预设」的派发时刻：超过 {@link #PRESET_DISCARD_WINDOW_MILLIS} 即作废待决状态 */
+    private long presetSavePendingAtMillis;
 
     // 管理页控件
     private final EditBox[] tierLimit = new EditBox[4];
@@ -384,7 +407,7 @@ public final class ChunkPlanGuiScreen extends Screen {
                                 : Component.translatable("gui.chunkplan.off")),
                 b -> setExemptDefault(!ebd));
         gy += 28;
-        resetTarget = new EditBox(font, left + 96, gy, 74, 20, Component.empty());
+        resetTarget = new EditBox(font, left + 96, gy, 114, 20, Component.empty());
         resetTarget.setValue(savedResetTarget != null ? savedResetTarget : "");
         resetTarget.setResponder(v -> savedResetTarget = v);
         addRenderableWidget(resetTarget);
@@ -394,45 +417,48 @@ public final class ChunkPlanGuiScreen extends Screen {
         resetTargetH = resetTarget.getHeight();
         // 层级选择：手绘下拉条（与其余下拉同观感，几何与旧 Button 相同；候选按模式见 resetTierLabels），
         // 命中在 mouseClicked；条内标签过长时由 drawSelectBar 截断，完整窗口名在下拉列表中可见
-        setRect(resetTierRect, left + 176, gy, 52, 20);
-        resetButton = addButton(left + 234, gy, 56, 20, Component.translatable("gui.chunkplan.reset"),
+        setRect(resetTierRect, left + 216, gy, 52, 20);
+        resetButton = addButton(left + 274, gy, 56, 20, Component.translatable("gui.chunkplan.reset"),
                 b -> doReset());
         // 目标为空时重置置灰（此时点下去只会静默失败，用户已反馈「点了没反应」）
         refreshResetButton();
 
         // ---------- 预设区（issue #1、#2） ----------
-        gy += 28;
+        // 右列：整块固定在 ADMIN_COL2_X 起，不随 gy 走——左列费率/重置行在独立模式下会上移 134，
+        // 而预设区与档位开关无关（独立模式下仅「应用到全体」不建），位置不该跟着动。
+        // 行 y 固定 36/64/92/120，与左列档位四行同高，共用顶部横线（y=163）作底边，见 renderAdmin 的竖分栏线。
+        int pgy = 36;
         // 行 1：选择预设（手绘下拉条 + 真下拉）→ 应用到全体（写全局配置，需确认；独立模式下全局额度线
         // 不生效，按钮隐藏）/ 删除（本地确认，无服务端 confirm 流）
-        setRect(presetSelectRect, left + 96, gy, 84, 20);
+        setRect(presetSelectRect, ADMIN_COL2_X + 96, pgy, 84, 20);
         if (!independent) {
-            presetApplyBtn = addButton(left + 186, gy, 66, 20, Component.translatable("gui.chunkplan.preset_apply"),
+            presetApplyBtn = addButton(ADMIN_COL2_X + 186, pgy, 66, 20, Component.translatable("gui.chunkplan.preset_apply"),
                     b -> applyPresetAll());
         }
-        presetDeleteBtn = addButton(left + 258, gy, 52, 20, Component.translatable("gui.chunkplan.preset_delete"),
+        presetDeleteBtn = addButton(ADMIN_COL2_X + 258, pgy, 52, 20, Component.translatable("gui.chunkplan.preset_delete"),
                 b -> deletePreset());
-        gy += 28;
+        pgy += 28;
         // 行 2：把界面当前档位值保存为预设（12 值形式；名称客户端预校验，服务端权威）
-        presetNameEdit = new EditBox(font, left + 96, gy, 74, 20, Component.empty());
+        presetNameEdit = new EditBox(font, ADMIN_COL2_X + 96, pgy, 100, 20, Component.empty());
         presetNameEdit.setValue(savedPresetName != null ? savedPresetName : "");
         presetNameEdit.setResponder(v -> savedPresetName = v);
         addRenderableWidget(presetNameEdit);
-        presetSaveBtn = addButton(left + 176, gy, 52, 20, Component.translatable("gui.chunkplan.preset_save"),
+        presetSaveBtn = addButton(ADMIN_COL2_X + 202, pgy, 52, 20, Component.translatable("gui.chunkplan.preset_save"),
                 b -> savePreset());
-        gy += 28;
+        pgy += 28;
         // 行 3：按玩家应用（目标默认在线玩家补全）＝ 玩家名输入框 + 行内预设下拉 + 分配
         // 空框灰字提示「输入玩家名」由 renderAdmin 手绘（不用 EditBox.setHint：跨六端 API 未核实）
-        presetTarget = new EditBox(font, left + 96, gy, 74, 20, Component.empty());
+        presetTarget = new EditBox(font, ADMIN_COL2_X + 96, pgy, 96, 20, Component.empty());
         presetTarget.setValue(savedPresetTarget != null ? savedPresetTarget : "");
         presetTarget.setResponder(v -> savedPresetTarget = v);
         addRenderableWidget(presetTarget);
         // 「分配用预设」下拉条：行 3 自有状态，与行 1 的选择互不影响
-        setRect(assignSelectRect, left + 176, gy, 76, 20);
-        presetAssignBtn = addButton(left + 258, gy, 52, 20, Component.translatable("gui.chunkplan.preset_assign"),
+        setRect(assignSelectRect, ADMIN_COL2_X + 198, pgy, 72, 20);
+        presetAssignBtn = addButton(ADMIN_COL2_X + 276, pgy, 52, 20, Component.translatable("gui.chunkplan.preset_assign"),
                 b -> assignPreset());
-        gy += 28;
+        pgy += 28;
         // 行 4：放弃未保存的档位更改（仅脏状态可点；只清本地意图，不发任何命令）
-        discardButton = addButton(left + 96, gy, 106, 20,
+        discardButton = addButton(ADMIN_COL2_X + 96, pgy, 100, 20,
                 Component.translatable("gui.chunkplan.preset_discard"), b -> discardUnsavedChanges());
         refreshPresetGate();
     }
@@ -1096,6 +1122,10 @@ public final class ChunkPlanGuiScreen extends Screen {
                     .append(' ').append(fmtLimit(limits[i]));
         }
         sendCommand(cmd.toString());
+        // 界面值已随命令带走：回包确认成功后作废本地档位草稿（见 onStatus）。
+        // 保存前不清——命令若被服务端拒绝，草稿还在，管理员可就地改数值重试。
+        presetSavePendingDiscard = true;
+        presetSavePendingAtMillis = System.currentTimeMillis();
         // 保留名称输入：管理员常在微调配置后同名覆盖保存
     }
 
@@ -1787,8 +1817,9 @@ public final class ChunkPlanGuiScreen extends Screen {
                             .append(Component.literal(": " + (cur == null ? "—" : shortDim(cur)))),
                     !slotBarClickable[s]);
         }
-        // 列表头（y=58：上距模式行按钮 2px、下距列表首行 3px，原 y=56 与首行控件顶边重叠）
-        g.drawString(font, Component.translatable("gui.chunkplan.dim.dim_header"), x + 2, 58, COL_GRAY);
+        // 列表头（y=58：上距模式行按钮 2px、下距列表首行 3px，原 y=56 与首行控件顶边重叠；
+        // x 与行内维度名同为 x+8——选中行左侧色块占到 x+3，文字自 x+2 起会被压住）
+        g.drawString(font, Component.translatable("gui.chunkplan.dim.dim_header"), x + 8, 58, COL_GRAY);
         g.drawString(font, Component.translatable("gui.chunkplan.dim.billing"), x + 152, 58, COL_GRAY);
         g.drawString(font, Component.translatable("gui.chunkplan.dim.spawn_header"), x + 216, 58, COL_GRAY);
         g.drawString(font, Component.translatable("gui.chunkplan.dim.usage_header"), x + 420, 58, COL_GRAY);
@@ -1807,8 +1838,9 @@ public final class ChunkPlanGuiScreen extends Screen {
                 g.fill(x, ry - 2, x + 3, ry + 18, COL_ACCENT);
                 g.fill(x + 3, ry + 19, x + 440, ry + 20, 0x66FFFFFF);
             }
+            // 名字自 x+8 起画：色块占到 x+3，原 x+2 会让首字压在色块上（用户实测截图反馈）
             g.drawString(font, Component.literal(font.plainSubstrByWidth(shortDim(dim), 130)),
-                    x + 2, ry + 6, dimBillingShown(dim) ? COL_TEXT : COL_GRAY);
+                    x + 8, ry + 6, dimBillingShown(dim) ? COL_TEXT : COL_GRAY);
             // 行末列：非 live 维度（已配置但当前未注册）标注一句让语义自明（控件已置灰）；
             // live 维度则显示该维度当前最高占用档位用量（数据来自全体下发的 dimLines，截断不换行）
             int tailX = x + 420;
@@ -2268,6 +2300,20 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (fb != null && fb.text() != null && !fb.text().isEmpty()) {
             setFeedback(Component.literal(fb.text()), fb.success());
         }
+        // 「保存为预设」回执：成功即作废管理页档位草稿——界面值已收进预设，这次操作结束，
+        // 界面回到服务端真相（预设只写文件，全局配置未变），不再挂红字、三动作按钮恢复可点。
+        // 失败保留草稿（管理员可就地改重试）；只清管理页档位意图，维度页的坐标/档位草稿不属本次操作。
+        // 只认「带反馈的回包」（命令执行必带成功/失败反馈，刷新回包不带）并设有效期，
+        // 防在途超时后某条无关命令的成功反馈把它消费掉、误清草稿。
+        if (presetSavePendingDiscard && fb != null) {
+            presetSavePendingDiscard = false;
+            if (fb.success()) {
+                discardAllTierIntents();
+            }
+        } else if (presetSavePendingDiscard
+                && System.currentTimeMillis() - presetSavePendingAtMillis > PRESET_DISCARD_WINDOW_MILLIS) {
+            presetSavePendingDiscard = false;
+        }
         // 用量页维度选择跨刷新记忆：仍在该次维度列表里就保留（否则回落当前所在维度）；
         // 仅首次打开界面用 currentDim() 定初值（用户反馈"看完末地一点刷新就跳回主世界"）
         if (s.dimensionMode() == 1) {
@@ -2343,7 +2389,9 @@ public final class ChunkPlanGuiScreen extends Screen {
         renderRedirectTooltip(g, mouseX, mouseY);
         renderControlHoverHint(g, mouseX, mouseY);
         // 小窗口提醒：管理页「设置」列与维度页槽位条在 320 宽会出屏。
-        // 本轮只做最低成本处理（一行红字），不做横向滚动——布局大改留待后续
+        // 本轮只做最低成本处理（一行红字），不做横向滚动——布局大改留待后续。
+        // 注：两栏后的右列（预设区）在 GUI 宽 < 694 时会被窗口右边裁掉，本行阈值未随之提高
+        // （提高需同步 12 份 lang 的「建议 ≥340 宽」文案），窄窗口下的右列溢出属已知取舍
         if (width < 340) {
             g.drawString(font, Component.translatable("gui.chunkplan.narrow_window"), 12, height - 30, COL_RED);
         }
@@ -2483,7 +2531,11 @@ public final class ChunkPlanGuiScreen extends Screen {
         boolean independent = status != null && status.dimensionMode() == 1;
         int gy;
         if (independent) {
-            g.drawString(font, Component.translatable("gui.chunkplan.admin_independent_hint"), x, 36, COL_YELLOW);
+            // 提示串贴左列排，右列标签自 ADMIN_COL2_X 起——英文串更长，须按左列宽度截断防压到右列
+            g.drawString(font, Component.literal(font.plainSubstrByWidth(
+                            Component.translatable("gui.chunkplan.admin_independent_hint").getString(),
+                            Math.max(60, ADMIN_COL2_X - x - 8))),
+                    x, 36, COL_YELLOW);
             gy = 64; // 与 buildAdmin 的费率行位置一一对应（下同）
         } else {
             for (int i = 0; i < 4; i++) {
@@ -2504,11 +2556,19 @@ public final class ChunkPlanGuiScreen extends Screen {
                         !tierWindowClickable[i]);
             }
             gy = 36 + 4 * 32 + 6;
-            // 分区线：档位额度线区 | 费率与重置区（独立模式下档位区隐藏，此线随之消失）
+            // 分区线：档位额度线区 | 费率与重置区（独立模式下档位区隐藏，此线随之消失，
+            // 由下方补的「右列底边」单独收口预设区）
             g.fill(0, gy - 7, width, gy - 6, COL_DIVIDER);
             g.drawString(font, Component.translatable("gui.chunkplan.all_windows"), x, gy + 6, COL_TEXT);
             gy += 28;
         }
+        // 右列（预设区）的分栏线：上起页签分隔线（y=33）、下至横分隔线（y=163），长度即右列内容的
+        // 垂直跨度，与左列横线构出右上角面板的直角。独立模式下顶部横线不画（档位区隐藏），
+        // 故此处补一段右列底边单独收口。
+        if (independent) {
+            g.fill(ADMIN_COL2_X, 163, width, 164, COL_DIVIDER);
+        }
+        g.fill(ADMIN_COL2_X, 33, ADMIN_COL2_X + 1, 164, COL_DIVIDER);
         // 以下标签与 buildAdmin 的行位置一一对应（行 y + 6）
         g.drawString(font, Component.translatable("gui.chunkplan.fee_new"), x, gy + 6, COL_TEXT);
         g.drawString(font, Component.translatable("gui.chunkplan.fee_explored"), x, gy + 34, COL_TEXT);
@@ -2517,44 +2577,57 @@ public final class ChunkPlanGuiScreen extends Screen {
         // 重置层级手绘下拉条（原为循环切换的 Button，用户要求真下拉）
         drawSelectBar(g, resetTierRect[0], resetTierRect[1], resetTierRect[2], resetTierRect[3],
                 Component.literal(resetTierLabel()), false);
-        // 目标为空：框内灰字提示（与「按玩家名分配」行同做法，不额外占版面）
+        // 目标为空：框内灰字提示（与「按玩家名分配」行同做法，不额外占版面）。
+        // 必须按框宽截断：提示串在英文下比框宽，不裁剪会越过框右沿压到旁边的层级下拉条上
         if (resetTarget != null && resetTarget.getValue().trim().isEmpty()) {
-            g.drawString(font, Component.translatable("gui.chunkplan.reset_target_hint"),
+            g.drawString(font, Component.literal(font.plainSubstrByWidth(
+                            Component.translatable("gui.chunkplan.reset_target_hint").getString(),
+                            resetTarget.getWidth() - 8)),
                     resetTarget.getX() + 4, resetTarget.getY() + 6, COL_GRAY);
         }
-        // 分区线：费率与重置区 | 预设区（gy + 136 = 重置行底与其下预设行首的中点，两种模式同式）
-        g.fill(0, gy + 136, width, gy + 137, COL_DIVIDER);
-        // 预设区标签（行 1 选择/应用/删除、行 2 保存、行 3 按玩家分配、行 4 放弃更改）
-        g.drawString(font, Component.translatable("gui.chunkplan.preset_title"), x, gy + 146, COL_TEXT);
-        g.drawString(font, Component.translatable("gui.chunkplan.preset_save_label"), x, gy + 174, COL_TEXT);
-        g.drawString(font, Component.translatable("gui.chunkplan.preset_assign_label"), x, gy + 202, COL_TEXT);
-        // 「保存为预设」所见即所存的对照说明（仅档位区可见——独立模式下档位行不显示，界面值无从谈起）：
-        // 第一行说明存的是界面值，第二行把全局配置的 12 值摘要摆出来供比对（行 2 右侧，截断防出屏）
-        if (!independent) {
-            int noteX = x + 240;
-            int noteW = Math.max(60, width - noteX - 8);
-            g.drawString(font, Component.literal(font.plainSubstrByWidth(
-                            Component.translatable("gui.chunkplan.preset_from_ui").getString(), noteW)),
-                    noteX, gy + 174, COL_GRAY);
-            g.drawString(font, Component.literal(font.plainSubstrByWidth(
-                            Component.translatable("gui.chunkplan.preset_global_values", globalTierSummary()).getString(),
-                            noteW)), noteX, gy + 186, COL_GRAY);
-        }
+        // 目标选择器说明：重置行已排到 x=330（gy+112 起的行），行内无处安放，改画在该行正下方
+        g.drawString(font, Component.translatable("gui.chunkplan.reset_hint"), x + 96, gy + 136, COL_GRAY);
+        // 右列（预设区）：整体固定，不随 gy 上移——左列费率/重置行在独立模式下会上移 134，
+        // 而预设区与档位开关无关（独立模式下仅「应用到全体」不建），位置不该跟着动。
+        // 行 y 固定 36/64/92/120，与左列档位四行同高，与 buildAdmin 一一对应（行 y + 6）
+        int c2x = ADMIN_COL2_X + 8;
+        int pcgy = 36;
+        g.drawString(font, Component.translatable("gui.chunkplan.preset_title"), c2x, pcgy + 6, COL_TEXT);
         // 预设选择条（手绘下拉条：与其余下拉同观感；列表为空时灰显且点不动）
         drawSelectBar(g, presetSelectRect[0], presetSelectRect[1], presetSelectRect[2], presetSelectRect[3],
                 Component.literal(selectedPresetName()), presetNames().isEmpty());
-        // 「按玩家应用」行：空框灰字提示 + 该行自有的预设选择条（分配用）
+        pcgy += 28;
+        g.drawString(font, Component.translatable("gui.chunkplan.preset_save_label"), c2x, pcgy + 6, COL_TEXT);
+        pcgy += 28;
+        g.drawString(font, Component.translatable("gui.chunkplan.preset_assign_label"), c2x, pcgy + 6, COL_TEXT);
+        // 「按玩家应用」行：空框灰字提示（同按框宽截断）+ 该行自有的预设选择条（分配用）
         if (presetTarget != null && presetTarget.getValue().isEmpty()) {
-            g.drawString(font, Component.translatable("gui.chunkplan.preset_target_hint"),
+            g.drawString(font, Component.literal(font.plainSubstrByWidth(
+                            Component.translatable("gui.chunkplan.preset_target_hint").getString(),
+                            presetTarget.getWidth() - 8)),
                     presetTarget.getX() + 4, presetTarget.getY() + 6, COL_GRAY);
         }
         drawSelectBar(g, assignSelectRect[0], assignSelectRect[1], assignSelectRect[2], assignSelectRect[3],
                 Component.literal(assignPresetLabel()), presetNames().isEmpty());
-        g.drawString(font, Component.translatable("gui.chunkplan.reset_hint"), x + 296, gy + 124, COL_GRAY);
-        // 脏状态门禁说明：有未保存档位更改时，预设四个动作置灰（原因可悬停查看，见 renderControlHoverHint）；
-        // 放在新增的「放弃未保存更改」行（gy + 224）右侧，不压任何控件
+        pcgy += 28;
+        // 脏状态门禁说明：有未保存档位更改时，预设的应用/删除/分配置灰（原因可悬停查看）；
+        // 紧跟「放弃未保存更改」按钮右侧（该行右侧是唯一空位），不压任何控件；串偏长，按剩余宽截断
         if (tiersDirty()) {
-            g.drawString(font, Component.translatable("gui.chunkplan.preset_gate_hint"), x + 240, gy + 230, COL_YELLOW);
+            g.drawString(font, Component.literal(font.plainSubstrByWidth(
+                            Component.translatable("gui.chunkplan.preset_gate_hint").getString(),
+                            Math.max(60, width - (ADMIN_COL2_X + 204) - 8))),
+                    ADMIN_COL2_X + 204, pcgy + 6, COL_YELLOW);
+        }
+        // 「保存为预设」所见即所存的对照说明（仅档位区可见——独立模式下档位行不显示，界面值无从谈起）：
+        // 第一行说明存的是界面值，第二行把全局配置的 12 值摘要摆出来供比对（右列最底部，截断防出屏）
+        if (!independent) {
+            int noteW = Math.max(60, width - c2x - 8);
+            g.drawString(font, Component.literal(font.plainSubstrByWidth(
+                            Component.translatable("gui.chunkplan.preset_from_ui").getString(), noteW)),
+                    c2x, 142, COL_GRAY);
+            g.drawString(font, Component.literal(font.plainSubstrByWidth(
+                            Component.translatable("gui.chunkplan.preset_global_values", globalTierSummary()).getString(),
+                            noteW)), c2x, 154, COL_GRAY);
         }
     }
 
