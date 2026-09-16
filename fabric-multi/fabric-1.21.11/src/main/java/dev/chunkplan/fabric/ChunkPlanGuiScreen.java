@@ -93,12 +93,23 @@ public final class ChunkPlanGuiScreen extends Screen {
     private Component confirmText;
     private int yesX, yesY, yesW, yesH;
     private int noX, noY, noW, noH;
-    /** 需确认的批量命令（「设置」点击后暂存，确认弹窗点「确认」后先派发再补 /chunkplan confirm） */
-    private List<String> pendingBatch;
-    /** 批量命令对应档位（0 = 无档位，如重置/全部关闭）；已保存提示按档位显示 */
-    private int pendingBatchTier;
-    /** 批量命令是否跳过补发 confirm（预设删除无服务端确认流，补发只会报"无待确认操作"） */
-    private boolean pendingSkipConfirm;
+
+    /**
+     * 批量派发项：命令 + 该命令是否需要紧随一次 {@code /chunkplan confirm}。
+     *
+     * <p>服务端待确认动作是<b>单槽</b>（每个发起者只存一个，新动作覆盖旧的），所以一批里若有多条
+     * 需确认命令（如「关闭 tier3」+「调低 tier1 上限」），必须逐条「派发 → confirm」串行执行；
+     * 一并派发会让后一条覆盖前一条的待确认动作，界面却显示保存成功（静默丢配置）。
+     */
+    private record BatchCmd(String command, boolean needsConfirm) {
+    }
+
+    /** 待派发的批量命令（保存按钮点击后暂存，确认弹窗点「确认」后按序派发） */
+    private List<BatchCmd> pendingBatch;
+    /** 本批确认后把管理页四档全部标记为「已保存」（管理页「保存并应用」批次） */
+    private boolean pendingBatchAdmin;
+    /** 本批确认后把该维度四档全部标记为「已保存」（非 null = 维度页「保存并应用」批次） */
+    private String pendingBatchDim;
     /** 本批确认后是否作废管理页全部待应用档位意图（「全部关闭」用：避免确认后又把某档打开） */
     private boolean pendingDiscardIntents;
     /**
@@ -115,7 +126,6 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     // 管理页控件
     private final EditBox[] tierLimit = new EditBox[4];
-    private final Button[] tierLimitSet = new Button[4];
     /** 档位行手绘下拉条命中区（[tier] = {x,y,w,h}）：窗口条随该档开关启用（开关是 Button，非手绘条） */
     private final int[][] tierWindowRect = new int[4][4];
     private final boolean[] tierWindowClickable = new boolean[4];
@@ -143,15 +153,17 @@ public final class ChunkPlanGuiScreen extends Screen {
     private Button discardButton;
     private Button dimDiscardButton;
 
-    // 档位行「设置」待应用状态（本地先改、点「设置」才派发命令；重建后按服务端值比对回落）
+    // 档位行待应用状态（本地先改、点「保存并应用」才派发；重建后按服务端值比对回落）
     private final boolean[] pendingEnabledSet = new boolean[4];
     private final boolean[] pendingEnabled = new boolean[4];
     private final String[] pendingWindow = new String[4];
-    /** 每档各自未保存（红字）/ 已保存（灰字）提示，仅本次打开期间显示 */
+    /** 四档共用的「保存并应用」按钮（原为每行一个「设置」，用户要求收成一个） */
+    private Button adminSaveButton;
+    private Button dimSaveTierButton;
+    /** 每档各自未保存（红字）标记；四档统一在「保存并应用」按钮下方显示一行提示 */
     private final boolean[] tierDirty = new boolean[4];
-    private final boolean[] tierSavedShown = new boolean[4];
-    /** 「已保存」灰字落点时刻（到时自动消失；未显示时为 0） */
-    private final long[] tierSavedAtMillis = new long[4];
+    /** 「设置已保存」灰字落点时刻（到时自动消失；未显示时为 0）——管理页四档共用一条 */
+    private long tierSavedAtMillis;
     /**
      * 上次重建时该档的服务端三元组签名（enabled/window/limit）。
      * 用于区分「自己保存成功后服务端值变化」与「外部（命令/其他管理员/文件重载）变更」：
@@ -197,7 +209,7 @@ public final class ChunkPlanGuiScreen extends Screen {
     /** 维度页编辑器「选择维度」手绘下拉条命中区（与重定向槽位同一观感，坑 #53） */
     private final int[] dimSelectRect = new int[4];
     private final EditBox[] dimTierLimit = new EditBox[4];
-    private final Button[] dimTierSet = new Button[4];
+    /** 维度页档位窗口手绘下拉条命中区（[tier] = {x,y,w,h}） */
     private final int[][] dimTierWindowRect = new int[4][4];
     private final boolean[] dimTierWindowClickable = new boolean[4];
     /** 列表滚动行数（滚轮） */
@@ -234,8 +246,6 @@ public final class ChunkPlanGuiScreen extends Screen {
     private String usageDim;
     /** 用量页维度选择是否已初始化（仅首次打开界面用 currentDim() 定初值，其后由 onStatus 保留/回落） */
     private boolean usageDimInitialized;
-    /** 待确认批量命令所属维度（非 null = 维度页档位编辑器发起，确认后按维度状态标记已保存） */
-    private String pendingBatchDim;
 
     /** 维度页档位编辑器状态（与管理页档位行的全局数组对应，按维度隔离） */
     private static final class DimTierEdit {
@@ -243,8 +253,8 @@ public final class ChunkPlanGuiScreen extends Screen {
         final boolean[] pendingEnabled = new boolean[4];
         final String[] pendingWindow = new String[4];
         final boolean[] dirty = new boolean[4];
-        final boolean[] savedShown = new boolean[4];
-        final long[] savedAtMillis = new long[4];
+        /** 「设置已保存」灰字落点时刻（0 = 未显示）；四档共用一条，显示在「保存并应用」按钮下方 */
+        long savedAtMillis;
         final String[] savedLimit = new String[4];
         /** 上次重建时该档服务端三元组签名（调和用，语义同管理页 tierServerSig） */
         final String[] serverSig = new String[4];
@@ -320,7 +330,6 @@ public final class ChunkPlanGuiScreen extends Screen {
             return;
         }
         int left = 12;
-        int rowH = 32;
         // 维度独立模式下全局额度线不生效：档位区隐藏（issue #3，与命令层 config window* 阻止同步）；
         // 费率/倍率/豁免/重置/预设(按玩家)保持可用，档位配置由维度页接管
         boolean independent = status != null && status.dimensionMode() == 1;
@@ -328,7 +337,8 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (independent) {
             // 档位行不建：清掉旧引用，防 savePreset 读到上一模式的残留输入（null = 回落服务端值）
             java.util.Arrays.fill(tierLimit, null);
-            gy = 64; // 顶部渲染侧留一行提示文字
+            adminSaveButton = null;
+            gy = ADMIN_FEE_TOP_INDEPENDENT; // 顶部渲染侧留一行提示文字
         } else {
             java.util.Arrays.fill(tierLimit, null); // 被下拉覆盖的行不建控件：先清引用防误用旧实例
             reconcileResetTier(); // 重置层级候选随服务端档位变化，选中项失效时回落「全部」
@@ -344,7 +354,7 @@ public final class ChunkPlanGuiScreen extends Screen {
                 reconcileTierIntent(idx, tier, curWindow, curLimit);
 
                 boolean effOn = effEnabled(tier);
-                int ry = 36 + i * rowH;
+                int ry = ADMIN_TIER_TOP + i * ADMIN_TIER_ROW_H;
 
                 // 开关是 Button：点击直接切换待应用状态（非下拉——用户拍板，坑 #51）
                 int tx = left + 96;
@@ -356,8 +366,9 @@ public final class ChunkPlanGuiScreen extends Screen {
                 setRect(tierWindowRect[i], wx, ry, 74, 20);
                 tierWindowClickable[i] = effOn;
 
+                // 额度输入框加宽到与下方「保存并应用」按钮同右沿（原「设置」按钮位置改由统一按钮承担）
                 int lx = wx + 80;
-                tierLimit[idx] = new EditBox(font, lx, ry, 56, 20, Component.empty());
+                tierLimit[idx] = new EditBox(font, lx, ry, 104, 20, Component.empty());
                 tierLimit[idx].setValue(savedLimit[idx] != null ? savedLimit[idx] : fmtLimit(curLimit));
                 tierLimit[idx].setResponder(v -> {
                     savedLimit[idx] = v.trim().isEmpty() ? null : v; // 清空视为无更改，重建回显服务端值
@@ -365,18 +376,16 @@ public final class ChunkPlanGuiScreen extends Screen {
                 });
                 addRenderableWidget(tierLimit[idx]);
                 tierLimit[idx].active = effOn;
-
-                int sx = lx + 62;
-                tierLimitSet[i] = addButton(sx, ry, 42, 20,
-                        Component.translatable("gui.chunkplan.set"), b -> applyTier(tier));
             }
 
-            gy = 36 + 4 * rowH + 6;
-            addButton(left + 96, gy, 66, 20, Component.translatable("gui.chunkplan.all_on"),
+            // 四档共用一个「保存并应用」（原为每行一个「设置」按钮，用户要求合并）
+            adminSaveButton = addButton(left + 96, adminSaveY(), 242, 20,
+                    Component.translatable("gui.chunkplan.save_apply"), b -> applyAllTiers());
+            addButton(left + 96, adminAllRowY(), 66, 20, Component.translatable("gui.chunkplan.all_on"),
                     b -> allWindows(true));
-            addButton(left + 168, gy, 66, 20, Component.translatable("gui.chunkplan.all_off"),
+            addButton(left + 168, adminAllRowY(), 66, 20, Component.translatable("gui.chunkplan.all_off"),
                     b -> allWindows(false));
-            gy += 28;
+            gy = adminFeeTop();
         }
         newFeeEdit = new EditBox(font, left + 96, gy, 56, 20, Component.empty());
         newFeeEdit.setValue(savedNewFee != null ? savedNewFee : fmtNum(status == null ? 0 : status.firstEntryFee()));
@@ -442,6 +451,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         presetNameEdit = new EditBox(font, ADMIN_COL2_X + 96, pgy, 100, 20, Component.empty());
         presetNameEdit.setValue(savedPresetName != null ? savedPresetName : "");
         presetNameEdit.setResponder(v -> savedPresetName = v);
+        presetNameEdit.setMaxLength(32); // 与服务端名称长度上限一致（原先未设，客户端可无限输入）
         addRenderableWidget(presetNameEdit);
         presetSaveBtn = addButton(ADMIN_COL2_X + 202, pgy, 52, 20, Component.translatable("gui.chunkplan.preset_save"),
                 b -> savePreset());
@@ -506,8 +516,17 @@ public final class ChunkPlanGuiScreen extends Screen {
             if (discardButton != null) {
                 discardButton.active = tiersDirty();
             }
+            if (adminSaveButton != null) {
+                adminSaveButton.active = tiersDirty(); // 无更改即灰显（与「放弃未保存更改」同一套规则）
+            }
         } else if (page == 2 && dimDiscardButton != null) {
             dimDiscardButton.active = dimCoordsDirty();
+            if (dimSaveTierButton != null && selectedDim != null) {
+                DimTierEdit st = dimEdits.get(selectedDim);
+                boolean dirty = st != null && (st.dirty[0] || st.dirty[1] || st.dirty[2] || st.dirty[3]);
+                dimSaveTierButton.active = dirty && isLiveDim(selectedDim)
+                        && status != null && status.dimensionMode() == 1;
+            }
         }
     }
 
@@ -556,6 +575,49 @@ public final class ChunkPlanGuiScreen extends Screen {
         return status.tiers().get(tier - 1);
     }
 
+    // ---------- 管理页档位区布局（buildAdmin 与 renderAdmin 共用同一套推导，防两处漂移） ----------
+    // 四档各有：开关 + 窗口下拉条 + 额度输入框；「设置」按钮已合并为四档共用的一个「保存并应用」
+    // （用户要求），行高随之由 32 收紧到 26，腾出的高度正好容纳该按钮与其下方唯一的提示行。
+
+    /** 档位区第 1 行 y 与行高 */
+    private static final int ADMIN_TIER_TOP = 36;
+    private static final int ADMIN_TIER_ROW_H = 26;
+    /** 独立模式下费率区首行 y（档位区隐藏，顶部留一行提示文字） */
+    private static final int ADMIN_FEE_TOP_INDEPENDENT = 64;
+
+    /** 第 4 档控件下缘（行内控件高 20） */
+    private static int adminTierBottom() {
+        return ADMIN_TIER_TOP + 3 * ADMIN_TIER_ROW_H + 20;
+    }
+
+    /** 四档共用的「保存并应用」按钮 y */
+    private static int adminSaveY() {
+        return adminTierBottom() + 8;
+    }
+
+    /** 未保存/已保存提示行 y：只在「保存并应用」按钮下方这一处显示（用户要求） */
+    private static int adminHintY() {
+        return adminSaveY() + 23;
+    }
+
+    /** 全部开启/全部关闭行 y */
+    private static int adminAllRowY() {
+        return adminSaveY() + 35;
+    }
+
+    /** 档位区（含统一按钮与全部开关行）与费率区的分界线 y */
+    private static int adminDividerY() {
+        return adminAllRowY() + 25;
+    }
+
+    /** 左列费率/豁免/重置区首行 y（独立模式下档位区不显示，改由 ADMIN_FEE_TOP_INDEPENDENT 起） */
+    private static int adminFeeTop() {
+        return adminDividerY() + 7;
+    }
+
+    /** 右列（预设区）面板底边 y：右列四行预设内容固定到 y=141，底边取 163 留一行余量 */
+    private static final int ADMIN_PRESET_BOTTOM = 163;
+
     private boolean tierEnabled(int tier) {
         QuotaTiers.Tier t = rawTier(tier);
         return t != null && t.enabled();
@@ -579,7 +641,9 @@ public final class ChunkPlanGuiScreen extends Screen {
     }
 
     /** 预设名规则（与服务端 PresetStore.NAME_PATTERN 同规则：本地预校验防误发，服务端权威） */
-    private static final String PRESET_NAME_PATTERN = "[A-Za-z0-9_-]{1,32}";
+    private static final String PRESET_NAME_PATTERN = "[^\\p{C}\\p{Z}\"\\\\]{1,32}";
+    /** 预设名保留字：default 是全局配置的别名（非存储条目），同名预设会被命令层遮蔽 */
+    private static final String PRESET_NAME_RESERVED = "default";
 
     /**
      * 数值输入本地预校验失败的面板红字：错误分类沿用 common {@link NumericParser}（EMPTY/FORMAT/RANGE），
@@ -658,7 +722,7 @@ public final class ChunkPlanGuiScreen extends Screen {
     /** 丢弃某一档的待应用意图（外部变更导致）：连「已保存」灰字一并清掉 */
     private void discardTierIntent(int idx) {
         consumeTierIntent(idx);
-        tierSavedShown[idx] = false;
+        tierSavedAtMillis = 0;
     }
 
     /**
@@ -682,7 +746,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         String saved = t == null ? "" : fmtLimit(t.limit());
         String typed = tierLimit[i] == null ? "" : tierLimit[i].getValue().trim();
         if (typed.isEmpty()) {
-            this.tierDirty[i] = false; // 清空视为无更改（applyTier 同样跳过空值），重建回显服务端值
+            this.tierDirty[i] = false; // 清空视为无更改（保存时同样跳过空值），重建回显服务端值
             refreshPresetGate();
             return;
         }
@@ -691,82 +755,107 @@ public final class ChunkPlanGuiScreen extends Screen {
         refreshPresetGate();
     }
 
-    /** 保存后：清该档未保存标记并显示灰字「已保存」（数秒后自动消失，见 renderAdmin） */
-    private void markSaved(int tier) {
-        this.tierDirty[tier - 1] = false;
-        this.tierSavedShown[tier - 1] = true;
-        this.tierSavedAtMillis[tier - 1] = System.currentTimeMillis();
+    /** 保存后：清四档未保存标记并显示灰字「已保存」（数秒后自动消失，见 renderAdmin） */
+    private void markAllTiersSaved() {
+        for (int i = 0; i < 4; i++) {
+            this.tierDirty[i] = false;
+        }
+        this.tierSavedAtMillis = System.currentTimeMillis();
     }
 
     /** 「已保存」灰字是否仍在显示期（到时自动消失，无需清理标志） */
-    private boolean tierSavedVisible(int i) {
-        return tierSavedShown[i]
-                && System.currentTimeMillis() - tierSavedAtMillis[i] < SAVED_LINGER_MILLIS;
+    private boolean tierSavedVisible() {
+        return tierSavedAtMillis > 0
+                && System.currentTimeMillis() - tierSavedAtMillis < SAVED_LINGER_MILLIS;
     }
 
-    /** 档位行「设置」：收集待应用更改，统一派发；关窗口/调低额度需确认 */
-    private void applyTier(int tier) {
-        int i = tier - 1;
-        boolean curOn = tierEnabled(tier);
-        boolean effOn = effEnabled(tier);
-        boolean enableChanged = pendingEnabledSet[i] && pendingEnabled[i] != curOn;
-        QuotaTiers.Tier t = rawTier(tier);
-        String curWindow = t == null ? "" : t.window();
-        double curLimit = t == null ? 0 : t.limit();
-        List<String> cmds = new ArrayList<>();
-        boolean needConfirm = false;
-        Component confirmMsg = Component.empty();
+    /**
+     * 四档共用的「保存并应用」：逐档收集待应用更改，汇总成一批派发（原为每行一个「设置」）。
+     *
+     * <p>任一档数值非法即整批中止并在面板红字指出是哪一档（避免只保存了半批，管理员看不出哪些生效）。
+     * 批次里落进多条需确认命令时，由 {@link #dispatchBatch} 逐条「派发 → confirm」串行执行
+     * ——服务端待确认动作是单槽，一并派发会互相覆盖（静默丢配置）。
+     */
+    private void applyAllTiers() {
+        List<BatchCmd> batch = new ArrayList<>();
+        List<Integer> riskyTiers = new ArrayList<>();
+        for (int i = 0; i < 4; i++) {
+            int tier = i + 1;
+            boolean curOn = tierEnabled(tier);
+            boolean effOn = effEnabled(tier);
+            boolean enableChanged = pendingEnabledSet[i] && pendingEnabled[i] != curOn;
+            QuotaTiers.Tier t = rawTier(tier);
+            String curWindow = t == null ? "" : t.window();
+            double curLimit = t == null ? 0 : t.limit();
 
-        if (!effOn) {
-            if (enableChanged) {
-                cmds.add("chunkplan config window tier" + tier + " off");
-                needConfirm = true;
-                confirmMsg = Component.translatable("gui.chunkplan.confirm.disable_tier", tier);
+            if (!effOn) {
+                if (enableChanged) {
+                    // 关闭窗口会清空该窗口所有玩家记录，需二次确认
+                    batch.add(new BatchCmd("chunkplan config window tier" + tier + " off", true));
+                    riskyTiers.add(tier);
+                }
+                continue;
             }
-        } else {
             // 开启/保持开启：先启用（服务端要求窗口开启后才能改时长/上限），再改其余项
             if (enableChanged) {
-                cmds.add("chunkplan config window tier" + tier + " on");
+                batch.add(new BatchCmd("chunkplan config window tier" + tier + " on", false));
             }
             String pw = pendingWindow[i];
             if (pw != null && !pw.equals(curWindow)) {
-                cmds.add("chunkplan config windowTime tier" + tier + " " + pw);
+                batch.add(new BatchCmd("chunkplan config windowTime tier" + tier + " " + pw, false));
             }
-            String raw = tierLimit[tier - 1].getValue().trim();
+            String raw = tierLimit[i].getValue().trim();
             if (!raw.isEmpty()) {
                 NumericParser.Parsed p = NumericParser.parseLimit(raw);
                 if (!p.isOk()) {
-                    // 额度数值非法：面板红字指出非法项（原先静默跳过，管理员看不出为何没生效）
+                    // 额度数值非法：面板红字指出非法项并整批中止（半批生效更难排查）
                     setFeedback(Component.translatable("gui.chunkplan.feedback.tier_limit_invalid", tier,
                             numericErrorText(p)), false);
                     return;
                 }
                 if (Double.compare(p.value(), curLimit) != 0) {
-                    cmds.add("chunkplan config windowLimit tier" + tier + " " + raw);
-                    if (p.value() < curLimit) {
-                        needConfirm = true;
-                        confirmMsg = Component.translatable("gui.chunkplan.confirm.lower_tier", tier);
+                    boolean lower = p.value() < curLimit;
+                    batch.add(new BatchCmd("chunkplan config windowLimit tier" + tier + " " + raw, lower));
+                    if (lower) {
+                        riskyTiers.add(tier);
                     }
                 }
             }
         }
 
-        if (cmds.isEmpty()) {
-            this.tierDirty[tier - 1] = false; // 无实际更改：清该档未保存标记但不显示「已保存」
+        if (batch.isEmpty()) {
+            // 无实际更改：清四档未保存标记但不显示「已保存」
+            for (int i = 0; i < 4; i++) {
+                this.tierDirty[i] = false;
+            }
             return;
         }
-        if (needConfirm) {
-            showConfirm(confirmMsg);
-            this.pendingBatch = cmds; // showConfirm 会清槽位，必须在其后挂载；确认后统一派发并补 confirm
-            this.pendingBatchTier = tier;
+        if (batch.stream().anyMatch(BatchCmd::needsConfirm)) {
+            // 需二次确认的项收敛成一次弹窗，文案点明涉及哪些档位与"会当场踢人"
+            showConfirm(Component.translatable("gui.chunkplan.confirm.apply_tiers_risky", tierList(riskyTiers)));
+            this.pendingBatch = batch; // showConfirm 会清槽位，必须在其后挂载
+            this.pendingBatchAdmin = true;
         } else {
-            cmds.forEach(this::sendCommand);
-            markSaved(tier);
+            // 全为即时生效项：无需确认，直接派发
+            batch.forEach(b -> sendCommand(b.command()));
+            markAllTiersSaved();
             reconcileSuppressUntilMillis = System.currentTimeMillis() + RECONCILE_SUPPRESS_MILLIS;
         }
     }
 
-    /** 档位开关点击切换：仅改本地待应用状态，仍须点「设置」才落盘（坑 #51 起开关是 Button 非下拉） */
+    /** 档位序号列表的显示文本（如 "tier1、tier3"），用于批量确认文案 */
+    private static String tierList(List<Integer> tiers) {
+        StringBuilder sb = new StringBuilder();
+        for (int t : tiers) {
+            if (sb.length() > 0) {
+                sb.append("、");
+            }
+            sb.append("tier").append(t);
+        }
+        return sb.toString();
+    }
+
+    /** 档位开关点击切换：仅改本地待应用状态，仍须点「保存并应用」才落盘（坑 #51 起开关是 Button 非下拉） */
     private void setTierEnabled(int tier, boolean next) {
         int i = tier - 1;
         pendingEnabledSet[i] = true;
@@ -826,7 +915,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (!enable) {
             // 与档位行一致延迟派发：取消确认时不残留服务端待确认动作
             showConfirm(Component.translatable("gui.chunkplan.confirm.disable_all"));
-            this.pendingBatch = List.of("chunkplan config window all off");
+            this.pendingBatch = List.of(new BatchCmd("chunkplan config window all off", true));
             // 「全部关闭」是整批档位的动作：确认后本地待应用意图一并作废，否则界面仍显示某档
             // 「已开启」+ 红字，管理员照做会把该档又打开（F6 的坏路径）。
             // 作废动作挂在确认分支（取消确认时不该丢管理员的未保存更改）。
@@ -944,7 +1033,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         boolean zh = zh();
         String cmd = "chunkplan reset " + target + (resetTier == 0 ? "" : " " + resetTierName());
         showConfirm(Component.translatable("gui.chunkplan.confirm.reset", target, resetScopeName(zh)));
-        this.pendingBatch = List.of(cmd);
+        this.pendingBatch = List.of(new BatchCmd(cmd, true));
     }
 
     // ---------- 预设区（issue #1、#2） ----------
@@ -1024,7 +1113,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         showConfirm(summary.isEmpty()
                 ? Component.translatable("gui.chunkplan.confirm.apply_preset_nosum", name)
                 : Component.translatable("gui.chunkplan.confirm.apply_preset", name, summary));
-        this.pendingBatch = List.of("chunkplan preset apply " + name);
+        this.pendingBatch = List.of(new BatchCmd("chunkplan preset apply " + name, true));
     }
 
     /** 预设的 12 值摘要（仅预设内容，不含全局的费率/倍率/豁免）：tier1 5h/500 · tier2 24h/2000 … */
@@ -1067,7 +1156,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         return status == null || status.presetInfos() == null ? List.of() : status.presetInfos();
     }
 
-    /** 删除当前选中预设：服务端无 confirm 流，本地弹窗确认后直接派发（跳过补发 confirm） */
+    /** 删除当前选中预设：服务端无 confirm 流，本地弹窗确认后直接派发（needsConfirm=false） */
     private void deletePreset() {
         String name = currentPresetOrNull();
         if (name == null) {
@@ -1075,8 +1164,7 @@ public final class ChunkPlanGuiScreen extends Screen {
             return;
         }
         showConfirm(Component.translatable("gui.chunkplan.confirm.delete_preset", name));
-        this.pendingBatch = List.of("chunkplan preset delete " + name);
-        this.pendingSkipConfirm = true;
+        this.pendingBatch = List.of(new BatchCmd("chunkplan preset delete " + name, false));
     }
 
     /**
@@ -1090,8 +1178,8 @@ public final class ChunkPlanGuiScreen extends Screen {
      */
     private void savePreset() {
         String name = presetNameEdit.getValue().trim();
-        // 与服务端 PresetStore.NAME_PATTERN 同规则：客户端预校验防误发，服务端权威
-        if (!name.matches(PRESET_NAME_PATTERN)) {
+        // 与服务端 PresetStore.isValidName 同规则（含 default 保留字）：客户端预校验防误发，服务端权威
+        if (!name.matches(PRESET_NAME_PATTERN) || name.equalsIgnoreCase(PRESET_NAME_RESERVED)) {
             setFeedback(Component.translatable("gui.chunkplan.feedback.preset_name_invalid"), false);
             return;
         }
@@ -1161,9 +1249,9 @@ public final class ChunkPlanGuiScreen extends Screen {
                 st.pendingEnabled[i] = false;
                 st.pendingWindow[i] = null;
                 st.dirty[i] = false;
-                st.savedShown[i] = false;
                 st.savedLimit[i] = null;
             }
+            st.savedAtMillis = 0;
         }
         rebuild();
     }
@@ -1172,8 +1260,8 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     private static final int DIM_LIST_TOP = 70;
     private static final int DIM_ROW_H = 24;
-    /** 底部档位编辑器整体占高（选择器行 18 + 间隔 6 + 4 档 × 22），可视行数推导共用 */
-    private static final int DIM_EDITOR_H = 110;
+    /** 底部档位编辑器整体占高（选择器行 18 + 6 + 4 档 × 22 + 统一按钮 20 + 提示行 23 + 余量），可视行数推导共用 */
+    private static final int DIM_EDITOR_H = 152;
 
     /** 维度列表可视行数：按窗口高度自适应，为保存按钮区(32)与底部编辑器(110)、底边距(6)留位 */
     private int dimVisibleRows() {
@@ -1394,10 +1482,21 @@ public final class ChunkPlanGuiScreen extends Screen {
             dimTierLimit[i].setMaxLength(12);
             addRenderableWidget(dimTierLimit[i]);
             dimTierLimit[i].active = independent && live && effOn;
-            dimTierSet[i] = addButton(left + 224, ry, 42, 20,
-                    Component.translatable("gui.chunkplan.set"), b -> applyDimTier(dimKey, tier));
-            dimTierSet[i].active = independent && live;
         }
+        // 四档共用一个「保存并应用」（原为每行一个「设置」，用户要求合并）；非独立模式/非 live 维度禁用
+        dimSaveTierButton = addButton(left + 224, dimTierSaveY(), 80, 20,
+                Component.translatable("gui.chunkplan.save_apply"), b -> applyAllDimTiers(selectedDim));
+        dimSaveTierButton.active = independent && live;
+    }
+
+    /** 维度页档位编辑器：统一「保存并应用」按钮 y（四档行下缘 + 4；与 dimEditorTop 同实例依赖） */
+    private int dimTierSaveY() {
+        return dimEditorTop() + 114;
+    }
+
+    /** 该按钮下方的唯一提示行 y（红=未保存 / 灰=已保存），四档共用一条 */
+    private int dimTierHintY() {
+        return dimTierSaveY() + 23;
     }
 
     private Component dimModeLabel() {
@@ -1699,7 +1798,7 @@ public final class ChunkPlanGuiScreen extends Screen {
             st.pendingWindow[idx] = null;
             st.savedLimit[idx] = null;
             st.dirty[idx] = false;
-            st.savedShown[idx] = false;
+            st.savedAtMillis = 0;
             setFeedback(Component.translatable("gui.chunkplan.feedback.dim_tier_discarded", dim, tier), false);
         }
     }
@@ -1721,73 +1820,79 @@ public final class ChunkPlanGuiScreen extends Screen {
         st.dirty[i] = !typed.equals(saved);
     }
 
-    /** 维度档位行「设置」：与管理页 applyTier 同逻辑，命令换成 dimension 命令族 */
-    private void applyDimTier(String dim, int tier) {
+    /**
+     * 维度档位四档共用的「保存并应用」：与管理页 {@link #applyAllTiers()} 同逻辑，命令换成 dimension
+     * 命令族；任一档数值非法即整批中止并在面板红字指出是哪一档。
+     */
+    private void applyAllDimTiers(String dim) {
         if (!isLiveDim(dim)) {
             return; // 非 live 维度：服务端 requireLiveDim 拒绝（按钮已禁用，此处兜底）
         }
         DimTierEdit st = dimEditState(dim);
-        int i = tier - 1;
-        boolean curOn = dimTierEnabled(dim, tier);
-        boolean effOn = st.pendingEnabledSet[i] ? st.pendingEnabled[i] : curOn;
-        boolean enableChanged = st.pendingEnabledSet[i] && st.pendingEnabled[i] != curOn;
-        QuotaTiers.Tier t = dimTier(dim, tier);
-        String curWindow = t == null ? "" : t.window();
-        double curLimit = t == null ? 0 : t.limit();
-        List<String> cmds = new ArrayList<>();
-        boolean needConfirm = false;
-        Component confirmMsg = Component.empty();
         String base = "chunkplan config dimension " + dim;
+        List<BatchCmd> batch = new ArrayList<>();
+        List<Integer> riskyTiers = new ArrayList<>();
+        for (int i = 0; i < 4; i++) {
+            int tier = i + 1;
+            QuotaTiers.Tier t = dimTier(dim, tier);
+            boolean curOn = t != null && t.enabled();
+            boolean effOn = st.pendingEnabledSet[i] ? st.pendingEnabled[i] : curOn;
+            boolean enableChanged = st.pendingEnabledSet[i] && st.pendingEnabled[i] != curOn;
+            String curWindow = t == null ? "" : t.window();
+            double curLimit = t == null ? 0 : t.limit();
 
-        if (!effOn) {
-            if (enableChanged) {
-                cmds.add(base + " window tier" + tier + " off");
-                needConfirm = true;
-                confirmMsg = Component.translatable("gui.chunkplan.confirm.disable_dim_tier", dim, tier);
+            if (!effOn) {
+                if (enableChanged) {
+                    // 关闭窗口会清空该维度该窗口所有玩家记录，需二次确认
+                    batch.add(new BatchCmd(base + " window tier" + tier + " off", true));
+                    riskyTiers.add(tier);
+                }
+                continue;
             }
-        } else {
             // 开启/保持开启：先启用（服务端要求窗口开启后才能改时长/上限），再改其余项
             if (enableChanged) {
-                cmds.add(base + " window tier" + tier + " on");
+                batch.add(new BatchCmd(base + " window tier" + tier + " on", false));
             }
             String pw = st.pendingWindow[i];
             if (pw != null && !pw.equals(curWindow)) {
-                cmds.add(base + " windowTime tier" + tier + " " + pw);
+                batch.add(new BatchCmd(base + " windowTime tier" + tier + " " + pw, false));
             }
-            String raw = dimTierLimit[i].getValue().trim();
+            String raw = dimTierLimit[i] == null ? "" : dimTierLimit[i].getValue().trim();
             if (!raw.isEmpty()) {
                 NumericParser.Parsed p = NumericParser.parseLimit(raw);
                 if (!p.isOk()) {
-                    // 额度数值非法：面板红字指出非法项（原先静默跳过，管理员看不出为何没生效）
                     setFeedback(Component.translatable("gui.chunkplan.feedback.dim_limit_invalid", dim, tier,
                             numericErrorText(p)), false);
                     return;
                 }
                 if (Double.compare(p.value(), curLimit) != 0) {
-                    cmds.add(base + " windowLimit tier" + tier + " " + raw);
-                    if (p.value() < curLimit) {
-                        needConfirm = true;
-                        confirmMsg = Component.translatable("gui.chunkplan.confirm.lower_dim_tier", dim, tier);
+                    boolean lower = p.value() < curLimit;
+                    batch.add(new BatchCmd(base + " windowLimit tier" + tier + " " + raw, lower));
+                    if (lower) {
+                        riskyTiers.add(tier);
                     }
                 }
             }
         }
 
-        if (cmds.isEmpty()) {
-            st.dirty[i] = false;
+        if (batch.isEmpty()) {
+            for (int i = 0; i < 4; i++) {
+                st.dirty[i] = false; // 无实际更改：清标记但不显示「已保存」
+            }
             return;
         }
-        if (needConfirm) {
-            showConfirm(confirmMsg);
-            this.pendingBatch = cmds; // showConfirm 会清槽位，必须在其后挂载
-            this.pendingBatchTier = tier;
+        if (batch.stream().anyMatch(BatchCmd::needsConfirm)) {
+            showConfirm(Component.translatable("gui.chunkplan.confirm.apply_dim_tiers_risky",
+                    shortDim(dim), tierList(riskyTiers)));
+            this.pendingBatch = batch; // showConfirm 会清槽位，必须在其后挂载
             this.pendingBatchDim = dim;
         } else {
-            cmds.forEach(this::sendCommand);
-            st.dirty[i] = false;
-            st.savedShown[i] = true;
-            st.savedAtMillis[i] = System.currentTimeMillis();
-            // 与管理页 applyTier 对称：一次「设置」可能派发多条命令（开档 + 改窗口 + 改上限），
+            batch.forEach(b -> sendCommand(b.command()));
+            for (int i = 0; i < 4; i++) {
+                st.dirty[i] = false;
+            }
+            st.savedAtMillis = System.currentTimeMillis();
+            // 与管理页 applyAllTiers 对称：一批可能派发多条命令（开档 + 改窗口 + 改上限），
             // 服务端每条各回推一次状态；不记静默期则首条回包到达时 reconcileDimTierIntent 会把
             // 「窗口已改、额度未改」的中间态当成外部变更，丢弃本档意图并误报红字
             reconcileSuppressUntilMillis = System.currentTimeMillis() + RECONCILE_SUPPRESS_MILLIS;
@@ -1899,11 +2004,16 @@ public final class ChunkPlanGuiScreen extends Screen {
                 drawSelectBar(g, dimTierWindowRect[i][0], dimTierWindowRect[i][1], dimTierWindowRect[i][2],
                         dimTierWindowRect[i][3], Component.literal(dwin.isEmpty() ? "—" : dwin),
                         !dimTierWindowClickable[i]);
-                if (st.dirty[i]) {
-                    g.drawString(font, Component.translatable("gui.chunkplan.unsaved"), x + 320, ry + 6, COL_RED);
-                } else if (dimTierSavedVisible(st, i)) {
-                    g.drawString(font, Component.translatable("gui.chunkplan.saved"), x + 320, ry + 6, COL_GRAY);
-                }
+            }
+            // 四档共用的提示行：统一「保存并应用」按钮下方只有这一处（用户要求，原为每行一行提示）
+            int hintW = Math.max(60, width - (x + 224) - 8);
+            boolean anyDirty = st.dirty[0] || st.dirty[1] || st.dirty[2] || st.dirty[3];
+            if (anyDirty) {
+                g.drawString(font, Component.literal(font.plainSubstrByWidth(
+                                Component.translatable("gui.chunkplan.unsaved").getString(), hintW)),
+                        x + 224, dimTierHintY(), COL_RED);
+            } else if (dimTierSavedVisible(st)) {
+                g.drawString(font, Component.translatable("gui.chunkplan.saved"), x + 224, dimTierHintY(), COL_GRAY);
             }
         }
     }
@@ -1963,10 +2073,10 @@ public final class ChunkPlanGuiScreen extends Screen {
         return true;
     }
 
-    /** 维度页「已保存」灰字是否仍在显示期（与管理页同机制） */
-    private boolean dimTierSavedVisible(DimTierEdit st, int i) {
-        return st.savedShown[i]
-                && System.currentTimeMillis() - st.savedAtMillis[i] < SAVED_LINGER_MILLIS;
+    /** 维度页「已保存」灰字是否仍在显示期（与管理页同机制；该维度四档共用一条提示） */
+    private boolean dimTierSavedVisible(DimTierEdit st) {
+        return st.savedAtMillis > 0
+                && System.currentTimeMillis() - st.savedAtMillis < SAVED_LINGER_MILLIS;
     }
 
     // ---------- 真下拉（用量页维度 / 维度页编辑器 / 重定向槽位 / 档位开关与窗口，共用一套展开状态） ----------
@@ -2328,13 +2438,30 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     private void showConfirm(Component message) {
         this.pendingBatch = null; // 槽位只服务当前确认动作，防旧批残留被误派发
-        this.pendingBatchTier = 0;
+        this.pendingBatchAdmin = false;
         this.pendingBatchDim = null;
-        this.pendingSkipConfirm = false;
         this.pendingDiscardIntents = false;
         this.pendingConfirm = true;
         this.confirmText = Component.empty().append(message)
                 .append(Component.translatable("gui.chunkplan.confirm.hint"));
+    }
+
+    /**
+     * 按序派发一批命令：每条「命令 → （如需）confirm」串行提交。
+     *
+     * <p>服务端待确认动作是<b>单槽</b>（每个发起者只存一个，新动作覆盖旧的），所以一批里若有多条
+     * 需确认命令（如「关闭 tier3」+「调低 tier1 上限」），必须逐条「派发 → confirm」——一并派发会让
+     * 后一条覆盖前一条的待确认动作，界面却显示保存成功（静默丢配置）。同连接同线程按包序执行，
+     * 每条 confirm 恰好消费掉刚登记的动作，语义与单条时逐字相同。
+     */
+    private void dispatchBatch(List<BatchCmd> batch) {
+        for (BatchCmd item : batch) {
+            sendCommand(item.command());
+            if (item.needsConfirm()) {
+                sendCommand("chunkplan confirm");
+            }
+        }
+        reconcileSuppressUntilMillis = System.currentTimeMillis() + RECONCILE_SUPPRESS_MILLIS;
     }
 
     /** 用量页当前选中维度的额度数据（找不到回落 null：renderUsage 用顶层 currentDim 数据兜底） */
@@ -2525,18 +2652,11 @@ public final class ChunkPlanGuiScreen extends Screen {
                             Component.translatable("gui.chunkplan.admin_independent_hint").getString(),
                             Math.max(60, ADMIN_COL2_X - x - 8))),
                     x, 36, COL_YELLOW);
-            gy = 64; // 与 buildAdmin 的费率行位置一一对应（下同）
+            gy = ADMIN_FEE_TOP_INDEPENDENT; // 与 buildAdmin 的费率行位置一一对应（下同）
         } else {
             for (int i = 0; i < 4; i++) {
-                int ry = 36 + i * 32;
+                int ry = ADMIN_TIER_TOP + i * ADMIN_TIER_ROW_H;
                 g.drawString(font, Component.literal("tier" + (i + 1)), x, ry + 6, COL_TEXT);
-                // 每档行三态提示（行下方 2px 处，不与行内控件重叠）：
-                // 有未保存更改 → 红「未保存」；刚保存成功 → 灰「已保存」，数秒后自动消失；其余不显示
-                if (tierDirty[i]) {
-                    g.drawString(font, Component.translatable("gui.chunkplan.unsaved"), x, ry + 22, COL_RED);
-                } else if (tierSavedVisible(i)) {
-                    g.drawString(font, Component.translatable("gui.chunkplan.saved"), x, ry + 22, COL_GRAY);
-                }
                 // 窗口下拉条（开关是 Button 自绘）：常显，展开时列表浮层盖住下方行（坑 #51 浮层化）
                 QuotaTiers.Tier t = rawTier(i + 1);
                 String win = pendingWindow[i] != null ? pendingWindow[i] : (t == null ? "" : t.window());
@@ -2544,20 +2664,26 @@ public final class ChunkPlanGuiScreen extends Screen {
                         tierWindowRect[i][3], Component.literal(win.isEmpty() ? "—" : win),
                         !tierWindowClickable[i]);
             }
-            gy = 36 + 4 * 32 + 6;
-            // 分区线：档位额度线区 | 费率与重置区（独立模式下档位区隐藏，此线随之消失，
-            // 由下方补的「右列底边」单独收口预设区）
-            g.fill(0, gy - 7, width, gy - 6, COL_DIVIDER);
-            g.drawString(font, Component.translatable("gui.chunkplan.all_windows"), x, gy + 6, COL_TEXT);
-            gy += 28;
+            // 四档共用的提示行：只在「保存并应用」按钮下方有这一处（原为每档行下一行，用户要求合并）。
+            // y 落在右列预设面板底边（163）之下，故可横贯整窗而不与任何内容重叠
+            if (tiersDirty()) {
+                g.drawString(font, Component.literal(font.plainSubstrByWidth(
+                                Component.translatable("gui.chunkplan.unsaved_admin").getString(),
+                                Math.max(60, width - x - 8))),
+                        x, adminHintY(), COL_RED);
+            } else if (tierSavedVisible()) {
+                g.drawString(font, Component.translatable("gui.chunkplan.saved"), x, adminHintY(), COL_GRAY);
+            }
+            // 左列分区线：档位额度线区 | 费率与重置区（独立模式下档位区隐藏，此线随之消失）。
+            // 只画到右列左沿——右列预设面板有自成一体的底边（y=163，见下），两栏不等高故各收各的口
+            g.fill(0, adminDividerY(), ADMIN_COL2_X, adminDividerY() + 1, COL_DIVIDER);
+            g.drawString(font, Component.translatable("gui.chunkplan.all_windows"), x, adminAllRowY() + 6, COL_TEXT);
+            gy = adminFeeTop();
         }
-        // 右列（预设区）的分栏线：上起页签分隔线（y=33）、下至横分隔线（y=163），长度即右列内容的
-        // 垂直跨度，与左列横线构出右上角面板的直角。独立模式下顶部横线不画（档位区隐藏），
-        // 故此处补一段右列底边单独收口。
-        if (independent) {
-            g.fill(ADMIN_COL2_X, 163, width, 164, COL_DIVIDER);
-        }
-        g.fill(ADMIN_COL2_X, 33, ADMIN_COL2_X + 1, 164, COL_DIVIDER);
+        // 右列（预设区）面板：上起页签分隔线（y=33），下至自有的横底边（ADMIN_PRESET_BOTTOM）——
+        // 长度即右列内容的垂直跨度，与左列竖分栏线构出右上角面板的直角
+        g.fill(ADMIN_COL2_X, ADMIN_PRESET_BOTTOM, width, ADMIN_PRESET_BOTTOM + 1, COL_DIVIDER);
+        g.fill(ADMIN_COL2_X, 33, ADMIN_COL2_X + 1, ADMIN_PRESET_BOTTOM + 1, COL_DIVIDER);
         // 以下标签与 buildAdmin 的行位置一一对应（行 y + 6）
         g.drawString(font, Component.translatable("gui.chunkplan.fee_new"), x, gy + 6, COL_TEXT);
         g.drawString(font, Component.translatable("gui.chunkplan.fee_explored"), x, gy + 34, COL_TEXT);
@@ -2737,28 +2863,23 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (pendingConfirm) {
             if (inRect(event.x(), event.y(), yesX, yesY, yesW, yesH)) {
                 if (pendingBatch != null) {
-                    // 批量命令需确认：先派发（服务端据此注册待确认动作），再补 /chunkplan confirm 执行
-                    pendingBatch.forEach(this::sendCommand);
-                    reconcileSuppressUntilMillis = System.currentTimeMillis() + RECONCILE_SUPPRESS_MILLIS;
-                    if (!pendingSkipConfirm) {
-                        sendCommand("chunkplan confirm");
+                    // 批量命令需确认：按序「派发 → confirm」逐条落地（服务端待确认动作单槽，见 dispatchBatch）
+                    dispatchBatch(pendingBatch);
+                    if (pendingBatchAdmin) {
+                        markAllTiersSaved();
                     }
-                    if (pendingBatchTier > 0) {
-                        if (pendingBatchDim != null) {
-                            DimTierEdit st = dimEdits.get(pendingBatchDim); // 维度页档位编辑器发起
-                            if (st != null) {
-                                st.dirty[pendingBatchTier - 1] = false;
-                                st.savedShown[pendingBatchTier - 1] = true;
-                                st.savedAtMillis[pendingBatchTier - 1] = System.currentTimeMillis();
+                    if (pendingBatchDim != null) {
+                        DimTierEdit st = dimEdits.get(pendingBatchDim); // 维度页档位编辑器发起
+                        if (st != null) {
+                            for (int i = 0; i < 4; i++) {
+                                st.dirty[i] = false;
                             }
-                        } else {
-                            markSaved(pendingBatchTier);
+                            st.savedAtMillis = System.currentTimeMillis();
                         }
                     }
                     pendingBatch = null;
-                    pendingBatchTier = 0;
+                    pendingBatchAdmin = false;
                     pendingBatchDim = null;
-                    pendingSkipConfirm = false;
                     if (pendingDiscardIntents) {
                         // 「全部关闭」确认：整批档位动作落地，本地待应用意图一并作废（F6 坏路径）
                         pendingDiscardIntents = false;
@@ -2774,8 +2895,8 @@ public final class ChunkPlanGuiScreen extends Screen {
             if (inRect(event.x(), event.y(), noX, noY, noW, noH)) {
                 pendingConfirm = false;
                 pendingBatch = null;
+                pendingBatchAdmin = false;
                 pendingBatchDim = null;
-                pendingSkipConfirm = false;
                 pendingDiscardIntents = false; // 取消确认：保留管理员的未保存更改（不代为作废）
                 return true;
             }
@@ -2873,9 +2994,8 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (pendingConfirm && event.key() == org.lwjgl.glfw.GLFW.GLFW_KEY_ESCAPE) { // ESC 取消确认而非关闭界面
             pendingConfirm = false;
             pendingBatch = null;
-            pendingBatchTier = 0;
+            pendingBatchAdmin = false;
             pendingBatchDim = null;
-            pendingSkipConfirm = false;
             pendingDiscardIntents = false;
             return true;
         }

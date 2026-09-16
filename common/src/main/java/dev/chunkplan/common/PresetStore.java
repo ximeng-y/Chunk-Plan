@@ -32,8 +32,15 @@ public final class PresetStore {
 
     private static final Logger LOG = LoggerFactory.getLogger(PresetStore.class);
 
-    /** 预设名规则：字母/数字/下划线/连字符，1~32 字符（补全友好、跨平台文件安全） */
-    public static final Pattern NAME_PATTERN = Pattern.compile("^[A-Za-z0-9_-]{1,32}$");
+    /**
+     * 预设名规则：1~32 字符，允许中文等任意可打印字符，排除文件系统/命令/JSON 层面的危险字符
+     * ——空白与 Unicode 分隔符（命令分词）、双引号与反斜杠（Brigadier 转义）、控制与格式字符（JSON/日志）。
+     * 预设名只作 {@code presets.json} 的 JSON 键，从不参与路径拼接，"文件系统违禁字符"实际只到上述几类。
+     */
+    public static final Pattern NAME_PATTERN = Pattern.compile("^[^\\p{C}\\p{Z}\"\\\\]{1,32}$");
+
+    /** 保留名：{@code default} 是全局配置的别名（非存储条目），同名预设会被命令层遮蔽（能列出却用不了） */
+    public static final String RESERVED_NAME = "default";
 
     private static final int VERSION = 1;
 
@@ -51,12 +58,19 @@ public final class PresetStore {
     }
 
     /**
-     * 保存（或同名覆盖）预设。校验：名称规则、恰 4 档、启用档窗口在预设内且 limit 为正
+     * 名称是否合法：符合 {@link #NAME_PATTERN} 且不是保留名 {@code default}。
+     * 命令层与各端 GUI 预校验复用同一判据，避免三处规则漂移。
+     */
+    public static boolean isValidName(String name) {
+        return name != null && NAME_PATTERN.matcher(name).matches() && !RESERVED_NAME.equalsIgnoreCase(name);
+    }
+
+    /**
+     * 保存（或同名覆盖）预设。校验：名称规则（含保留名）、恰 4 档、启用档窗口在预设内且 limit 为正
      * （复用 toLines 校验，告警非空即拒绝——避免应用时静默回退）。非法返回 false 不落盘。
      */
     public synchronized boolean save(String name, List<QuotaTiers.Tier> tiers) {
-        if (name == null || !NAME_PATTERN.matcher(name).matches()
-                || tiers == null || tiers.size() != 4) {
+        if (!isValidName(name) || tiers == null || tiers.size() != 4) {
             return false;
         }
         for (QuotaTiers.Tier t : tiers) {

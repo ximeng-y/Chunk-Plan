@@ -52,10 +52,49 @@ class PresetStoreTest {
         PresetStore store = new PresetStore(tmp.resolve("presets.json"));
         assertFalse(store.save(null, tiers(true, false, false, false)));
         assertFalse(store.save("", tiers(true, false, false, false)));
-        assertFalse(store.save("含中文", tiers(true, false, false, false)));
+        // 空白（半角/全角/制表符）与 Unicode 分隔符：命令分词不安全
         assertFalse(store.save("has space", tiers(true, false, false, false)));
+        assertFalse(store.save("全角　空格", tiers(true, false, false, false)));
+        assertFalse(store.save("tab\tname", tiers(true, false, false, false)));
+        // 引号与反斜杠：Brigadier 转义字符
+        assertFalse(store.save("quo\"te", tiers(true, false, false, false)));
+        assertFalse(store.save("back\\slash", tiers(true, false, false, false)));
+        // 控制字符：JSON/日志不安全
+        assertFalse(store.save("nl\nname", tiers(true, false, false, false)));
+        assertFalse(store.save("nul\u0000name", tiers(true, false, false, false)));
+        // 超长（33 字符）
         assertFalse(store.save("a".repeat(33), tiers(true, false, false, false)));
         assertFalse(store.exists(""));
+    }
+
+    @Test
+    void saveAcceptsNonAsciiNames() {
+        Path file = tmp.resolve("presets.json");
+        PresetStore store = new PresetStore(file);
+        // 中文/日文/带音标/emoji 一律允许（预设名只作 JSON 键，不参与路径拼接）
+        assertTrue(store.save("严格模式", tiers(true, false, false, false)));
+        assertTrue(store.save("テスト", tiers(true, false, false, false)));
+        assertTrue(store.save("café-réglé", tiers(true, false, false, false)));
+        assertTrue(store.save("强力_2.0", tiers(true, false, false, false)));
+        // 落盘后重载往返（JSON UTF-8 + 命令 writeUTF 链路）
+        PresetStore store2 = new PresetStore(file);
+        assertEquals(4, store2.all().size());
+        assertTrue(store2.exists("严格模式"));
+        assertEquals(tiers(true, false, false, false), store2.get("严格模式").tiers());
+    }
+
+    @Test
+    void saveRejectsReservedDefaultNameAnyCase() {
+        PresetStore store = new PresetStore(tmp.resolve("presets.json"));
+        // default 是全局配置的别名（非存储条目），同名预设会被命令层遮蔽（能列出却 apply/delete 不了）
+        assertFalse(store.save("default", tiers(true, false, false, false)));
+        assertFalse(store.save("Default", tiers(true, false, false, false)));
+        assertFalse(store.save("DEFAULT", tiers(true, false, false, false)));
+        assertTrue(store.all().isEmpty());
+        // isValidName 是命令层/GUI 预校验的共用判据，行为一致
+        assertFalse(PresetStore.isValidName("default"));
+        assertTrue(PresetStore.isValidName("默认方案"));
+        assertFalse(PresetStore.isValidName("a b"));
     }
 
     @Test

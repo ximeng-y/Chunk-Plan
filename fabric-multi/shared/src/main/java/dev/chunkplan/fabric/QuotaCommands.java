@@ -231,12 +231,12 @@ public final class QuotaCommands {
                                         .executes(ctx -> presetSave(ctx))))
                         .then(Commands.literal("delete")
                                 .requires(s -> DevCommands.hasPermission(s, 2))
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("name", StringArgumentType.greedyString())
                                         .suggests(QuotaCommands::suggestPresetNames)
                                         .executes(ctx -> presetDelete(ctx))))
                         .then(Commands.literal("apply")
                                 .requires(s -> DevCommands.hasPermission(s, 2))
-                                .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("name", StringArgumentType.greedyString())
                                         .suggests(QuotaCommands::suggestPresetNames)
                                         .executes(ctx -> presetApply(ctx))))
                         .then(Commands.literal("player")
@@ -1443,10 +1443,10 @@ public final class QuotaCommands {
             return 0;
         }
         String name = parts[0];
-        if (!PresetStore.NAME_PATTERN.matcher(name).matches()) {
+        if (!PresetStore.isValidName(name)) {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
-                    "§c预设名只能包含字母、数字、下划线、连字符（1~32 字符）",
-                    "§cPreset name may only contain letters, digits, underscores and hyphens (1-32 chars)")));
+                    "§c预设名 1~32 字符，中文等字符均可用；不可含空格、引号、反斜杠或控制字符，也不能用保留名 default",
+                    "§cPreset names are 1-32 characters (any script); no spaces, quotes, backslashes or control characters, and \"default\" is reserved")));
             return 0;
         }
         List<QuotaTiers.Tier> raw = parts.length == 1 ? FabricConfig.readRawTiers(ChunkPlanFabric.configFile) : null;
@@ -1567,8 +1567,8 @@ public final class QuotaCommands {
             ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
             return 0;
         }
-        String name = StringArgumentType.getString(ctx, "name");
-        if (name.equals("default")) {
+        String name = StringArgumentType.getString(ctx, "name").trim();
+        if (name.equalsIgnoreCase("default")) {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
                     "default 预设即全局配置，不能删除",
                     "The default preset IS the global config and cannot be deleted")));
@@ -1597,7 +1597,7 @@ public final class QuotaCommands {
             ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
             return 0;
         }
-        String name = StringArgumentType.getString(ctx, "name");
+        String name = StringArgumentType.getString(ctx, "name").trim();
         if (eng.isIndependentMode()) {
             // 维度独立模式（issue #3，用户拍板）：预设仅保留玩家分配，apply 到全局被阻止（先于 default 别名检查）
             ctx.getSource().sendFailure(Component.literal(t(ctx,
@@ -1605,7 +1605,7 @@ public final class QuotaCommands {
                     "§cGlobal quota lines are inactive in per-dimension mode; preset apply is unavailable. Use /chunkplan preset player for per-player presets or /chunkplan config dimension for per-dimension config")));
             return 0;
         }
-        if (name.equals("default")) {
+        if (name.equalsIgnoreCase("default")) {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
                     "default 即当前全局配置，无需应用",
                     "default IS the current global config; nothing to apply")));
@@ -1671,7 +1671,7 @@ public final class QuotaCommands {
             return 1;
         }
         String presetArg = parts[1];
-        if (presetArg.equals("default")) {
+        if (presetArg.equalsIgnoreCase("default")) {
             for (GameProfile gp : targets) {
                 eng.clearPlayerPreset(gp.id());
             }
