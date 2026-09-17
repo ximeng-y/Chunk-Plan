@@ -433,10 +433,10 @@ public final class ChunkPlanGuiScreen extends Screen {
         refreshResetButton();
 
         // ---------- 预设区（issue #1、#2） ----------
-        // 右列：整块固定在 ADMIN_COL2_X 起，不随 gy 走——左列费率/重置行在独立模式下会上移 134，
+        // 右列：整块固定在 ADMIN_COL2_X 起，不随 gy 走——左列费率/重置行在独立模式下会上移，
         // 而预设区与档位开关无关（独立模式下仅「应用到全体」不建），位置不该跟着动。
-        // 行 y 固定 36/64/92/120，与左列档位四行同高，共用顶部横线（y=163）作底边，见 renderAdmin 的竖分栏线。
-        int pgy = 36;
+        // 行 y 与左列档位四行同一网格（ADMIN_TIER_TOP / ADMIN_TIER_ROW_H），面板底边见 adminPresetBottom。
+        int pgy = ADMIN_TIER_TOP;
         // 行 1：选择预设（手绘下拉条 + 真下拉）→ 应用到全体（写全局配置，需确认；独立模式下全局额度线
         // 不生效，按钮隐藏）/ 删除（本地确认，无服务端 confirm 流）
         setRect(presetSelectRect, ADMIN_COL2_X + 96, pgy, 84, 20);
@@ -446,7 +446,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         presetDeleteBtn = addButton(ADMIN_COL2_X + 258, pgy, 52, 20, Component.translatable("gui.chunkplan.preset_delete"),
                 b -> deletePreset());
-        pgy += 28;
+        pgy += ADMIN_TIER_ROW_H;
         // 行 2：把界面当前档位值保存为预设（12 值形式；名称客户端预校验，服务端权威）
         presetNameEdit = new EditBox(font, ADMIN_COL2_X + 96, pgy, 100, 20, Component.empty());
         presetNameEdit.setValue(savedPresetName != null ? savedPresetName : "");
@@ -455,7 +455,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         addRenderableWidget(presetNameEdit);
         presetSaveBtn = addButton(ADMIN_COL2_X + 202, pgy, 52, 20, Component.translatable("gui.chunkplan.preset_save"),
                 b -> savePreset());
-        pgy += 28;
+        pgy += ADMIN_TIER_ROW_H;
         // 行 3：按玩家应用（目标默认在线玩家补全）＝ 玩家名输入框 + 行内预设下拉 + 分配
         // 空框灰字提示「输入玩家名」由 renderAdmin 手绘（不用 EditBox.setHint：跨六端 API 未核实）
         presetTarget = new EditBox(font, ADMIN_COL2_X + 96, pgy, 96, 20, Component.empty());
@@ -466,7 +466,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         setRect(assignSelectRect, ADMIN_COL2_X + 198, pgy, 72, 20);
         presetAssignBtn = addButton(ADMIN_COL2_X + 276, pgy, 52, 20, Component.translatable("gui.chunkplan.preset_assign"),
                 b -> assignPreset());
-        pgy += 28;
+        pgy += ADMIN_TIER_ROW_H;
         // 行 4：放弃未保存的档位更改（仅脏状态可点；只清本地意图，不发任何命令）
         discardButton = addButton(ADMIN_COL2_X + 96, pgy, 100, 20,
                 Component.translatable("gui.chunkplan.preset_discard"), b -> discardUnsavedChanges());
@@ -615,8 +615,30 @@ public final class ChunkPlanGuiScreen extends Screen {
         return adminDividerY() + 7;
     }
 
-    /** 右列（预设区）面板底边 y：右列四行预设内容固定到 y=141，底边取 163 留一行余量 */
-    private static final int ADMIN_PRESET_BOTTOM = 163;
+    /** 右列第 4 行（放弃未保存更改）控件下缘（行内控件高 20，与左列档位行同款） */
+    private static int presetRowBottom() {
+        return ADMIN_TIER_TOP + 3 * ADMIN_TIER_ROW_H + 20;
+    }
+
+    /** 右列两行「保存为预设」说明文字 y：紧跟第 4 行控件下方 */
+    private static int presetNote1Y() {
+        return presetRowBottom() + 8;
+    }
+
+    private static int presetNote2Y() {
+        return presetRowBottom() + 20;
+    }
+
+    /**
+     * 右列（预设区）面板底边 y。共享模式下取左列分区线：两栏底边合成一条整线，竖分栏线也画到同一个 y。
+     * 独立模式下不取——左列无分区线可对齐，且左列重置区说明文字落在 y≈200，右列保留自有底边。
+     */
+    private static int adminPresetBottom(boolean independent) {
+        return independent ? ADMIN_PRESET_BOTTOM_INDEPENDENT : adminDividerY();
+    }
+
+    /** 右列面板底边的独立模式取值（落在右列内容底边 presetRowBottom() 之下留一行余量） */
+    private static final int ADMIN_PRESET_BOTTOM_INDEPENDENT = 163;
 
     private boolean tierEnabled(int tier) {
         QuotaTiers.Tier t = rawTier(tier);
@@ -2665,25 +2687,26 @@ public final class ChunkPlanGuiScreen extends Screen {
                         !tierWindowClickable[i]);
             }
             // 四档共用的提示行：只在「保存并应用」按钮下方有这一处（原为每档行下一行，用户要求合并）。
-            // y 落在右列预设面板底边（163）之下，故可横贯整窗而不与任何内容重叠
+            // 该行 y 落在右列面板内部（共享模式两栏底边同高），故按左列宽度截断，与独立模式提示同规则
             if (tiersDirty()) {
                 g.text(font, Component.literal(font.plainSubstrByWidth(
                                 Component.translatable("gui.chunkplan.unsaved_admin").getString(),
-                                Math.max(60, width - x - 8))),
+                                Math.max(60, ADMIN_COL2_X - x - 8))),
                         x, adminHintY(), COL_RED);
             } else if (tierSavedVisible()) {
                 g.text(font, Component.translatable("gui.chunkplan.saved"), x, adminHintY(), COL_GRAY);
             }
             // 左列分区线：档位额度线区 | 费率与重置区（独立模式下档位区隐藏，此线随之消失）。
-            // 只画到右列左沿——右列预设面板有自成一体的底边（y=163，见下），两栏不等高故各收各的口
+            // 只画到右列左沿——右列面板底边在共享模式下与它同高（adminPresetBottom），两段接成一条整线
             g.fill(0, adminDividerY(), ADMIN_COL2_X, adminDividerY() + 1, COL_DIVIDER);
             g.text(font, Component.translatable("gui.chunkplan.all_windows"), x, adminAllRowY() + 6, COL_TEXT);
             gy = adminFeeTop();
         }
-        // 右列（预设区）面板：上起页签分隔线（y=33），下至自有的横底边（ADMIN_PRESET_BOTTOM）——
-        // 长度即右列内容的垂直跨度，与左列竖分栏线构出右上角面板的直角
-        g.fill(ADMIN_COL2_X, ADMIN_PRESET_BOTTOM, width, ADMIN_PRESET_BOTTOM + 1, COL_DIVIDER);
-        g.fill(ADMIN_COL2_X, 33, ADMIN_COL2_X + 1, ADMIN_PRESET_BOTTOM + 1, COL_DIVIDER);
+        // 右列（预设区）面板：上起页签分隔线（y=33），下至横底边（adminPresetBottom）——共享模式下该底边
+        // 即左列分区线，两段横线接成一条整线；独立模式下左列无分区线，右列用自有底边收口
+        int presetBottom = adminPresetBottom(independent);
+        g.fill(ADMIN_COL2_X, presetBottom, width, presetBottom + 1, COL_DIVIDER);
+        g.fill(ADMIN_COL2_X, 33, ADMIN_COL2_X + 1, presetBottom + 1, COL_DIVIDER);
         // 以下标签与 buildAdmin 的行位置一一对应（行 y + 6）
         g.text(font, Component.translatable("gui.chunkplan.fee_new"), x, gy + 6, COL_TEXT);
         g.text(font, Component.translatable("gui.chunkplan.fee_explored"), x, gy + 34, COL_TEXT);
@@ -2702,18 +2725,18 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         // 目标选择器说明：重置行已排到 x=330（gy+112 起的行），行内无处安放，改画在该行正下方
         g.text(font, Component.translatable("gui.chunkplan.reset_hint"), x + 96, gy + 136, COL_GRAY);
-        // 右列（预设区）：整体固定，不随 gy 上移——左列费率/重置行在独立模式下会上移 134，
+        // 右列（预设区）：整体固定，不随 gy 上移——左列费率/重置行在独立模式下会上移，
         // 而预设区与档位开关无关（独立模式下仅「应用到全体」不建），位置不该跟着动。
-        // 行 y 固定 36/64/92/120，与左列档位四行同高，与 buildAdmin 一一对应（行 y + 6）
+        // 行 y 与 buildAdmin 一一对应（同一网格：ADMIN_TIER_TOP / ADMIN_TIER_ROW_H，行 y + 6）
         int c2x = ADMIN_COL2_X + 8;
-        int pcgy = 36;
+        int pcgy = ADMIN_TIER_TOP;
         g.text(font, Component.translatable("gui.chunkplan.preset_title"), c2x, pcgy + 6, COL_TEXT);
         // 预设选择条（手绘下拉条：与其余下拉同观感；列表为空时灰显且点不动）
         drawSelectBar(g, presetSelectRect[0], presetSelectRect[1], presetSelectRect[2], presetSelectRect[3],
                 Component.literal(selectedPresetName()), presetNames().isEmpty());
-        pcgy += 28;
+        pcgy += ADMIN_TIER_ROW_H;
         g.text(font, Component.translatable("gui.chunkplan.preset_save_label"), c2x, pcgy + 6, COL_TEXT);
-        pcgy += 28;
+        pcgy += ADMIN_TIER_ROW_H;
         g.text(font, Component.translatable("gui.chunkplan.preset_assign_label"), c2x, pcgy + 6, COL_TEXT);
         // 「按玩家应用」行：空框灰字提示（同按框宽截断）+ 该行自有的预设选择条（分配用）
         if (presetTarget != null && presetTarget.getValue().isEmpty()) {
@@ -2724,7 +2747,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         drawSelectBar(g, assignSelectRect[0], assignSelectRect[1], assignSelectRect[2], assignSelectRect[3],
                 Component.literal(assignPresetLabel()), presetNames().isEmpty());
-        pcgy += 28;
+        pcgy += ADMIN_TIER_ROW_H;
         // 脏状态门禁说明：有未保存档位更改时，预设的应用/删除/分配置灰（原因可悬停查看）；
         // 紧跟「放弃未保存更改」按钮右侧（该行右侧是唯一空位），不压任何控件；串偏长，按剩余宽截断
         if (tiersDirty()) {
@@ -2739,10 +2762,10 @@ public final class ChunkPlanGuiScreen extends Screen {
             int noteW = Math.max(60, width - c2x - 8);
             g.text(font, Component.literal(font.plainSubstrByWidth(
                             Component.translatable("gui.chunkplan.preset_from_ui").getString(), noteW)),
-                    c2x, 142, COL_GRAY);
+                    c2x, presetNote1Y(), COL_GRAY);
             g.text(font, Component.literal(font.plainSubstrByWidth(
                             Component.translatable("gui.chunkplan.preset_global_values", globalTierSummary()).getString(),
-                            noteW)), c2x, 154, COL_GRAY);
+                            noteW)), c2x, presetNote2Y(), COL_GRAY);
         }
     }
 
