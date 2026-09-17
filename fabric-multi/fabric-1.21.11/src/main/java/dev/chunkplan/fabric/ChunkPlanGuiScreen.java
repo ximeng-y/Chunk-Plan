@@ -1282,6 +1282,11 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     private static final int DIM_LIST_TOP = 70;
     private static final int DIM_ROW_H = 24;
+    /**
+     * 行末列左沿（绝对 x）：行内第三个坐标框止于 x+388，坐标合法状态点在 x+400，用量文字自 x+420 起。
+     * 行悬停明细浮层以此为界——左侧是坐标输入框，浮层在那边弹出会压住正在编辑的输入。
+     */
+    private static final int DIM_TAIL_X = 432;
     /** 底部档位编辑器整体占高（选择器行 18 + 6 + 4 档 × 22 + 统一按钮 20 + 提示行 23 + 余量），可视行数推导共用 */
     private static final int DIM_EDITOR_H = 152;
 
@@ -1969,8 +1974,9 @@ public final class ChunkPlanGuiScreen extends Screen {
             g.drawString(font, Component.literal(font.plainSubstrByWidth(shortDim(dim), 130)),
                     x + 8, ry + 6, dimBillingShown(dim) ? COL_TEXT : COL_GRAY);
             // 行末列：非 live 维度（已配置但当前未注册）标注一句让语义自明（控件已置灰）；
-            // live 维度则显示该维度当前最高占用档位用量（数据来自全体下发的 dimLines，截断不换行）
-            int tailX = x + 420;
+            // live 维度则显示该维度当前最紧的一条额度线（数据来自全体下发的 dimLines，截断不换行）——
+            // 带窗口短名前缀（30min/24h），否则会被读成"该维度上限"（坑 #65）；完整明细见悬停浮层
+            int tailX = DIM_TAIL_X;
             int tailW = Math.max(40, width - tailX - 8);
             if (!live) {
                 g.drawString(font, Component.literal(font.plainSubstrByWidth(
@@ -2040,7 +2046,13 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
     }
 
-    /** 该维度当前用量文本「1.05 / 2.00（53%）」：取占比最高的一条线；无数据返回空串 */
+    /**
+     * 该维度当前用量文本「30min 1.05 / 20.00 (53%)」：取占比最高的一条线。
+     * 任一窗口满即拒绝进入（坑 #25），故"最紧的一条"才是绑定约束；**必须带窗口短名前缀**——
+     * 只有数值时读者会把它当成"该维度上限"，而最紧的那条会随各窗口周期重置在档位间来回切换
+     * （30m 档整窗清零后旋即轮到 24h 档），看起来像上限自己在变（坑 #65）。完整明细见行悬停浮层。
+     * 无数据返回空串。
+     */
     private String dimUsageText(String dim) {
         GuiStatus.DimLines dl = dimLinesOf(dim);
         if (dl == null || dl.lines().isEmpty()) {
@@ -2058,18 +2070,97 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (worst == null) {
             return "";
         }
-        return String.format(Locale.ROOT, "%.2f / %.2f (%.0f%%)", worst.spent(), worst.limit(),
-                Math.max(0, worstPct));
+        return ChunkPlanMessages.formatWindow(worst.windowSeconds()) + " "
+                + fmtAmount(worst.spent(), worst.limit())
+                + String.format(Locale.ROOT, " (%.0f%%)", Math.max(0, worstPct));
+    }
+
+    /** 用量数值文本「1.05 / 20.00」：上限 ≥1000 时省去小数（10000 而非 10000.00，免撑破行末列） */
+    private static String fmtAmount(double spent, double limit) {
+        return limit >= 1000
+                ? String.format(Locale.ROOT, "%.0f / %.0f", spent, limit)
+                : String.format(Locale.ROOT, "%.2f / %.2f", spent, limit);
+    }
+
+    /** 单条额度的百分比配色（与用量页 drawBar/百分比渲染同口径：<50 绿 / <75 黄 / 否则红） */
+    private static int pctColor(double pct) {
+        return pct < 50 ? COL_GREEN : (pct < 75 ? COL_YELLOW : COL_RED);
     }
 
     /** 该维度用量的颜色分档（与用量页 drawBar/百分比渲染同口径） */
     private int dimUsageColor(String dim) {
         GuiStatus.DimLines dl = dimLinesOf(dim);
-        if (dl == null) {
-            return COL_GRAY;
+        return dl == null ? COL_GRAY : pctColor(dl.worstPercent());
+    }
+
+    /**
+     * 维度行悬停浮层：列出该维度**全部启用档位**的明细（行末列只放得下最紧的一条，明细在此展开）。
+     * 只在行末列的用量文字区（{@link #DIM_TAIL_X} 起）响应——左侧是坐标输入框，在那边弹出会压住
+     * 正在编辑的输入（状态点更左，落在 x+400，悬停不响应）。体例与其它悬停说明一致
+     * （黑底 + 白描边 + z 抬层，坑 #51/#52）。
+     */
+    private void renderDimUsageTip(GuiGraphics g, int mouseX, int mouseY) {
+        if (page != 2 || !isAdmin() || dimDropdownOpen || status == null || status.dimConfig() == null
+                || mouseX < DIM_TAIL_X) {
+            return;
         }
-        int wp = dl.worstPercent();
-        return wp < 50 ? COL_GREEN : (wp < 75 ? COL_YELLOW : COL_RED);
+        List<String> dims = dimensionKeys();
+        // 行视觉范围是 ry-2 .. ry+22（选中行色块自 ry-2 起），命中区与之一致
+        int firstRow = DIM_LIST_TOP - 2;
+        int lastRow = firstRow + Math.min(dims.size(), dimVisibleRows()) * DIM_ROW_H;
+        if (mouseY < firstRow || mouseY >= lastRow) {
+            return;
+        }
+        int idx = dimScroll + (mouseY - firstRow) / DIM_ROW_H;
+        if (idx < dimScroll || idx >= dims.size()) {
+            return;
+        }
+        GuiStatus.DimLines dl = dimLinesOf(dims.get(idx));
+        if (dl == null) {
+            return; // 非 live 维度无用量数据（行内已标「当前未加载」）
+        }
+        List<Component> rows = new ArrayList<>();
+        List<Integer> colors = new ArrayList<>();
+        rows.add(Component.translatable("gui.chunkplan.dim.usage_tip_title", dims.get(idx)));
+        colors.add(COL_ACCENT);
+        if (dl.lines().isEmpty()) {
+            rows.add(Component.translatable("gui.chunkplan.zero_line"));
+            colors.add(COL_GREEN);
+        }
+        for (QuotaEngine.LineStatus l : dl.lines()) {
+            double pct = l.limit() > 0 ? l.spent() / l.limit() * 100.0 : 0;
+            rows.add(Component.literal(ChunkPlanMessages.formatWindow(l.windowSeconds()) + "  "
+                    + fmtAmount(l.spent(), l.limit()) + String.format(Locale.ROOT, " (%.0f%%)", Math.max(0, pct))));
+            colors.add(pctColor(pct));
+            if (l.nextResetMillis() > 0) {
+                rows.add(Component.translatable("gui.chunkplan.next_reset",
+                        ChunkPlanMessages.formatTime(l.nextResetMillis())));
+                colors.add(COL_GRAY);
+            }
+        }
+        int w = 268;
+        List<FormattedCharSequence> lines = new ArrayList<>();
+        List<Integer> lineColors = new ArrayList<>();
+        for (int i = 0; i < rows.size(); i++) {
+            for (FormattedCharSequence seg : font.split(rows.get(i), w - 12)) {
+                lines.add(seg);
+                lineColors.add(colors.get(i));
+            }
+        }
+        int h = lines.size() * font.lineHeight + 8;
+        int bx = Math.max(4, Math.min(mouseX + 12, width - w - 4));
+        int by = Math.max(4, Math.min(mouseY + 12, height - h - 4));
+        g.nextStratum(); // 浮层置顶：新开分层（stratum）复合在既有层之上
+        g.fill(bx, by, bx + w, by + h, COL_PANEL);
+        g.fill(bx, by, bx + w, by + 1, 0xFFFFFFFF);
+        g.fill(bx, by + h - 1, bx + w, by + h, 0xFFFFFFFF);
+        g.fill(bx, by, bx + 1, by + h, 0xFFFFFFFF);
+        g.fill(bx + w - 1, by, bx + w, by + h, 0xFFFFFFFF);
+        int ty = by + 4;
+        for (int i = 0; i < lines.size(); i++) {
+            g.drawString(font, lines.get(i), bx + 6, ty, lineColors.get(i));
+            ty += font.lineHeight;
+        }
     }
 
     private GuiStatus.DimLines dimLinesOf(String dim) {
@@ -2526,6 +2617,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         renderFeedback(g);
         renderRedirectTooltip(g, mouseX, mouseY);
         renderControlHoverHint(g, mouseX, mouseY);
+        renderDimUsageTip(g, mouseX, mouseY);
         // 小窗口提醒：管理页「设置」列与维度页槽位条在 320 宽会出屏。
         // 本轮只做最低成本处理（一行红字），不做横向滚动——布局大改留待后续。
         // 注：两栏后的右列（预设区）在 GUI 宽 < 694 时会被窗口右边裁掉，本行阈值未随之提高

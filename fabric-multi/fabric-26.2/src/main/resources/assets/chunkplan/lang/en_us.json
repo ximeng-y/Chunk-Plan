@@ -43,6 +43,7 @@
   "gui.chunkplan.dim.spawn_header": "Spawn coords",
   "gui.chunkplan.dim.tier_title": "Quota lines:",
   "gui.chunkplan.dim.usage_header": "Usage",
+  "gui.chunkplan.dim.usage_tip_title": "%s quota windows",
   "gui.chunkplan.disabled": "Off",
   "gui.chunkplan.enabled": "On",
   "gui.chunkplan.exempt_admin": "[Exempt] You are an operator; quota limits do not apply",

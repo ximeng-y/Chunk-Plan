@@ -174,7 +174,7 @@ public final class ChunkPlanMessages {
         return "Within " + m + " minute" + (m > 1 ? "s" : "");
     }
 
-    /** 窗口时长简写：1m / 2h / 7d */
+    /** 窗口时长简写：30min / 2h / 7d（分钟用 min，与小时/天的单字母缩写区分开，避免把 m 读成月） */
     public static String formatWindow(long windowSeconds) {
         long m = windowSeconds / 60;
         if (m >= 1440) {
@@ -183,7 +183,7 @@ public final class ChunkPlanMessages {
         if (m >= 60) {
             return (m / 60) + "h";
         }
-        return m + "m";
+        return m + "min";
     }
 
     /** 恢复时间显示 yyyy-M-d HH:mm（系统时区） */

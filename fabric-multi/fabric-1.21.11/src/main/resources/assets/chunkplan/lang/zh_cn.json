@@ -43,6 +43,7 @@
   "gui.chunkplan.dim.spawn_header": "落地坐标",
   "gui.chunkplan.dim.tier_title": "额度线规则：",
   "gui.chunkplan.dim.usage_header": "用量",
+  "gui.chunkplan.dim.usage_tip_title": "%s 各窗口用量",
   "gui.chunkplan.disabled": "已关闭",
   "gui.chunkplan.enabled": "已开启",
   "gui.chunkplan.exempt_admin": "[豁免] 你当前是管理员，不受额度限制",
