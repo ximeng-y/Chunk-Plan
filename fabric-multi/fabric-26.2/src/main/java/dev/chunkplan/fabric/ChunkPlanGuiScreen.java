@@ -2596,6 +2596,10 @@ public final class ChunkPlanGuiScreen extends Screen {
     public void extractRenderState(GuiGraphicsExtractor g, int mouseX, int mouseY, float partialTick) {
         // 背景由渲染入口 renderWithTooltipAndSubtitles 在调用本方法前统一绘制，此处不得重复调用
         // （重复调用会让模糊后处理再次采样当前帧已画内容，出现整页模糊/幽灵重影）
+        // 控件必须先于浮层提交：1.21.11 起为分层渲染管线，GuiRenderState.findAppropriateNode 会把与已有
+        // 元素包围盒相交的新元素抬到其上方（up），而 nextStratum 只对提交在它之前的内容生效——
+        // 故 super.render 若落到方法末尾，原版 Button/EditBox 就会盖住各浮层
+        super.extractRenderState(g, mouseX, mouseY, partialTick);
         g.fill(0, 32, width, 33, 0xFF555555);
         if (isVersionMismatch()) {
             renderVersionMismatch(g);
@@ -2628,7 +2632,6 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (pendingConfirm) {
             renderConfirm(g);
         }
-        super.extractRenderState(g, mouseX, mouseY, partialTick);
     }
 
     /** 版本不匹配兜底页：协议版本不一致时服务端回版本横幅，只显示两端版本号 */
