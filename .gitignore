@@ -2,6 +2,10 @@
 HANDOFF.md
 .XMTEMP/
 
+# Agent 目录（.claude 为 .agents 的软链接）
+.agents/
+.claude/
+
 # ZCode 会话计划目录（本地维护，不纳入版本管理）
 .zcode/
 
