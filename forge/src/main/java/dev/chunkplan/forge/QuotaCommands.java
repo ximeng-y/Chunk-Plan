@@ -1481,8 +1481,8 @@ public final class QuotaCommands {
         String tail = existed ? t(ctx, "，已覆盖同名预设", ", overwriting the existing preset") : "";
         ctx.getSource().sendSuccess(() -> Component.literal(explicitValues
                 ? t(ctx,
-                        "§a已保存预设 §b" + name + "§a（来自指定 12 值，未改动全局配置）" + tail,
-                        "§aSaved preset §b" + name + "§a (from the given 12 values; the global config was not modified)" + tail)
+                        "§a已保存预设 §b" + name + "§a" + tail,
+                        "§aSaved preset §b" + name + "§a" + tail)
                 : t(ctx,
                         "§a已保存预设 §b" + name + "§a（基于当前全局配置）" + tail,
                         "§aSaved preset §b" + name + "§a (from the current global config)" + tail)), true);
@@ -1694,8 +1694,8 @@ public final class QuotaCommands {
         }
         notifyPresetTargets(ctx, targets, presetArg, zh);
         ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
-                "§a已为 " + who + " 应用预设 §b" + presetArg + "§a（额度线即时生效）",
-                "§aApplied preset §b" + presetArg + "§a to " + who + " (quota lines effective immediately)")), true);
+                "§a已为 " + who + " 应用预设 §b" + presetArg + "§a",
+                "§aApplied preset §b" + presetArg + "§a to " + who)), true);
         return 1;
     }
 
