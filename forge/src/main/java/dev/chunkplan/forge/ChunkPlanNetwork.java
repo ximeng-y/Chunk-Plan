@@ -56,12 +56,14 @@ public final class ChunkPlanNetwork {
     private ChunkPlanNetwork() {
     }
 
-    /** 在 mod 构造器（双端）调用一次，注册三类消息 */
+    /** 在 mod 构造器（双端）调用一次，注册四类消息 */
     public static void register() {
         CHANNEL.registerMessage(nextId++, GuiRequestPayload.class,
                 GuiRequestPayload::encode, GuiRequestPayload::decode, GuiRequestPayload::handle);
         CHANNEL.registerMessage(nextId++, GuiCommandPayload.class,
                 GuiCommandPayload::encode, GuiCommandPayload::decode, GuiCommandPayload::handle);
+        CHANNEL.registerMessage(nextId++, PresetPolicyPayload.class,
+                PresetPolicyPayload::encode, PresetPolicyPayload::decode, PresetPolicyPayload::handle);
         CHANNEL.registerMessage(nextId++, GuiStatusPayload.class,
                 GuiStatusPayload::encode, GuiStatusPayload::decode, GuiStatusPayload::handle);
     }
@@ -133,6 +135,36 @@ public final class ChunkPlanNetwork {
                     sendStatus(player, null);
                     return;
                 }
+                sendStatus(player, fb.toFeedback(result > 0));
+            });
+            ctx.get().setPacketHandled(true);
+        }
+    }
+
+    /** C2S：完整 policy 草稿操作（save / apply_default / assign）；policy 为 GuiStatus 编码字节。 */
+    public record PresetPolicyPayload(String action, String name, String target, byte[] policy) {
+        public static void encode(PresetPolicyPayload m, FriendlyByteBuf buf) {
+            buf.writeUtf(m.action() == null ? "" : m.action(), 32);
+            buf.writeUtf(m.name() == null ? "" : m.name(), 128);
+            buf.writeUtf(m.target() == null ? "" : m.target(), 128);
+            buf.writeByteArray(m.policy() == null ? new byte[0] : m.policy());
+        }
+
+        public static PresetPolicyPayload decode(FriendlyByteBuf buf) {
+            return new PresetPolicyPayload(
+                    buf.readUtf(32), buf.readUtf(128), buf.readUtf(128), buf.readByteArray(GuiStatus.MAX_POLICY_BYTES));
+        }
+
+        public static void handle(PresetPolicyPayload m, Supplier<NetworkEvent.Context> ctx) {
+            ctx.get().enqueueWork(() -> {
+                ServerPlayer player = ctx.get().getSender();
+                if (player == null) {
+                    return;
+                }
+                CommandSourceStack base = player.createCommandSourceStack();
+                FeedbackSource fb = new FeedbackSource(player);
+                int result = QuotaCommands.handlePresetPolicyAction(base.withSource(fb), m.action(), m.name(),
+                        m.target(), m.policy());
                 sendStatus(player, fb.toFeedback(result > 0));
             });
             ctx.get().setPacketHandled(true);

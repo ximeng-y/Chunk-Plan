@@ -68,4 +68,15 @@ public final class ChunkPlanFabricClient implements ClientModInitializer {
         }
         ClientPlayNetworking.send(new ChunkPlanNetwork.GuiCommandPayload(command));
     }
+
+    public static void sendPresetPolicy(String action, String name, String target, GuiStatus.PresetPolicy policy) {
+        if (Minecraft.getInstance().getConnection() == null) {
+            return;
+        }
+        byte[] data = GuiStatus.encodePolicy(policy);
+        if (data == null) {
+            return;
+        }
+        ClientPlayNetworking.send(new ChunkPlanNetwork.PresetPolicyPayload(action, name, target, data));
+    }
 }

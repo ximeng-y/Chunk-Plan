@@ -78,4 +78,18 @@ public final class ChunkPlanForgeClient {
         }
         ChunkPlanNetwork.CHANNEL.sendToServer(new ChunkPlanNetwork.GuiCommandPayload(command));
     }
+
+    /** 发送完整 preset policy 草稿；客户端不自行拼全局配置命令。 */
+    public static void sendPresetPolicy(String action, String name, String target,
+                                        GuiStatus.PresetPolicy policy) {
+        if (Minecraft.getInstance().getConnection() == null) {
+            return;
+        }
+        byte[] data = GuiStatus.encodePolicy(policy);
+        if (data == null) {
+            return;
+        }
+        ChunkPlanNetwork.CHANNEL.sendToServer(
+                new ChunkPlanNetwork.PresetPolicyPayload(action, name, target, data));
+    }
 }

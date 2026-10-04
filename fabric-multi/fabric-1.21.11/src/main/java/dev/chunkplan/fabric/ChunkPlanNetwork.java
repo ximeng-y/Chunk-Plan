@@ -67,6 +67,23 @@ public final class ChunkPlanNetwork {
         }
     }
 
+    /** C2S：完整 policy 草稿操作（save / apply_default / assign）；policy 为 GuiStatus 编码字节。 */
+    public record PresetPolicyPayload(String action, String name, String target, byte[] policy)
+            implements CustomPacketPayload {
+        public static final Type<PresetPolicyPayload> TYPE =
+                new Type<>(Identifier.fromNamespaceAndPath(MODID, "preset_policy"));
+        public static final StreamCodec<RegistryFriendlyByteBuf, PresetPolicyPayload> STREAM_CODEC =
+                StreamCodec.composite(ByteBufCodecs.STRING_UTF8, PresetPolicyPayload::action,
+                        ByteBufCodecs.STRING_UTF8, PresetPolicyPayload::name,
+                        ByteBufCodecs.STRING_UTF8, PresetPolicyPayload::target,
+                        ByteBufCodecs.BYTE_ARRAY, PresetPolicyPayload::policy, PresetPolicyPayload::new);
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
     public record GuiStatusPayload(byte[] status) implements CustomPacketPayload {
         public static final Type<GuiStatusPayload> TYPE =
                 new Type<>(Identifier.fromNamespaceAndPath(MODID, "gui_status"));
@@ -86,6 +103,7 @@ public final class ChunkPlanNetwork {
     public static void registerTypes() {
         PayloadTypeRegistry.playC2S().register(GuiRequestPayload.TYPE, GuiRequestPayload.STREAM_CODEC);
         PayloadTypeRegistry.playC2S().register(GuiCommandPayload.TYPE, GuiCommandPayload.STREAM_CODEC);
+        PayloadTypeRegistry.playC2S().register(PresetPolicyPayload.TYPE, PresetPolicyPayload.STREAM_CODEC);
         PayloadTypeRegistry.playS2C().register(GuiStatusPayload.TYPE, GuiStatusPayload.STREAM_CODEC);
     }
 
@@ -127,6 +145,15 @@ public final class ChunkPlanNetwork {
                     sendStatus(context.player(), null);
                     return;
                 }
+                sendStatus(context.player(), fb.toFeedback(result > 0));
+            });
+        });
+        ServerPlayNetworking.registerGlobalReceiver(PresetPolicyPayload.TYPE, (payload, context) -> {
+            context.server().execute(() -> {
+                CommandSourceStack base = context.player().createCommandSourceStack();
+                FeedbackSource fb = new FeedbackSource(context.player().commandSource());
+                int result = QuotaCommands.handlePresetPolicyAction(base.withSource(fb), payload.action(),
+                        payload.name(), payload.target(), payload.policy());
                 sendStatus(context.player(), fb.toFeedback(result > 0));
             });
         });

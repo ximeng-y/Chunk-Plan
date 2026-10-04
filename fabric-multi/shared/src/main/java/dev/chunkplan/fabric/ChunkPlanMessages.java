@@ -5,8 +5,10 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 
+import dev.chunkplan.common.GuiStatus;
 import dev.chunkplan.common.QuotaConfig;
 import dev.chunkplan.common.QuotaEngine;
+import dev.chunkplan.common.QuotaTiers;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
@@ -189,6 +191,73 @@ public final class ChunkPlanMessages {
     /** 恢复时间显示 yyyy-M-d HH:mm（系统时区） */
     public static String formatTime(long epochMillis) {
         return RECOVER_FMT.format(Instant.ofEpochMilli(epochMillis).atZone(ZoneId.systemDefault()));
+    }
+
+    /** preset info：完整显示预设模式、四档与每维度 billing/spawn/tiers/重定向。 */
+    public static String presetInfoText(String name, GuiStatus.PresetPolicy policy, boolean zh) {
+        if (policy == null) {
+            return zh ? "§c预设不存在或数据不可用" : "§cPreset does not exist or is unavailable";
+        }
+        StringBuilder sb = new StringBuilder(zh ? "§e--- ChunkPlan 预设：" : "§e--- ChunkPlan preset: ");
+        sb.append("§b").append(name).append(" §e---");
+        sb.append(zh ? "\n§f模式：§b" : "\n§fMode: §b")
+                .append(policy.independent() ? (zh ? "维度独立计费" : "independent") : (zh ? "全维度共享计费" : "shared"));
+        sb.append(zh ? "\n§f共享四档：" : "\n§fShared tiers: ").append(tiersText(policy.tiers(), zh));
+        sb.append(zh ? "\n§f耗尽传送：§b" : "\n§fRedirect on exhaust: §b")
+                .append(policy.redirectOnExhaust() ? (zh ? "开启" : "on") : (zh ? "关闭" : "off"));
+        sb.append(zh ? "\n§f传送槽：" : "\n§fRedirect slots: ").append(orderText(policy.redirectOrder(), zh));
+        if (policy.dims().isEmpty()) {
+            sb.append(zh ? "\n§7维度配置：未保存额外维度条目" : "\n§7Dimension config: no extra entries");
+        } else {
+            for (GuiStatus.PresetDim d : policy.dims()) {
+                sb.append(zh ? "\n§f维度 §b" : "\n§fDimension §b").append(d.dim());
+                sb.append(zh ? "§7：计费 " : "§7: billing ")
+                        .append(d.billing() ? (zh ? "§a开" : "§aon") : (zh ? "§c关" : "§coff"));
+                sb.append(zh ? "，落点 " : ", spawn ").append(d.hasSpawn()
+                        ? "§b(" + d.x() + ", " + d.y() + ", " + d.z() + ")"
+                        : (zh ? "§7未配置" : "§7unset"));
+                sb.append(zh ? "，tiers " : ", tiers ").append(tiersText(d.tiers(), zh));
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String tiersText(List<QuotaTiers.Tier> tiers, boolean zh) {
+        if (tiers == null || tiers.isEmpty()) {
+            return zh ? "§7无" : "§7none";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < tiers.size(); i++) {
+            QuotaTiers.Tier t = tiers.get(i);
+            if (i > 0) {
+                sb.append("§7 / ");
+            }
+            sb.append("§b").append(i + 1).append(" ");
+            if (t == null) {
+                sb.append(zh ? "§c非法" : "§cinvalid");
+            } else if (t.enabled()) {
+                sb.append("§a").append(t.window()).append("§7≤").append(t.limit());
+            } else {
+                sb.append(zh ? "§7关（" : "§7off (").append(t.window()).append("§7, ").append(t.limit()).append(")");
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String orderText(List<String> order, boolean zh) {
+        String[] names = zh
+                ? new String[]{"首选", "次选", "备选"}
+                : new String[]{"primary", "secondary", "tertiary"};
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 3; i++) {
+            if (i > 0) {
+                sb.append("§7 / ");
+            }
+            sb.append("§b").append(names[i]).append("§7=");
+            sb.append(order != null && i < order.size() && order.get(i) != null
+                    ? "§f" + order.get(i) : (zh ? "§7未配置" : "§7unset"));
+        }
+        return sb.toString();
     }
 
     /**

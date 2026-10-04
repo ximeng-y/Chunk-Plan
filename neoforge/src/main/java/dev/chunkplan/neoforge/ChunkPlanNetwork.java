@@ -80,6 +80,23 @@ public final class ChunkPlanNetwork {
         }
     }
 
+    /** C2S：完整 policy 草稿操作（save / apply_default / assign）；policy 为 GuiStatus 编码字节。 */
+    public record PresetPolicyPayload(String action, String name, String target, byte[] policy)
+            implements CustomPacketPayload {
+        public static final Type<PresetPolicyPayload> TYPE = new Type<>(
+                ResourceLocation.fromNamespaceAndPath(ChunkPlanNeoForge.MODID, "preset_policy"));
+        public static final StreamCodec<RegistryFriendlyByteBuf, PresetPolicyPayload> STREAM_CODEC =
+                StreamCodec.composite(ByteBufCodecs.STRING_UTF8, PresetPolicyPayload::action,
+                        ByteBufCodecs.STRING_UTF8, PresetPolicyPayload::name,
+                        ByteBufCodecs.STRING_UTF8, PresetPolicyPayload::target,
+                        ByteBufCodecs.BYTE_ARRAY, PresetPolicyPayload::policy, PresetPolicyPayload::new);
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
     /** S2C：编码后的 {@link GuiStatus} 字节数组 */
     public record GuiStatusPayload(byte[] status) implements CustomPacketPayload {
         public static final Type<GuiStatusPayload> TYPE =
@@ -99,6 +116,8 @@ public final class ChunkPlanNetwork {
         PayloadRegistrar registrar = event.registrar(CHANNEL_VERSION).optional();
         registrar.playToServer(GuiRequestPayload.TYPE, GuiRequestPayload.STREAM_CODEC, ChunkPlanNetwork::handleRequest);
         registrar.playToServer(GuiCommandPayload.TYPE, GuiCommandPayload.STREAM_CODEC, ChunkPlanNetwork::handleCommand);
+        registrar.playToServer(PresetPolicyPayload.TYPE, PresetPolicyPayload.STREAM_CODEC,
+                ChunkPlanNetwork::handlePresetPolicy);
         registrar.playToClient(GuiStatusPayload.TYPE, GuiStatusPayload.STREAM_CODEC, ChunkPlanNetwork::handleStatus);
     }
 
@@ -154,6 +173,20 @@ public final class ChunkPlanNetwork {
                 return;
             }
             // 成功/失败判据用 Brigadier 返回值：本 mod 命令体全部"失败 return 0、成功 return 1"
+            sendStatus(player, fb.toFeedback(result > 0));
+        });
+    }
+
+    private static void handlePresetPolicy(PresetPolicyPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> {
+            ServerPlayer player = asPlayer(context);
+            if (player == null) {
+                return;
+            }
+            CommandSourceStack base = player.createCommandSourceStack();
+            FeedbackSource fb = new FeedbackSource(player);
+            int result = QuotaCommands.handlePresetPolicyAction(
+                    base.withSource(fb), payload.action(), payload.name(), payload.target(), payload.policy());
             sendStatus(player, fb.toFeedback(result > 0));
         });
     }
