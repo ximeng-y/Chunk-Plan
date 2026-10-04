@@ -2126,10 +2126,8 @@ public final class QuotaCommands {
             org.slf4j.LoggerFactory.getLogger("ChunkPlan").warn("配置告警: {}", w);
         }
         List<QuotaTiers.Tier> rawTiers = FabricConfig.readRawTiers(configFile);
-        if (!eng.setDefaultTiers(rawTiers)) {
-            warnings.add("读取全局四档原始值失败，保留上一份 defaultTiers");
-        }
-        eng.setConfig(config);
+        // 统一入口：启用档以规范化 config 为准，禁用档保留合法原值（非法档独立回退）
+        eng.setConfig(config, rawTiers);
         // logFeeEvents 开关热切换：按新配置重建/清空扣费日志
         if (config.logFeeEvents()) {
             try {

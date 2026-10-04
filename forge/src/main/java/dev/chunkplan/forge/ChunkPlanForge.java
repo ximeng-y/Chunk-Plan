@@ -111,12 +111,10 @@ public final class ChunkPlanForge {
                         .resolve("chunkplan-server.toml");
                 Path configFile = Files.exists(serverConfigFile) ? serverConfigFile : fallbackConfig;
                 List<QuotaTiers.Tier> rawTiers = ForgeConfig.readRawTiers(configFile);
-                engine = new QuotaEngine(dataDir, config,
+                // 统一入口：构造期即按规范化 config 对齐 default 四档（禁用档保留合法原值）
+                engine = new QuotaEngine(dataDir, config, rawTiers,
                         config.logFeeEvents() ? new FeeLogFile(logFile) : null,
                         new ManagedBanStore(dataDir.resolve("chunkplan-managed-bans.json")));
-                if (!engine.setDefaultTiers(rawTiers)) {
-                    LOG.warn("全局四档原始值读取失败，default policy 将回退 active lines 快照");
-                }
                 LOG.info("ChunkPlan 引擎已初始化，数据目录: {}", dataDir);
             } catch (IOException e) {
                 LOG.error("初始化 ChunkPlan 失败", e);

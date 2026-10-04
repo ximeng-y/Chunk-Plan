@@ -16,6 +16,7 @@ import dev.chunkplan.common.FeeLogFile;
 import dev.chunkplan.common.ManagedBanStore;
 import dev.chunkplan.common.QuotaConfig;
 import dev.chunkplan.common.QuotaEngine;
+import dev.chunkplan.common.QuotaTiers;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
@@ -94,12 +95,11 @@ public final class ChunkPlanFabric implements ModInitializer {
             for (String w : warnings) {
                 LOG.warn("配置告警: {}", w);
             }
-            engine = new QuotaEngine(dataDir, config,
+            List<QuotaTiers.Tier> rawTiers = FabricConfig.readRawTiers(configFile);
+            // 统一入口：构造期即按规范化 config 对齐 default 四档（禁用档保留合法原值）
+            engine = new QuotaEngine(dataDir, config, rawTiers,
                     config.logFeeEvents() ? new FeeLogFile(logFile) : null,
                     new ManagedBanStore(dataDir.resolve("chunkplan-managed-bans.json")));
-            if (!engine.setDefaultTiers(FabricConfig.readRawTiers(configFile))) {
-                LOG.warn("全局四档原始值读取失败，default policy 将回退 active lines 快照");
-            }
             LOG.info("ChunkPlan 引擎已初始化，数据目录: {}", dataDir);
         } catch (IOException e) {
             LOG.error("初始化 ChunkPlan 失败", e);
