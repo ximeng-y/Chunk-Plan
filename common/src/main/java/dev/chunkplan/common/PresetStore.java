@@ -40,6 +40,11 @@ public final class PresetStore {
     /** 保留名：{@code default} 是全局配置的别名（非存储条目）。 */
     public static final String RESERVED_NAME = "default";
 
+    /** delete：预设不存在（兼容旧返回值）。 */
+    public static final int DELETE_NOT_FOUND = -1;
+    /** delete：删除前校验通过，但落盘失败；内存已回滚，分配关系不变。 */
+    public static final int DELETE_SAVE_FAILED = -2;
+
     private static final int VERSION = 2;
 
     /** 命名预设：policy 是其完整计费策略；tiers() 兼容只读旧调用。 */
@@ -87,8 +92,12 @@ public final class PresetStore {
             LOG.warn("预设 {} 的 policy 非法，已拒绝：{}", name, String.join("；", warnings));
             return false;
         }
+        State before = snapshotState();
         presets.put(name, new Preset(name, policy));
-        save();
+        if (!save()) {
+            restoreState(before);
+            return false;
+        }
         return true;
     }
 
@@ -123,14 +132,16 @@ public final class PresetStore {
 
     /**
      * 删除预设并解除所有指向它的分配（这些玩家回落全局 default）。
-     * 返回解除的分配数；预设不存在返回 -1。
+     * 返回解除的分配数；预设不存在返回 {@link #DELETE_NOT_FOUND}，落盘失败返回
+     * {@link #DELETE_SAVE_FAILED} 且内存状态不变。
      */
     public synchronized int delete(String name) {
         if (readOnly) {
-            return -1;
+            return DELETE_NOT_FOUND;
         }
+        State before = snapshotState();
         if (presets.remove(name) == null) {
-            return -1;
+            return DELETE_NOT_FOUND;
         }
         int unassigned = 0;
         Iterator<Map.Entry<UUID, String>> it = assignments.entrySet().iterator();
@@ -140,7 +151,10 @@ public final class PresetStore {
                 unassigned++;
             }
         }
-        save();
+        if (!save()) {
+            restoreState(before);
+            return DELETE_SAVE_FAILED;
+        }
         return unassigned;
     }
 
@@ -169,16 +183,18 @@ public final class PresetStore {
         if (readOnly) {
             return false;
         }
+        State before = snapshotState();
         if (presetName == null) {
             assignments.remove(uuid);
-            save();
-            return true;
+        } else if (!presets.containsKey(presetName)) {
+            return false;
+        } else {
+            assignments.put(uuid, presetName);
         }
-        if (!presets.containsKey(presetName)) {
+        if (!save()) {
+            restoreState(before);
             return false;
         }
-        assignments.put(uuid, presetName);
-        save();
         return true;
     }
 
@@ -265,13 +281,15 @@ public final class PresetStore {
 
         if (migrate) {
             // 关键：读/校验/转换全部完成后统一落盘一次，保留 assignments 与 .bak 语义
-            save();
+            if (!save()) {
+                LOG.error("预设库 v1 -> v2 迁移落盘失败，保留原文件，重启后将再次尝试迁移");
+            }
         }
     }
 
-    private void save() {
+    private boolean save() {
         if (readOnly) {
-            return;
+            return false;
         }
         try {
             if (file.getParent() != null) {
@@ -290,9 +308,22 @@ public final class PresetStore {
                 dto.assignments.put(e.getKey().toString(), e.getValue());
             }
             AtomicFile.write(file, GsonHolder.GSON.toJson(dto));
+            return true;
         } catch (IOException e) {
             LOG.error("写入预设库 {} 失败", file, e);
+            return false;
         }
+    }
+
+    private State snapshotState() {
+        return new State(new LinkedHashMap<>(presets), new LinkedHashMap<>(assignments));
+    }
+
+    private void restoreState(State state) {
+        presets.clear();
+        presets.putAll(state.presets);
+        assignments.clear();
+        assignments.putAll(state.assignments);
     }
 
     // ---------- JSON ----------
@@ -385,6 +416,16 @@ public final class PresetStore {
         int version = VERSION;
         Map<String, PresetDto> presets;
         Map<String, String> assignments;
+    }
+
+    private static final class State {
+        final Map<String, Preset> presets;
+        final Map<UUID, String> assignments;
+
+        State(Map<String, Preset> presets, Map<UUID, String> assignments) {
+            this.presets = presets;
+            this.assignments = assignments;
+        }
     }
 
     private static final class PresetDto {
