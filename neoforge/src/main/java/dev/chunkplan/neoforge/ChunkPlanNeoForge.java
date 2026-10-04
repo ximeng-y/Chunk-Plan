@@ -1,6 +1,7 @@
 package dev.chunkplan.neoforge;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Date;
@@ -16,6 +17,7 @@ import dev.chunkplan.common.FeeLogFile;
 import dev.chunkplan.common.ManagedBanStore;
 import dev.chunkplan.common.QuotaConfig;
 import dev.chunkplan.common.QuotaEngine;
+import dev.chunkplan.common.QuotaTiers;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
@@ -78,9 +80,17 @@ public final class ChunkPlanNeoForge {
                 for (String w : warnings) {
                     LOG.warn("配置告警: {}", w);
                 }
+                Path baseConfig = server.getServerDirectory().resolve("config").resolve("chunkplan-server.toml");
+                Path overrideConfig = server.getWorldPath(LevelResource.ROOT)
+                        .resolve("serverconfig").resolve("chunkplan-server.toml");
+                Path configFile = Files.exists(overrideConfig) ? overrideConfig : baseConfig;
+                List<QuotaTiers.Tier> rawTiers = NeoForgeConfig.readRawTiers(configFile);
                 engine = new QuotaEngine(dataDir, config,
                         config.logFeeEvents() ? new FeeLogFile(logFile) : null,
                         new ManagedBanStore(dataDir.resolve("chunkplan-managed-bans.json")));
+                if (!engine.setDefaultTiers(rawTiers)) {
+                    LOG.warn("全局四档原始值读取失败，default policy 将回退 active lines 快照");
+                }
                 LOG.info("ChunkPlan 引擎已初始化，数据目录: {}", dataDir);
             } catch (IOException e) {
                 LOG.error("初始化 ChunkPlan 失败", e);
@@ -145,7 +155,7 @@ public final class ChunkPlanNeoForge {
             }
             try {
                 UUID uuid = player.getUUID();
-                if (eng.isIndependentMode()) {
+                if (eng.isIndependentMode(uuid)) {
                     // 维度独立模式登录闸门（issue #3 拍板口径）：出生维度可进 -> 正常；
                     // 其它维度可进 -> 放行（tick 内 BAN 分支自然重定向）；全部不可进 -> ban
                     String dimKey = player.level().dimension().location().toString();
@@ -172,7 +182,7 @@ public final class ChunkPlanNeoForge {
             }
             boolean zh = ChunkPlanMessages.isChinese(player.clientInformation().language());
             boolean inList = eng.getConfig().exemptPlayers().contains(player.getUUID());
-            String dimKey = eng.isIndependentMode()
+            String dimKey = eng.isIndependentMode(player.getUUID())
                     ? player.level().dimension().location().toString() : null;
             QuotaEngine.QuotaStatus status = dimKey == null
                     ? eng.quotaStatus(player.getUUID()) : eng.quotaStatus(player.getUUID(), dimKey);
@@ -274,7 +284,7 @@ public final class ChunkPlanNeoForge {
         /** ban 公告文案：共享模式现状口径；独立模式显示触发维度 + 最早可进恢复时间（issue #3） */
         private static String banMessageFor(ServerPlayer player, long untilMillis) {
             boolean zh = ChunkPlanMessages.isChinese(player.clientInformation().language());
-            if (engine.isIndependentMode()) {
+            if (engine.isIndependentMode(player.getUUID())) {
                 String dimKey = player.level().dimension().location().toString();
                 return ChunkPlanMessages.banMessage(engine.quotaStatus(player.getUUID(), dimKey),
                         dimKey, untilMillis, zh);
@@ -289,7 +299,7 @@ public final class ChunkPlanNeoForge {
         static void applyRedirect(ServerPlayer player, String targetDim) {
             MinecraftServer server = player.server;
             String fromDim = player.level().dimension().location().toString();
-            dev.chunkplan.common.DimensionStore.SpawnPoint spawn = engine.getDimensionStore().spawn(targetDim);
+            dev.chunkplan.common.DimensionStore.SpawnPoint spawn = engine.spawn(player.getUUID(), targetDim);
             net.minecraft.server.level.ServerLevel target = server.getLevel(
                     net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.DIMENSION,
                             net.minecraft.resources.ResourceLocation.parse(targetDim)));

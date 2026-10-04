@@ -76,4 +76,20 @@ public final class ChunkPlanClient {
         }
         PacketDistributor.sendToServer(new ChunkPlanNetwork.GuiCommandPayload(command));
     }
+
+    /**
+     * 发送完整 preset policy 草稿（save/apply_default/assign）。C 端只调用本方法，
+     * 不自行拼全局配置命令；policy 编解码失败时不发包。
+     */
+    public static void sendPresetPolicy(String action, String name, String target,
+                                        GuiStatus.PresetPolicy policy) {
+        if (Minecraft.getInstance().getConnection() == null) {
+            return;
+        }
+        byte[] data = GuiStatus.encodePolicy(policy);
+        if (data == null) {
+            return;
+        }
+        PacketDistributor.sendToServer(new ChunkPlanNetwork.PresetPolicyPayload(action, name, target, data));
+    }
 }

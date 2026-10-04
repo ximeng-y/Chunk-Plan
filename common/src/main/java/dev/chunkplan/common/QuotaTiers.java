@@ -32,6 +32,15 @@ public final class QuotaTiers {
     private static final List<TierDefault> DEFAULTS =
             List.of(TIER1_DEFAULT, TIER2_DEFAULT, TIER3_DEFAULT, TIER4_DEFAULT);
 
+    /** 四档默认原始值（含禁用档），供新建 policy/初始化默认方案复用。 */
+    public static List<Tier> defaultTiers() {
+        List<Tier> out = new ArrayList<>(DEFAULTS.size());
+        for (TierDefault def : DEFAULTS) {
+            out.add(new Tier(def.enabled(), def.window(), def.limit()));
+        }
+        return List.copyOf(out);
+    }
+
     /** 指定档位的默认值（tier 1~4；越界返回第一档默认，调用方保证 tier 合法） */
     public static TierDefault defaultOf(int tier) {
         return DEFAULTS.get(Math.min(Math.max(tier, 1), 4) - 1);

@@ -5,13 +5,16 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 import org.slf4j.Logger;
@@ -56,24 +59,29 @@ public final class QuotaEngine {
      * 计费结果。用户可见文案（ban 消息等）属表现层，由壳层按玩家语言渲染，
      * 引擎只返回结构化数据（坑 #22）。alerts 为本 tick 触发的额度百分比提示
      * （跨档逐条；BAN/REDIRECT 当 tick 不发提示，公告消息已充分说明）。
-     * redirectDim 仅在 type=REDIRECT 时有意义（issue #3：维度独立模式耗尽重定向的目标维度，
-     * 落地坐标由壳层从 {@link #getDimensionStore()} 读取并执行跨维度传送）。
+     * redirectDim/redirectSpawn 仅在 type=REDIRECT 时有意义（issue #3/#14：按玩家有效 policy
+     * 解析目标与落点，壳层不得再次读取全局 {@link DimensionStore}）。
      */
-    public record TickResult(ResultType type, long banUntilMillis, List<WindowAlert> alerts, String redirectDim) {
+    public record TickResult(ResultType type, long banUntilMillis, List<WindowAlert> alerts, String redirectDim,
+                             DimensionStore.SpawnPoint redirectSpawn) {
         public static TickResult none() {
-            return new TickResult(ResultType.NONE, -1, List.of(), null);
+            return new TickResult(ResultType.NONE, -1, List.of(), null, null);
         }
 
         public static TickResult none(List<WindowAlert> alerts) {
-            return new TickResult(ResultType.NONE, -1, alerts, null);
+            return new TickResult(ResultType.NONE, -1, alerts, null, null);
         }
 
         public static TickResult ban(long untilMillis) {
-            return new TickResult(ResultType.BAN, untilMillis, List.of(), null);
+            return new TickResult(ResultType.BAN, untilMillis, List.of(), null, null);
         }
 
         public static TickResult redirect(String targetDim) {
-            return new TickResult(ResultType.REDIRECT, -1, List.of(), targetDim);
+            return new TickResult(ResultType.REDIRECT, -1, List.of(), targetDim, null);
+        }
+
+        public static TickResult redirect(String targetDim, DimensionStore.SpawnPoint spawn) {
+            return new TickResult(ResultType.REDIRECT, -1, List.of(), targetDim, spawn);
         }
     }
 
@@ -87,6 +95,24 @@ public final class QuotaEngine {
      */
     public record QuotaStatus(List<LineStatus> lines, long recoveryMillis, boolean allExceeded, WindowAlert worstAlert,
                               String presetName) {
+    }
+
+    /**
+     * 维度模式切换结果：missingDims 非空 = 坐标校验未通过；saveFailed = 校验通过但写盘失败
+     * （内存已回滚，调用方不应继续后续步骤）。
+     */
+    public record DimensionModeResult(boolean success, List<String> missingDims, boolean saveFailed) {
+        public static DimensionModeResult ok() {
+            return new DimensionModeResult(true, List.of(), false);
+        }
+
+        public static DimensionModeResult missing(List<String> dims) {
+            return new DimensionModeResult(false, dims, false);
+        }
+
+        public static DimensionModeResult saveFailure() {
+            return new DimensionModeResult(false, List.of(), true);
+        }
     }
 
     /** 提示状态键（issue #3 维度独立）：共享模式 dim 为 null（状态跟随玩家跨维度）；
@@ -112,6 +138,11 @@ public final class QuotaEngine {
     /** 触发档位表（严格按用户要求）：达到即触发；15~30 低、50~75 中、80~98 高 */
     private static final int[] ALERT_PERCENTS = {15, 30, 50, 65, 75, 80, 85, 90, 95, 98};
 
+    /** deletePreset：预设不存在。 */
+    public static final int DELETE_NOT_FOUND = PresetStore.DELETE_NOT_FOUND;
+    /** deletePreset：分配已保留、但删除预设落盘失败。 */
+    public static final int DELETE_SAVE_FAILED = PresetStore.DELETE_SAVE_FAILED;
+
     private final Path dataDir;
     private final Path playerDataDir;
     private volatile FeeLogger feeLogger;
@@ -122,11 +153,16 @@ public final class QuotaEngine {
     private final LongSupplier clock;
 
     private volatile QuotaConfig config;
+    /** 壳层 readRawTiers 提供的全局四档原始值（禁用档保留）；default policy 的唯一共享额度来源。 */
+    private volatile List<QuotaTiers.Tier> defaultTiers;
+    private volatile BillingPolicy cachedDefaultPolicy;
+    private volatile long cachedDefaultRevision = Long.MIN_VALUE;
+    private volatile List<QuotaTiers.Tier> cachedDefaultTiers;
     private final ConcurrentMap<UUID, PlayerQuotaData> dataByPlayer = new ConcurrentHashMap<>();
     private final ConcurrentMap<UUID, Tracking> tracking = new ConcurrentHashMap<>();
     private final ConcurrentMap<AlertKey, AlertState> alertStates = new ConcurrentHashMap<>();
-    /** 按玩家预设覆盖（issue #2）：uuid -> 覆盖配置（额度线来自预设，其余字段抄全局） */
-    private final ConcurrentMap<UUID, QuotaConfig> playerOverrides = new ConcurrentHashMap<>();
+    /** 按玩家有效 policy（issue #2/#14）：uuid -> 完整预设策略；未分配玩家运行时取 defaultPolicy() */
+    private final ConcurrentMap<UUID, BillingPolicy> playerPolicies = new ConcurrentHashMap<>();
 
     /**
      * @param dataDir   存档内数据根目录（如 {@code <world>/chunkplan}），壳层传
@@ -138,6 +174,18 @@ public final class QuotaEngine {
         this(dataDir, config, feeLogger, banStore, System::currentTimeMillis);
     }
 
+    /**
+     * 推荐构造入口：同时接收壳层 readRawTiers 的全局四档原始值（禁用档保留）。
+     * 旧构造保留兼容；新壳层应使用本重载，避免 default 四档反推。
+     */
+    public QuotaEngine(Path dataDir, QuotaConfig config, List<QuotaTiers.Tier> rawTiers,
+                       FeeLogger feeLogger, ManagedBanStore banStore) {
+        this(dataDir, config, feeLogger, banStore);
+        if (!setDefaultTiers(rawTiers)) {
+            LOG.warn("构造 QuotaEngine 时全局四档原始值非法，default 将回退 active lines 反推");
+        }
+    }
+
     /** 包内可见：注入时钟，供单元测试模拟时间流逝 */
     QuotaEngine(Path dataDir, QuotaConfig config, FeeLogger feeLogger, ManagedBanStore banStore, LongSupplier clock) {
         this.dataDir = dataDir;
@@ -145,13 +193,12 @@ public final class QuotaEngine {
         this.config = config;
         this.feeLogger = feeLogger;
         this.banStore = banStore;
-        // 预设库随引擎自建（issue #1：预设存储在服务端 <world>/chunkplan/presets.json），
-        // 壳层无需感知文件路径；构造即按已持久化的分配重建按玩家覆盖
-        this.presetStore = new PresetStore(dataDir.resolve("presets.json"));
         // 维度配置库随引擎自建（issue #3：<world>/chunkplan/dimensions.json），壳层零接线
         this.dimStore = new DimensionStore(dataDir.resolve("dimensions.json"));
+        // 先建维度库，再让预设库用其旧模式/维度快照完成 v1 迁移（issue #13/#14）
+        this.presetStore = new PresetStore(dataDir.resolve("presets.json"), dimStore);
         this.clock = clock;
-        rebuildAllOverrides();
+        rebuildPlayerPolicies();
     }
 
     public Path getDataDir() {
@@ -179,6 +226,11 @@ public final class QuotaEngine {
         return dimStore.isIndependent();
     }
 
+    /** 玩家当前有效 policy 是否独立模式（issue #14；与全服 default 模式解耦）。 */
+    public boolean isIndependentMode(UUID uuid) {
+        return effectivePolicy(uuid).isIndependent();
+    }
+
     public QuotaConfig getConfig() {
         return config;
     }
@@ -192,9 +244,82 @@ public final class QuotaEngine {
         if (old != null && !sameLineTiers(old.lines(), config.lines())) {
             alertStates.clear();
         }
-        // 按玩家覆盖的非额度线字段（费率/倍率/豁免等）抄自全局，全局变更须随之重建；
-        // 覆盖的额度线来自预设（与全局无关），线数不变故不影响对应玩家的提示状态
-        rebuildAllOverrides();
+        // defaultTiers 缺失时 rawDefaultTiers() 会临时从 active lines 反推，配置变更后须失效缓存
+        cachedDefaultPolicy = null;
+    }
+
+    /** 推荐热更新入口：同时接收壳层 readRawTiers 的全局四档原始值（禁用档原值保留）。 */
+    public void setConfig(QuotaConfig config, List<QuotaTiers.Tier> rawTiers) {
+        setConfig(config);
+        if (!setDefaultTiers(rawTiers)) {
+            LOG.warn("全局四档原始值非法，已保留上一份 defaultTiers");
+        }
+    }
+
+    /** 壳层 readRawTiers 设置默认四档；返回 false 表示参数非法且未改变。 */
+    public boolean setDefaultTiers(List<QuotaTiers.Tier> tiers) {
+        if (tiers == null || tiers.size() != 4) {
+            return false;
+        }
+        for (QuotaTiers.Tier t : tiers) {
+            if (t == null) {
+                return false;
+            }
+        }
+        List<String> warnings = new ArrayList<>();
+        QuotaTiers.toLines(tiers, warnings);
+        if (!warnings.isEmpty()) {
+            return false;
+        }
+        this.defaultTiers = List.copyOf(tiers);
+        this.cachedDefaultPolicy = null;
+        return true;
+    }
+
+    /** 服务器当前默认 policy（default 跟随者 + 管理页默认配置视图）。 */
+    public BillingPolicy defaultPolicy() {
+        List<QuotaTiers.Tier> tiers = rawDefaultTiers();
+        long revision = dimStore.revision();
+        BillingPolicy cached = cachedDefaultPolicy;
+        if (cached != null && cachedDefaultRevision == revision && Objects.equals(cachedDefaultTiers, tiers)) {
+            return cached;
+        }
+        BillingPolicy policy = dimStore.snapshotPolicy(tiers);
+        cachedDefaultPolicy = policy;
+        cachedDefaultRevision = revision;
+        cachedDefaultTiers = tiers;
+        return policy;
+    }
+
+    /** 命名预设 policy；不存在返回 null。 */
+    public BillingPolicy presetPolicy(String name) {
+        PresetStore.Preset preset = presetStore.get(name);
+        return preset == null ? null : preset.policy();
+    }
+
+    /** 玩家有效 policy：有分配用预设自身，否则跟随服务器 default。 */
+    public BillingPolicy effectivePolicy(UUID uuid) {
+        BillingPolicy policy = playerPolicies.get(uuid);
+        return policy != null ? policy : defaultPolicy();
+    }
+
+    private List<QuotaTiers.Tier> rawDefaultTiers() {
+        List<QuotaTiers.Tier> tiers = defaultTiers;
+        if (tiers != null) {
+            return tiers;
+        }
+        // 兼容旧壳层未调用 setDefaultTiers 的过渡路径；B 接入后不应依赖此反推。
+        return snapshotGlobalTiersFromLines();
+    }
+
+    private void rebuildPlayerPolicies() {
+        playerPolicies.clear();
+        for (Map.Entry<UUID, String> e : presetStore.assignments().entrySet()) {
+            PresetStore.Preset p = presetStore.get(e.getValue());
+            if (p != null) {
+                playerPolicies.put(e.getKey(), p.policy());
+            }
+        }
     }
 
     /** 两条额度线集合的档位序列是否一致（按顺序比较；toLines 恒按档位升序产出） */
@@ -215,67 +340,47 @@ public final class QuotaEngine {
         this.feeLogger = feeLogger;
     }
 
-    // ---------- 按玩家预设覆盖（issue #1、#2） ----------
+    // ---------- 按玩家预设覆盖（issue #1、#2、#14） ----------
 
-    /**
-     * 玩家有效配置：有预设覆盖用覆盖（额度线来自预设，费率/倍率/豁免等抄全局），否则全局配置。
-     * 引擎内所有"针对某玩家"的额度线/费率读取必须经此解析，禁止直读 {@code config}。
-     */
-    private QuotaConfig effectiveConfig(UUID uuid) {
-        QuotaConfig override = playerOverrides.get(uuid);
-        return override != null ? override : config;
-    }
-
-    /** 由预设构建覆盖配置：额度线来自预设（toLines 校验回退），其余字段抄当前全局 */
-    private QuotaConfig buildOverride(PresetStore.Preset preset) {
-        List<String> warnings = new ArrayList<>();
-        List<QuotaConfig.Line> lines = QuotaTiers.toLines(preset.tiers(), warnings);
-        for (String w : warnings) {
-            LOG.warn("预设 {} 产生额度线告警：{}", preset.name(), w);
-        }
-        QuotaConfig g = config;
-        return QuotaConfig.builder()
-                .lines(lines)
-                .firstEntryFee(g.firstEntryFee())
-                .familiarEntryFee(g.familiarEntryFee())
-                .highSpeedThreshold(g.highSpeedThreshold())
-                .highSpeedMultiplier(g.highSpeedMultiplier())
-                .exemptByDefault(g.exemptByDefault())
-                .exemptPlayers(g.exemptPlayers())
-                .saveIntervalSec(g.saveIntervalSec())
-                .banScanIntervalSec(g.banScanIntervalSec())
-                .logFeeEvents(g.logFeeEvents())
-                .build(null);
-    }
-
-    private void rebuildAllOverrides() {
-        playerOverrides.clear();
-        for (Map.Entry<UUID, String> e : presetStore.assignments().entrySet()) {
-            PresetStore.Preset p = presetStore.get(e.getValue());
-            if (p != null) {
-                playerOverrides.put(e.getKey(), buildOverride(p));
-            }
-        }
-    }
-
-    /** 给玩家应用预设（覆盖其额度线，按 UUID 持久化、离线可用）；预设不存在返回 false */
+    /** 兼容旧调用：不校验 liveDims；新代码用三参重载（独立 policy 会校验 liveDims 坐标）。 */
     public boolean setPlayerPreset(UUID uuid, String presetName) {
+        return setPlayerPresetInternal(uuid, presetName, null, false);
+    }
+
+    /** 分配 typed preset；独立 policy 必须对全部 liveDims 有合法坐标，失败不改变分配。 */
+    public boolean setPlayerPreset(UUID uuid, String presetName, List<String> liveDims) {
+        return setPlayerPresetInternal(uuid, presetName, liveDims, true);
+    }
+
+    private boolean setPlayerPresetInternal(UUID uuid, String presetName, List<String> liveDims,
+                                            boolean validateLiveDims) {
         PresetStore.Preset p = presetStore.get(presetName);
         if (p == null) {
             return false;
         }
-        presetStore.assign(uuid, presetName);
-        playerOverrides.put(uuid, buildOverride(p));
+        BillingPolicy policy = p.policy();
+        if (validateLiveDims && policy.isIndependent()) {
+            if (liveDims == null || !policy.missingSpawns(liveDims).isEmpty()) {
+                return false;
+            }
+        }
+        if (!presetStore.assign(uuid, presetName)) {
+            return false;
+        }
+        playerPolicies.put(uuid, policy);
         // 预设线数可能与全局/各维度不同：AlertState.lastLevels 按下标对齐有效线列表，须清（坑 #30 同因）
         removeAlertStates(uuid);
         return true;
     }
 
-    /** 清除玩家覆盖（回落全局 default 预设） */
-    public void clearPlayerPreset(UUID uuid) {
-        presetStore.assign(uuid, null);
-        playerOverrides.remove(uuid);
+    /** 清除玩家覆盖（回落全局 default 预设）；分配落盘失败时返回 false 且保留内存覆盖。 */
+    public boolean clearPlayerPreset(UUID uuid) {
+        if (!presetStore.assign(uuid, null)) {
+            return false;
+        }
+        playerPolicies.remove(uuid);
         removeAlertStates(uuid);
+        return true;
     }
 
     /** 玩家当前预设名；null = 跟随全局 default */
@@ -289,25 +394,128 @@ public final class QuotaEngine {
         return data.lastDim();
     }
 
-    /**
-     * 保存（或同名覆盖）预设；成功后刷新正在使用该预设的玩家覆盖（同名覆盖即改其生效值）。
-     * 校验失败（名称/档位非法）返回 false。
-     */
+    /** 兼容旧调用：保存 shared policy（维度 billing/spawn/redirect 取当前 default 快照）。 */
     public boolean savePreset(String name, List<QuotaTiers.Tier> tiers) {
-        if (!presetStore.save(name, tiers)) {
+        if (tiers == null || tiers.size() != 4) {
             return false;
         }
-        PresetStore.Preset p = presetStore.get(name);
+        BillingPolicy policy = new BillingPolicy(
+                BillingPolicy.MODE_SHARED,
+                tiers,
+                dimStore.snapshotDimensions(),
+                dimStore.redirectOnExhaust(),
+                dimStore.redirectOrder());
+        return savePresetPolicy(name, policy, null);
+    }
+
+    /**
+     * 保存完整 typed preset；成功后刷新正在使用该预设的玩家 policy（同名覆盖即改其生效值）。
+     * 独立 policy 必须对 liveDims 全部有合法坐标；校验失败返回 false。
+     */
+    public boolean savePresetPolicy(String name, BillingPolicy policy, List<String> liveDims) {
+        if (policy == null) {
+            return false;
+        }
+        List<String> warnings = policy.validate();
+        if (!warnings.isEmpty()) {
+            LOG.warn("预设 {} policy 校验失败：{}", name, String.join("；", warnings));
+            return false;
+        }
+        if (policy.isIndependent()) {
+            if (liveDims == null) {
+                return false;
+            }
+            List<String> missing = policy.missingSpawns(liveDims);
+            if (!missing.isEmpty()) {
+                LOG.warn("预设 {} 缺少 live 维度落地坐标：{}", name, String.join(", ", missing));
+                return false;
+            }
+        }
+        if (!presetStore.savePolicy(name, policy)) {
+            return false;
+        }
         for (Map.Entry<UUID, String> e : presetStore.assignments().entrySet()) {
             if (e.getValue().equals(name)) {
-                playerOverrides.put(e.getKey(), buildOverride(p));
+                playerPolicies.put(e.getKey(), policy);
                 removeAlertStates(e.getKey());
             }
         }
         return true;
     }
 
-    /** 删除预设并解除相关分配；返回解除的分配数，预设不存在返回 -1 */
+    /** 将命名预设应用到全局 default；只影响 default 跟随者，不覆盖已有个人分配。 */
+    public boolean applyPresetToDefault(String name, List<String> liveDims) {
+        BillingPolicy policy = presetPolicy(name);
+        return policy != null && applyPolicyToDefault(policy, liveDims);
+    }
+
+    /**
+     * 将完整 policy 应用到全局 default：替换维度库并同步内存共享档位。不迁移/不清玩家账本。
+     * 壳层仍负责把 {@code policy.sharedTiers()} 原子写回主配置文件；本方法先保证引擎内存一致。
+     */
+    public boolean applyPolicyToDefault(BillingPolicy policy, List<String> liveDims) {
+        if (policy == null) {
+            return false;
+        }
+        List<String> warnings = policy.validate();
+        if (!warnings.isEmpty()) {
+            LOG.warn("应用到 default 的 policy 非法：{}", String.join("；", warnings));
+            return false;
+        }
+        if (policy.isIndependent()) {
+            if (liveDims == null) {
+                return false;
+            }
+            List<String> missing = policy.missingSpawns(liveDims);
+            if (!missing.isEmpty()) {
+                LOG.warn("policy 缺少 live 维度落地坐标：{}", String.join(", ", missing));
+                return false;
+            }
+        }
+        List<String> lineWarnings = new ArrayList<>();
+        List<QuotaConfig.Line> lines = QuotaTiers.toLines(policy.sharedTiers(), lineWarnings);
+        if (!lineWarnings.isEmpty()) {
+            LOG.warn("default policy sharedTiers 转换告警：{}", String.join("；", lineWarnings));
+            return false;
+        }
+        QuotaConfig g = config;
+        QuotaConfig newConfig = QuotaConfig.builder()
+                .lines(lines)
+                .firstEntryFee(g.firstEntryFee())
+                .familiarEntryFee(g.familiarEntryFee())
+                .highSpeedThreshold(g.highSpeedThreshold())
+                .highSpeedMultiplier(g.highSpeedMultiplier())
+                .exemptByDefault(g.exemptByDefault())
+                .exemptPlayers(g.exemptPlayers())
+                .saveIntervalSec(g.saveIntervalSec())
+                .banScanIntervalSec(g.banScanIntervalSec())
+                .logFeeEvents(g.logFeeEvents())
+                .build(null);
+        // 先完成纯内存校验/构建，再写维度库；写盘失败时只回滚 default 四档缓存，config 尚未切换。
+        List<QuotaTiers.Tier> oldDefaultTiers = defaultTiers;
+        BillingPolicy oldCachedPolicy = cachedDefaultPolicy;
+        long oldCachedRevision = cachedDefaultRevision;
+        List<QuotaTiers.Tier> oldCachedTiers = cachedDefaultTiers;
+        if (!setDefaultTiers(policy.sharedTiers())) {
+            return false;
+        }
+        if (!dimStore.applyPolicy(policy)) {
+            defaultTiers = oldDefaultTiers;
+            cachedDefaultPolicy = oldCachedPolicy;
+            cachedDefaultRevision = oldCachedRevision;
+            cachedDefaultTiers = oldCachedTiers;
+            return false;
+        }
+        this.config = newConfig;
+        cachedDefaultPolicy = null;
+        alertStates.clear();
+        return true;
+    }
+
+    /**
+     * 删除预设并解除相关分配；返回解除的分配数，预设不存在返回 {@link #DELETE_NOT_FOUND}，
+     * 删除落盘失败返回 {@link #DELETE_SAVE_FAILED}，此时内存分配不变。
+     */
     public int deletePreset(String name) {
         List<UUID> affected = new ArrayList<>();
         for (Map.Entry<UUID, String> e : presetStore.assignments().entrySet()) {
@@ -316,11 +524,14 @@ public final class QuotaEngine {
             }
         }
         int unassigned = presetStore.delete(name);
-        if (unassigned < 0) {
-            return -1;
+        if (unassigned == PresetStore.DELETE_SAVE_FAILED) {
+            return DELETE_SAVE_FAILED;
+        }
+        if (unassigned == PresetStore.DELETE_NOT_FOUND) {
+            return DELETE_NOT_FOUND;
         }
         for (UUID uuid : affected) {
-            playerOverrides.remove(uuid);
+            playerPolicies.remove(uuid);
             removeAlertStates(uuid);
         }
         return unassigned;
@@ -348,7 +559,7 @@ public final class QuotaEngine {
      * 引擎只持有激活线（无原始 12 值），启用档反查窗口写法还原；禁用档取该档默认
      * （重新启用时反正要走 windowTime/windowLimit 设置）。
      */
-    private List<QuotaTiers.Tier> snapshotGlobalTiers() {
+    private List<QuotaTiers.Tier> snapshotGlobalTiersFromLines() {
         List<QuotaConfig.Line> lines = config.lines();
         List<QuotaTiers.Tier> out = new ArrayList<>(4);
         for (int tier = 1; tier <= 4; tier++) {
@@ -373,34 +584,18 @@ public final class QuotaEngine {
         return out;
     }
 
-    /** 独立模式下该玩家在该维度的有效额度线：玩家预设（跨维度）> 该维度四档配置 */
-    private List<QuotaConfig.Line> effectiveDimLines(UUID uuid, String dimKey) {
-        QuotaConfig override = playerOverrides.get(uuid);
-        if (override != null) {
-            return override.lines();
-        }
-        List<QuotaTiers.Tier> tiers = dimStore.tiers(dimKey);
-        if (tiers == null) {
-            // 未知维度（模式切换后才注册等）：用全局快照初始化，保证判满语义确定
-            tiers = snapshotGlobalTiers();
-            dimStore.ensureTiers(dimKey, tiers);
-        }
-        List<String> warnings = new ArrayList<>();
-        return QuotaTiers.toLines(tiers, warnings);
-    }
-
-    /** 该玩家在该维度的有效额度线（独立模式按维度，共享模式即全局语义）；bucketDim 返回记账桶维度（共享为 null） */
-    private List<QuotaConfig.Line> effectiveLinesFor(UUID uuid, String dimKey, boolean[] bucketDimOut) {
-        if (dimStore.isIndependent()) {
+    /** 该玩家在该维度的有效额度线（独立模式按 policy 维度，共享模式即 policy 共享语义）；bucketDim 返回记账桶维度 */
+    private List<QuotaConfig.Line> effectiveLinesFor(BillingPolicy policy, String dimKey, boolean[] bucketDimOut) {
+        if (policy.isIndependent()) {
             if (bucketDimOut != null) {
                 bucketDimOut[0] = true;
             }
-            return effectiveDimLines(uuid, dimKey);
+            return policy.linesFor(dimKey);
         }
         if (bucketDimOut != null) {
             bucketDimOut[0] = false;
         }
-        return effectiveConfig(uuid).lines();
+        return policy.sharedLines();
     }
 
     /**
@@ -409,39 +604,74 @@ public final class QuotaEngine {
      * 用当前全局 12 值初始化（快照，issue #3 拍板）。切回 shared 直接生效（维度配置保留）。
      * 成功返回空列表。共享模式全局线/预设语义不变。
      */
-    public List<String> setDimensionMode(String mode, List<String> liveDims) {
+    public DimensionModeResult setDimensionModeWithResult(String mode, List<String> liveDims) {
         if (!DimensionStore.MODE_INDEPENDENT.equals(mode)) {
-            dimStore.setMode(DimensionStore.MODE_SHARED);
-            return List.of();
+            if (!dimStore.setMode(DimensionStore.MODE_SHARED)) {
+                return DimensionModeResult.saveFailure();
+            }
+            cachedDefaultPolicy = null;
+            return DimensionModeResult.ok();
         }
         List<String> missing = dimStore.validateIndependentReady(liveDims);
         if (!missing.isEmpty()) {
-            return missing;
+            return DimensionModeResult.missing(missing);
         }
-        List<QuotaTiers.Tier> snapshot = snapshotGlobalTiers();
+        List<QuotaTiers.Tier> snapshot = rawDefaultTiers();
+        Map<String, DimensionStore.DimConfig> dims = new LinkedHashMap<>(dimStore.snapshotDimensions());
         for (String dim : liveDims) {
-            dimStore.ensureTiers(dim, snapshot);
+            DimensionStore.DimConfig d = dims.get(dim);
+            if (d == null) {
+                dims.put(dim, new DimensionStore.DimConfig(true, null, snapshot));
+            } else if (d.tiers() == null) {
+                dims.put(dim, new DimensionStore.DimConfig(d.billing(), d.spawn(), snapshot));
+            }
         }
-        dimStore.setMode(DimensionStore.MODE_INDEPENDENT);
+        BillingPolicy policy = new BillingPolicy(
+                BillingPolicy.MODE_INDEPENDENT,
+                snapshot,
+                dims,
+                dimStore.redirectOnExhaust(),
+                dimStore.redirectOrder());
+        if (!policy.validate().isEmpty() || !dimStore.applyPolicy(policy)) {
+            return DimensionModeResult.saveFailure();
+        }
         // 线结构整体切换（全局线 -> 各维度线）：提示状态全部重置，防 lastLevels 下标错位（坑 #30 同因）
         alertStates.clear();
-        return List.of();
+        cachedDefaultPolicy = null;
+        return DimensionModeResult.ok();
+    }
+
+    /** 兼容旧签名；新壳层应使用 {@link #setDimensionModeWithResult(String, List)} 区分写盘失败。 */
+    public List<String> setDimensionMode(String mode, List<String> liveDims) {
+        return setDimensionModeWithResult(mode, liveDims).missingDims();
     }
 
     /** 设置维度计费开关（两种模式都生效；关闭后该维度不计费、可自由进入，仍记已探索集合） */
-    public void setDimensionBilling(String dimKey, boolean billing) {
-        dimStore.setBilling(dimKey, billing);
+    public boolean setDimensionBilling(String dimKey, boolean billing) {
+        if (!dimStore.setBilling(dimKey, billing)) {
+            return false;
+        }
+        cachedDefaultPolicy = null;
         removeAlertStatesForDim(dimKey);
+        return true;
     }
 
     /** 设置维度落地坐标；非法（/tp 规范）返回 false 不落盘 */
     public boolean setDimensionSpawn(String dimKey, double x, double y, double z) {
-        return dimStore.setSpawn(dimKey, x, y, z);
+        boolean ok = dimStore.setSpawn(dimKey, x, y, z);
+        if (ok) {
+            cachedDefaultPolicy = null;
+        }
+        return ok;
     }
 
     /** 清空维度落地坐标（该维度转为"未配置"；独立模式下须重新配置才可作为重定向落点） */
-    public void clearDimensionSpawn(String dimKey) {
-        dimStore.clearSpawn(dimKey);
+    public boolean clearDimensionSpawn(String dimKey) {
+        if (!dimStore.clearSpawn(dimKey)) {
+            return false;
+        }
+        cachedDefaultPolicy = null;
+        return true;
     }
 
     /** 设置维度四档额度线（独立模式）；校验失败返回 false；变更后清该维度提示状态 */
@@ -449,17 +679,26 @@ public final class QuotaEngine {
         if (!dimStore.setTiers(dimKey, tiers)) {
             return false;
         }
+        cachedDefaultPolicy = null;
         removeAlertStatesForDim(dimKey);
         return true;
     }
 
-    public void setRedirectOnExhaust(boolean v) {
-        dimStore.setRedirectOnExhaust(v);
+    public boolean setRedirectOnExhaust(boolean v) {
+        if (!dimStore.setRedirectOnExhaust(v)) {
+            return false;
+        }
+        cachedDefaultPolicy = null;
+        return true;
     }
 
     /** 设置重定向槽位；返回 {@link DimensionStore.RedirectResult}，非 OK 时槽位不变（命令层据此报错） */
     public DimensionStore.RedirectResult setRedirectTarget(int slot, String dim) {
-        return dimStore.setRedirectTarget(slot, dim);
+        DimensionStore.RedirectResult result = dimStore.setRedirectTarget(slot, dim);
+        if (result == DimensionStore.RedirectResult.OK) {
+            cachedDefaultPolicy = null;
+        }
+        return result;
     }
 
     /** 豁免判定：默认 OP + 配置名单豁免；exemptByDefault=false 时全员受限 */
@@ -487,13 +726,14 @@ public final class QuotaEngine {
             removeAlertStates(uuid);
             return TickResult.none();
         }
-        boolean independent = dimStore.isIndependent();
-        // 该玩家的有效配置（有预设覆盖用覆盖，issue #2）；本 tick 全程用同一引用。
-        // 独立模式下费率/高速等仍抄全局，额度线按维度另取（issue #3）
-        QuotaConfig cfg = effectiveConfig(uuid);
-        List<QuotaConfig.Line> lines = independent ? effectiveDimLines(uuid, dimKey) : cfg.lines();
-        // 维度计费开关（issue #3，两种模式都生效）：关 = 该维度不计费、可自由进入
-        boolean billingOn = dimStore.isBillingEnabled(dimKey);
+        BillingPolicy policy = effectivePolicy(uuid);
+        boolean independent = policy.isIndependent();
+        // 费率/高速/豁免仍取自全局配置；额度线、模式、维度开关来自玩家有效 policy。
+        QuotaConfig cfg = config;
+        boolean[] bucket = new boolean[1];
+        List<QuotaConfig.Line> lines = effectiveLinesFor(policy, dimKey, bucket);
+        // 维度计费开关（issue #3/#14，两种模式都生效）：关 = 该维度不计费、可自由进入
+        boolean billingOn = policy.isBillingEnabled(dimKey);
         if (!billingOn) {
             // 该维度不计费：仍维护 tracking 与已探索集合（重新计费后熟悉费语义正确），
             // 零扣费、不判满、不提示。注意与下方"全局零线"分支的区别：这里数据照常加载
@@ -563,7 +803,7 @@ public final class QuotaEngine {
             // 已到周期的档整窗清零并重新锚定（固定周期语义，坑 #40）。
             // 独立模式记入该维度桶（dimTiers），共享模式记入全局桶（tiers）
             for (QuotaConfig.Line line : lines) {
-                if (independent) {
+                if (bucket[0]) {
                     data.expireDimIfNeeded(dimKey, line.tier(), now, line.windowSeconds());
                     data.recordDimSpend(dimKey, line.tier(), now, fee);
                 } else {
@@ -573,21 +813,22 @@ public final class QuotaEngine {
             }
 
             if (cfg.logFeeEvents() && feeLogger != null) {
-                feeLogger.logFee(uuid, dimKey, curChunk, speed, fee, totalSpent(data, dimKey, independent, now, lines));
+                feeLogger.logFee(uuid, dimKey, curChunk, speed, fee,
+                        totalSpent(data, dimKey, bucket[0], now, lines));
             }
         }
 
         // 先记账后判踢（坑 #25：任一额度线满即拒；坑 #30：每 tick 判满，原地不动也生效）
-        if (isExceeded(data, independent ? dimKey : null, now, lines)) {
+        if (isExceeded(data, bucket[0] ? dimKey : null, now, lines)) {
             if (independent) {
-                // 独立模式：重定向优先（issue #3）——还有可进维度就传送过去而非封禁
-                String target = dimStore.resolveRedirectTarget(liveDims, d -> isDimEnterable(uuid, d));
+                // 独立模式：按该玩家 policy 的快照 billing/spawn/3 槽重定向
+                String target = policy.resolveRedirectTarget(liveDims, d -> isDimEnterable(policy, uuid, d));
                 if (target != null) {
-                    return TickResult.redirect(target);
+                    return TickResult.redirect(target, policy.spawn(target));
                 }
-                if (dimStore.redirectOnExhaust()) {
+                if (policy.redirectOnExhaust()) {
                     // 重定向开启且无候选（全维度不可进）：恢复时间 = 最早有任一维度可进的时刻
-                    return TickResult.ban(earliestRecoveryAcrossDims(uuid, liveDims));
+                    return TickResult.ban(earliestRecoveryAcrossDims(policy, uuid, liveDims));
                 }
                 // 重定向关闭：本维度耗尽即封禁（其余维度可进也不放行），恢复 = 本维度周期终点
                 return TickResult.ban(recoveryMillis(data, dimKey, now, lines));
@@ -615,22 +856,30 @@ public final class QuotaEngine {
     }
 
     /**
-     * 登录兜底检查（共享模式闸门）：该玩家当前是否已有任一额度线满（自动懒加载数据）。
-     * 壳层据此拒绝登录并自行渲染 ban 文案（文案渲染在壳层，坑 #22）。
-     * 独立模式闸门用 {@link #isDimEnterable}/{@link #anyDimEnterable}（issue #3）。
+     * 登录兜底检查（共享模式闸门）：该玩家默认/预设 policy 的共享额度线是否有任一线满。
+     * 独立 policy 应使用 {@link #shouldStayBanned(UUID, List)} 或 UUID 版本可进查询。
      */
     public boolean isAllLinesExceeded(UUID uuid) {
+        BillingPolicy policy = effectivePolicy(uuid);
+        if (policy.isIndependent()) {
+            String last = lastDimOf(uuid);
+            return last != null && !isDimEnterable(policy, uuid, last);
+        }
         PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
-        return isExceeded(data, null, clock.getAsLong(), effectiveConfig(uuid).lines());
+        return isExceeded(data, null, clock.getAsLong(), policy.sharedLines());
     }
 
-    /** 该玩家在该维度是否可进（issue #3）：维度计费关闭、或该维度有效额度线未满 */
+    /** 该玩家在该维度是否可进（issue #3/#14）：按该玩家有效 policy 的 billing + 额度线。 */
     public boolean isDimEnterable(UUID uuid, String dimKey) {
-        if (!dimStore.isBillingEnabled(dimKey)) {
+        return isDimEnterable(effectivePolicy(uuid), uuid, dimKey);
+    }
+
+    private boolean isDimEnterable(BillingPolicy policy, UUID uuid, String dimKey) {
+        if (!policy.isBillingEnabled(dimKey)) {
             return true;
         }
         boolean[] bucket = new boolean[1];
-        List<QuotaConfig.Line> lines = effectiveLinesFor(uuid, dimKey, bucket);
+        List<QuotaConfig.Line> lines = effectiveLinesFor(policy, dimKey, bucket);
         if (lines.isEmpty()) {
             return true;
         }
@@ -638,20 +887,27 @@ public final class QuotaEngine {
         return !isExceeded(data, bucket[0] ? dimKey : null, clock.getAsLong(), lines);
     }
 
-    /** 任一 live 维度可进（独立模式登录闸门放行 / scanBans 解封判定） */
+    /** 任一 live 维度可进（独立 policy 登录闸门放行 / scanBans 解封判定）。 */
     public boolean anyDimEnterable(UUID uuid, List<String> liveDims) {
+        return anyDimEnterable(effectivePolicy(uuid), uuid, liveDims);
+    }
+
+    private boolean anyDimEnterable(BillingPolicy policy, UUID uuid, List<String> liveDims) {
+        if (liveDims == null) {
+            return false;
+        }
         for (String dim : liveDims) {
-            if (isDimEnterable(uuid, dim)) {
+            if (dim != null && isDimEnterable(policy, uuid, dim)) {
                 return true;
             }
         }
         return false;
     }
 
-    /** 该玩家在该维度的恢复时间（该维度各满线周期终点的最晚者；未满/零线返回 -1） */
-    private long dimRecoveryMillis(UUID uuid, String dimKey) {
+    /** 该玩家在该 policy/维度下的恢复时间（未满/零线返回 -1） */
+    private long dimRecoveryMillis(BillingPolicy policy, UUID uuid, String dimKey) {
         boolean[] bucket = new boolean[1];
-        List<QuotaConfig.Line> lines = effectiveLinesFor(uuid, dimKey, bucket);
+        List<QuotaConfig.Line> lines = effectiveLinesFor(policy, dimKey, bucket);
         if (lines.isEmpty()) {
             return -1;
         }
@@ -659,25 +915,30 @@ public final class QuotaEngine {
         return recoveryMillis(data, bucket[0] ? dimKey : null, clock.getAsLong(), lines);
     }
 
-    /**
-     * 最早可进时刻（issue #3 拍板口径）：各不可进维度的恢复时间的最小者——
-     * 任一维度到点可进即应解封（独立模式全维度耗尽封禁时，ban 公告的恢复时间）。
-     * liveDims 为空（无维度世界等退化输入）返回当前时刻，避免 ban(-1) 的无效公告。
-     *
-     * <p>"可进"按重定向落点口径（{@link #isDimRedirectable}：可进且已有落地坐标）——
-     * 无坐标的维度可进也无法承接重定向，若按它承诺"现在恢复"会生成创建即过期的 ban，
-     * 玩家重连后下 1 tick 再次被判满封禁（重连-被踢循环，公告恢复时间还显示"现在"）。
-     * 全服没有任何落地坐标时退化为全维度最早恢复（保底口径，此时重定向本就不可能）。
-     */
     public long earliestRecoveryAcrossDims(UUID uuid, List<String> liveDims) {
+        return earliestRecoveryAcrossDims(effectivePolicy(uuid), uuid, liveDims);
+    }
+
+    /**
+     * 最早可进时刻（issue #3/#14）：按该玩家 policy 的 spawn/额度线口径取最小者。
+     * liveDims 为空返回当前时刻，避免 ban(-1) 的无效公告。
+     */
+    private long earliestRecoveryAcrossDims(BillingPolicy policy, UUID uuid, List<String> liveDims) {
+        long now = clock.getAsLong();
+        if (liveDims == null) {
+            return now;
+        }
         long minRedirectable = -1;
         long minAny = -1;
         for (String dim : liveDims) {
-            boolean hasSpawn = dimStore.spawn(dim) != null;
-            if (hasSpawn && isDimEnterable(uuid, dim)) {
-                return clock.getAsLong();
+            if (dim == null) {
+                continue;
             }
-            long r = dimRecoveryMillis(uuid, dim);
+            boolean hasSpawn = policy.spawn(dim) != null;
+            if (hasSpawn && isDimEnterable(policy, uuid, dim)) {
+                return now;
+            }
+            long r = dimRecoveryMillis(policy, uuid, dim);
             if (r > 0) {
                 if (hasSpawn && (minRedirectable < 0 || r < minRedirectable)) {
                     minRedirectable = r;
@@ -688,55 +949,73 @@ public final class QuotaEngine {
             }
         }
         long t = minRedirectable >= 0 ? minRedirectable : minAny;
-        return t < 0 ? clock.getAsLong() : t;
+        return t < 0 ? now : t;
     }
 
-    /**
-     * 该维度当前能否作为重定向落点（{@link DimensionStore#resolveRedirectTarget} 的候选口径）：
-     * 可进且已有合法落地坐标。重定向开启时的封禁恢复/解封判定必须按此口径——只"可进"但无
-     * 坐标的维度无法承接传送，按它解封会让玩家重连后下 1 tick 再次被判满封禁。
-     */
-    private boolean isDimRedirectable(UUID uuid, String dimKey) {
-        return dimStore.spawn(dimKey) != null && isDimEnterable(uuid, dimKey);
+    private boolean isDimRedirectable(BillingPolicy policy, UUID uuid, String dimKey) {
+        return policy.spawn(dimKey) != null && isDimEnterable(policy, uuid, dimKey);
     }
 
-    /** scanBans/登录闸门共用：玩家是否应继续保持封禁（共享模式同现状；独立模式按拍板口径） */
+    /** scanBans/登录闸门共用：按玩家有效 policy 判断是否应继续保持封禁。 */
     public boolean shouldStayBanned(UUID uuid, List<String> liveDims) {
-        if (dimStore.isIndependent()) {
-            if (dimStore.redirectOnExhaust()) {
-                // 重定向开启时封禁只在"无可重定向维度"下发生，解封判定同口径：任一维度恢复到
-                // "可作为重定向落点"（可进且有坐标）才解封——只按"可进"解封会把玩家放进
-                // "解封→重连→下 1 tick 再被封"的循环（与 earliestRecoveryAcrossDims 同源）
-                for (String dim : liveDims) {
-                    if (isDimRedirectable(uuid, dim)) {
-                        return false;
+        BillingPolicy policy = effectivePolicy(uuid);
+        if (policy.isIndependent()) {
+            if (policy.redirectOnExhaust()) {
+                if (liveDims != null) {
+                    for (String dim : liveDims) {
+                        if (dim != null && isDimRedirectable(policy, uuid, dim)) {
+                            return false;
+                        }
                     }
                 }
                 return true;
             }
-            // 重定向关闭：按玩家最后所在维度判定（该维度恢复才解封，其余维度可进也不放行）
             PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
             String last = data.lastDim();
             if (last == null) {
-                return !anyDimEnterable(uuid, liveDims);
+                return !anyDimEnterable(policy, uuid, liveDims);
             }
-            return !isDimEnterable(uuid, last);
+            return !isDimEnterable(policy, uuid, last);
         }
         return isAllLinesExceeded(uuid);
     }
 
+    /** 该玩家该维度是否计费（按 effective policy；无条目默认 true）。 */
+    public boolean isBillingEnabled(UUID uuid, String dimKey) {
+        return effectivePolicy(uuid).isBillingEnabled(dimKey);
+    }
+
+    /** 该玩家该维度落地坐标（按 effective policy；壳层重定向不得再读全局 dimStore）。 */
+    public DimensionStore.SpawnPoint spawn(UUID uuid, String dimKey) {
+        return effectivePolicy(uuid).spawn(dimKey);
+    }
+
+    /** 该玩家 effective policy 是否开启耗尽重定向。 */
+    public boolean redirectOnExhaust(UUID uuid) {
+        return effectivePolicy(uuid).redirectOnExhaust();
+    }
+
+    /** 按该玩家 effective policy 解析重定向目标（不执行传送）。 */
+    public String resolveRedirectTarget(UUID uuid, List<String> liveDims) {
+        BillingPolicy policy = effectivePolicy(uuid);
+        return policy.resolveRedirectTarget(liveDims, d -> isDimEnterable(policy, uuid, d));
+    }
+
     /**
-     * /chunkplan check 状态（dimKey 传 null = 共享模式语义，读全局桶）。
-     * 独立模式壳层传玩家当前维度，仅展示该维度用量（issue #3）。
+     * /chunkplan check 状态（按玩家 effective policy）。
+     * 独立 policy 壳层应传玩家当前维度，仅展示该维度用量；dimKey 为 null 时回退 lastDim。
      */
     public QuotaStatus quotaStatus(UUID uuid, String dimKey) {
+        BillingPolicy policy = effectivePolicy(uuid);
         PlayerQuotaData data = dataByPlayer.computeIfAbsent(uuid, this::loadOrCreate);
         long now = clock.getAsLong();
-        boolean independent = dimStore.isIndependent() && dimKey != null;
-        List<QuotaConfig.Line> lines = independent
-                ? effectiveDimLines(uuid, dimKey)
-                : effectiveConfig(uuid).lines();
-        String bucketDim = independent ? dimKey : null;
+        boolean independent = policy.isIndependent();
+        if (independent && dimKey == null) {
+            dimKey = data.lastDim();
+        }
+        boolean dimScoped = independent && dimKey != null;
+        List<QuotaConfig.Line> lines = dimScoped ? policy.linesFor(dimKey) : policy.sharedLines();
+        String bucketDim = dimScoped ? dimKey : null;
         List<LineStatus> linesOut = new ArrayList<>();
         boolean any = false;
         WindowAlert worst = null;
@@ -790,35 +1069,20 @@ public final class QuotaEngine {
     }
 
     /**
-     * 清空某档位所有玩家的消费桶（/chunkplan config window tierN off 时调用，坑 #30）：
-     * 全局桶与各维度桶一并清；在线玩家清内存并**立即落盘**（坑 #31：scanBans 懒加载滞留的
-     * 离线玩家也在内存中，若只清内存会等 5 分钟周期保存才写盘，期间崩溃则清除丢失——QA 实测 P1）；
-     * 离线玩家逐个读文件改写落盘——保证重新开启该窗口时从 0 起。
+     * 默认配置关闭某档位时清共享/维度桶。只影响 default 跟随者；已分配 preset 的玩家
+     * 使用自身 policy 快照，不能被全服默认变更误清账（issue #14）。
      */
     public void clearTierSpendForAll(int tier) {
-        for (PlayerQuotaData data : dataByPlayer.values()) {
-            data.clearTierSpendEverywhere(tier);
-        }
-        persistAllAndRewriteOfflineFiles(data -> data.clearTierSpendEverywhere(tier));
+        clearSpendForAffected(this::isDefaultFollower, data -> data.clearTierSpendEverywhere(tier));
     }
 
     /**
-     * 清空某维度（全部档位或指定档位）所有玩家的维度消费桶（issue #3：独立模式
-     * config dimension &lt;dim&gt; window off 时调用），落盘语义同 {@link #clearTierSpendForAll(int)}。
+     * 默认配置关闭某维度档位时清维度桶，只影响 default 跟随者；已分配 preset 玩家不受影响。
      *
      * @param tiers null/空 = 该维度全部档位；否则只清指定档位
      */
     public void clearDimSpendForAll(String dimKey, Set<Integer> tiers) {
-        for (PlayerQuotaData data : dataByPlayer.values()) {
-            if (tiers == null || tiers.isEmpty()) {
-                data.clearDimSpend(dimKey);
-            } else {
-                for (int tier : tiers) {
-                    data.clearDimTierSpend(dimKey, tier);
-                }
-            }
-        }
-        persistAllAndRewriteOfflineFiles(data -> {
+        clearSpendForAffected(this::isDefaultFollower, data -> {
             if (tiers == null || tiers.isEmpty()) {
                 data.clearDimSpend(dimKey);
             } else {
@@ -829,11 +1093,24 @@ public final class QuotaEngine {
         });
     }
 
-    /** 清档落盘统一实现：在线内存立即 savePlayer；离线玩家逐个读文件改写（仅 v4 文件，坑 #31/#40 门禁同款） */
-    private void persistAllAndRewriteOfflineFiles(java.util.function.Consumer<PlayerQuotaData> clear) {
-        // 立即落盘：savePlayer 仅 dirty（确实清掉了桶）才写，无桶玩家零开销
+    private boolean isDefaultFollower(UUID uuid) {
+        return presetStore.assignment(uuid) == null;
+    }
+
+    /**
+     * 按影响范围清档：在线内存立即落盘（坑 #31），离线玩家逐个读文件改写（仅 v4 门禁）。
+     * 显式 reset 不走本方法（其语义是清指定玩家全部相关账本）。
+     */
+    private void clearSpendForAffected(Predicate<UUID> affected, java.util.function.Consumer<PlayerQuotaData> clear) {
+        for (Map.Entry<UUID, PlayerQuotaData> e : dataByPlayer.entrySet()) {
+            if (affected.test(e.getKey())) {
+                clear.accept(e.getValue());
+            }
+        }
         for (UUID uuid : dataByPlayer.keySet()) {
-            savePlayer(uuid);
+            if (affected.test(uuid)) {
+                savePlayer(uuid);
+            }
         }
         if (!Files.exists(playerDataDir)) {
             return; // 新世界尚无玩家目录（非错误状态，坑 #31）
@@ -854,6 +1131,9 @@ public final class QuotaEngine {
                 }
                 if (dataByPlayer.containsKey(uuid)) {
                     continue; // 在线玩家已在上方处理（含立即落盘）
+                }
+                if (!affected.test(uuid)) {
+                    continue; // 已分配 preset 的玩家不使用全服默认账本，跳过
                 }
                 PlayerQuotaData.Dto dto = AtomicFile.readJson(file, PlayerQuotaData.Dto.class,
                         "玩家 " + uuid + " 配额数据", LOG);
@@ -1010,7 +1290,7 @@ public final class QuotaEngine {
     private long recoveryMillis(PlayerQuotaData data, String bucketDim, long nowMillis, List<QuotaConfig.Line> lines) {
         long worst = -1;
         for (QuotaConfig.Line line : lines) {
-            if (effectiveSpentOf(data, bucketDim, line, clock.getAsLong()) <= line.limit()) {
+            if (effectiveSpentOf(data, bucketDim, line, nowMillis) <= line.limit()) {
                 continue;
             }
             long start = cycleStartOf(data, bucketDim, line);
