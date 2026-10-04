@@ -59,6 +59,8 @@ public final class DimensionStore {
     /** 3 个固定槽（0=首选 1=次选 2=备选），元素可为 null（空槽跳过） */
     private final List<String> redirectOrder = new ArrayList<>(java.util.Arrays.asList(null, null, null));
     private final Map<String, DimConfig> dims = new LinkedHashMap<>();
+    /** 配置版本（每次写盘/加载递增）；引擎用它判断 defaultPolicy 缓存是否失效 */
+    private long revision;
 
     public DimensionStore(Path file) {
         this.file = file;
@@ -110,6 +112,73 @@ public final class DimensionStore {
             return null;
         }
         return redirectOrder.get(slot);
+    }
+
+    /** 维度配置深拷贝快照（含 billing/spawn/4 档；只读，供 policy 快照/迁移使用）。 */
+    public synchronized Map<String, DimConfig> snapshotDimensions() {
+        Map<String, DimConfig> out = new LinkedHashMap<>();
+        for (Map.Entry<String, DimConfig> e : dims.entrySet()) {
+            out.put(e.getKey(), copyDim(e.getValue()));
+        }
+        return Collections.unmodifiableMap(out);
+    }
+
+    /** 以当前全服 mode/redirect/维度配置 + 指定共享四档生成 policy 快照（default / 旧 API 保存用）。 */
+    public synchronized BillingPolicy snapshotPolicy(List<QuotaTiers.Tier> sharedTiers) {
+        return new BillingPolicy(mode, sharedTiers, snapshotDimensions(), redirectOnExhaust, redirectOrder());
+    }
+
+    /**
+     * v1 预设迁移专用：mode/redirect/billing/spawn/order 取当前全服值；独立模式下
+     * 每个维度的 tiers 替换为该旧预设的四档。shared 模式保留当前维度快照。
+     */
+    public synchronized BillingPolicy legacyPolicy(List<QuotaTiers.Tier> legacyTiers) {
+        Map<String, DimConfig> copy = snapshotDimensions();
+        if (MODE_INDEPENDENT.equals(mode)) {
+            Map<String, DimConfig> replaced = new LinkedHashMap<>();
+            for (Map.Entry<String, DimConfig> e : copy.entrySet()) {
+                DimConfig d = e.getValue();
+                replaced.put(e.getKey(), d == null
+                        ? null
+                        : new DimConfig(d.billing(), d.spawn(), copyTiers(legacyTiers)));
+            }
+            copy = Collections.unmodifiableMap(replaced);
+        }
+        return new BillingPolicy(mode, legacyTiers, copy, redirectOnExhaust, redirectOrder());
+    }
+
+    /**
+     * 用完整 policy 替换全服默认维度配置（一次落盘）。调用方须已完成 liveDims 等业务校验；
+     * 本方法只拒绝结构性非法（非法 mode/空维度 key/null DimConfig）。
+     */
+    public synchronized boolean applyPolicy(BillingPolicy policy) {
+        if (policy == null
+                || (!MODE_SHARED.equals(policy.mode()) && !MODE_INDEPENDENT.equals(policy.mode()))) {
+            return false;
+        }
+        Map<String, DimConfig> newDims = new LinkedHashMap<>();
+        for (Map.Entry<String, DimConfig> e : policy.dimensions().entrySet()) {
+            String key = e.getKey();
+            DimConfig d = e.getValue();
+            if (key == null || key.isEmpty() || d == null) {
+                return false;
+            }
+            newDims.put(key, copyDim(d));
+        }
+        mode = policy.mode();
+        redirectOnExhaust = policy.redirectOnExhaust();
+        List<String> order = policy.redirectOrder();
+        for (int i = 0; i < redirectOrder.size(); i++) {
+            redirectOrder.set(i, order != null && i < order.size() ? order.get(i) : null);
+        }
+        dims.clear();
+        dims.putAll(newDims);
+        save();
+        return true;
+    }
+
+    public synchronized long revision() {
+        return revision;
     }
 
     /**
@@ -302,6 +371,7 @@ public final class DimensionStore {
         if (dto == null) {
             return;
         }
+        revision++;
         if (dto.version != VERSION) {
             LOG.warn("维度配置库版本不兼容（{}），将忽略现有内容", dto.version);
             return;
@@ -365,6 +435,7 @@ public final class DimensionStore {
     }
 
     private void save() {
+        revision++;
         try {
             if (file.getParent() != null) {
                 Files.createDirectories(file.getParent());
@@ -389,6 +460,16 @@ public final class DimensionStore {
         } catch (IOException e) {
             LOG.error("写入维度配置库 {} 失败", file, e);
         }
+    }
+
+    private static DimConfig copyDim(DimConfig d) {
+        return d == null ? null : new DimConfig(d.billing(), d.spawn(), copyTiers(d.tiers()));
+    }
+
+    private static List<QuotaTiers.Tier> copyTiers(List<QuotaTiers.Tier> tiers) {
+        // 不使用 List.copyOf：BillingPolicy/DimensionStore 的 4 档在损坏数据中可能含 null，
+        // 保留原值供校验层拒绝，而不是在快照时抛 NPE。
+        return tiers == null ? null : Collections.unmodifiableList(new ArrayList<>(tiers));
     }
 
     private static final class Dto {
