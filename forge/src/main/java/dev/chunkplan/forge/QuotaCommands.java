@@ -1584,8 +1584,8 @@ public final class QuotaCommands {
                     .filter(e -> cleanName.equals(e.getValue())).count();
             if (!eng.savePresetPolicy(cleanName, policy, liveDims(source))) {
                 source.sendFailure(Component.literal(zh
-                        ? "§c预设保存失败（模式/档位/落点校验未通过，详见服务端日志）"
-                        : "§cFailed to save preset (mode/tier/spawn validation failed; see server log)"));
+                        ? "§c预设保存失败，未保存；详见服务端日志"
+                        : "§cFailed to save the preset; it was not saved; see server log"));
                 return 0;
             }
             String tail = existed
@@ -1594,11 +1594,30 @@ public final class QuotaCommands {
                     + " assigned player(s) now use the new policy")
                     : "";
             source.sendSuccess(() -> Component.literal(zh
-                    ? "§a已保存预设 §b" + cleanName + "§a（仅保存，未应用）" + tail
-                    : "§aSaved preset §b" + cleanName + "§a (saved only; not applied)" + tail), true);
+                    ? "§a已保存预设 §b" + cleanName + "§a（仅保存，未应用到全局默认）" + tail
+                    : "§aSaved preset §b" + cleanName + "§a (saved only; not applied to the default)" + tail), true);
             return 1;
         }
         if (GuiStatus.POLICY_ACTION_APPLY_DEFAULT.equals(action)) {
+            // GUI 可直接把未保存的整套草稿应用到全局默认；命令侧仍按已保存预设名应用
+            if (policyBytes != null && policyBytes.length > 0) {
+                GuiStatus.PresetPolicy wire = GuiStatus.decodePolicy(policyBytes);
+                if (wire == null) {
+                    source.sendFailure(Component.literal(zh
+                            ? "§c预设草稿数据无效或过大" : "§cPreset draft data is invalid or too large"));
+                    return 0;
+                }
+                BillingPolicy draft;
+                try {
+                    draft = wire.toBillingPolicy();
+                } catch (RuntimeException e) {
+                    source.sendFailure(Component.literal(zh
+                            ? "§c预设草稿结构非法" : "§cPreset draft structure is invalid"));
+                    return 0;
+                }
+                // 不隐式保存，也不覆盖同名命名预设：只把该草稿应用到全局默认
+                return applyPolicyToDefault(source, eng, draft, zh);
+            }
             if (!PresetStore.isValidName(cleanName)) {
                 source.sendFailure(Component.literal(zh
                         ? "§cdefault 是当前全局配置本身，不能作为命名预设应用"
@@ -1795,13 +1814,13 @@ public final class QuotaCommands {
                 "§a将把预设 §b" + name + "§a（"
                         + (view != null && view.independent() ? (zh ? "维度独立" : "independent")
                         : (zh ? "全维度共享" : "shared")) + "，"
-                        + tiersSummary(p.tiers(), zh) + "）设为服务器默认方案，只对 default 跟随者生效，"
+                        + policyTiersSummary(p.policy(), zh) + "）设为服务器默认方案，只对 default 跟随者生效，"
                         + "不覆盖已有个人预设分配；"
                         + "被关闭的档位不会清空玩家已消费记录，重新开启后若仍在窗口内将继承原有消费；"
                         + "调整后可能在下一 tick 使超限玩家被当场踢出/传送，",
                 "§aThis will make preset §b" + name + "§a ("
                         + (view != null && view.independent() ? "independent" : "shared") + ", "
-                        + tiersSummary(p.tiers(), zh) + ") the server default; only default followers are affected, "
+                        + policyTiersSummary(p.policy(), zh) + ") the server default; only default followers are affected, "
                         + "existing personal assignments are kept; disabling a tier does NOT clear players' spent records, and "
                         + "re-enabling it inherits the spend while the cycle is still inside its window; players over "
                         + "the limit may be kicked/teleported on the next tick, "))
@@ -1928,6 +1947,15 @@ public final class QuotaCommands {
         return sb.toString();
     }
 
+    /** 方案额度摘要：独立方案四档分散在各维度，p.tiers() 仅为 shared fallback，不能当方案额度展示 */
+    private static String policyTiersSummary(BillingPolicy policy, boolean zh) {
+        if (policy != null && policy.isIndependent()) {
+            int n = policy.dimensions().size();
+            return zh ? n + " 个维度各自四档" : n + " dimension(s) with their own tier sets";
+        }
+        return tiersSummary(policy == null ? List.of() : policy.sharedTiers(), zh);
+    }
+
     /** 预设摘要（四档含禁用档，只显示启用档）："tier1 5h≤500 / tier2 24h≤2000" */
     private static String tiersSummary(List<QuotaTiers.Tier> tiers, boolean zh) {
         if (tiers == null || tiers.size() != 4) {
@@ -2024,6 +2052,8 @@ public final class QuotaCommands {
                     : "§cFailed to apply default policy; config unchanged; see server log"));
             return 0;
         }
+        // 坑 #39：成功写文件后同步 spec 内存值，防止 Forge 关服时用启动旧值覆盖文件（重启回退默认）
+        ForgeConfig.syncSpecFromFile(configFile);
         if (eng.getConfig().lines().isEmpty()) {
             ChunkPlanForge.GameEvents.scanBans(source.getServer());
         }
@@ -2053,6 +2083,8 @@ public final class QuotaCommands {
     private static void rollbackRawTiers(Path file, List<QuotaTiers.Tier> tiers) {
         try {
             writeRawTiers(file, tiers);
+            // 坑 #39：回滚文件后同步 spec 内存值，防止关服写回旧 spec 覆盖回滚结果
+            ForgeConfig.syncSpecFromFile(file);
         } catch (IOException | RuntimeException e) {
             org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("回滚默认方案主配置失败", e);
         }
@@ -2094,6 +2126,8 @@ public final class QuotaCommands {
         Path configFile = resolveConfigFile(source);
         List<String> warnings = new ArrayList<>();
         QuotaConfig config = ForgeConfig.toQuotaConfigFromFile(configFile, warnings);
+        // 坑 #39：同步 spec 内存值，防止 Forge 关服时用启动旧值覆盖文件（重启回退默认）
+        ForgeConfig.syncSpecFromFile(configFile);
         for (String w : warnings) {
             org.slf4j.LoggerFactory.getLogger("ChunkPlan").warn("配置告警: {}", w);
         }
