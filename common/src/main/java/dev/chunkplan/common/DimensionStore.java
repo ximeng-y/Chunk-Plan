@@ -48,9 +48,9 @@ public final class DimensionStore {
     public record DimConfig(boolean billing, SpawnPoint spawn, List<QuotaTiers.Tier> tiers) {
     }
 
-    /** 重定向槽位设置结果：DUPLICATE = 该维度已占用其它槽位；GAP = 前置槽为空（槽位须自首选起连续填写） */
+    /** 重定向槽位设置结果：DUPLICATE/GAP = 校验失败；SAVE_FAILED = 写盘失败且已回滚 */
     public enum RedirectResult {
-        OK, DUPLICATE, GAP
+        OK, DUPLICATE, GAP, SAVE_FAILED
     }
 
     private final Path file;
@@ -82,22 +82,20 @@ public final class DimensionStore {
         return MODE_INDEPENDENT.equals(mode);
     }
 
-    /** 切换模式（仅写模式字段；快照初始化由引擎在切换到 independent 前完成） */
-    public synchronized void setMode(String mode) {
+    /** 切换模式（仅写模式字段；快照初始化由引擎在切换到 independent 前完成）。 */
+    public synchronized boolean setMode(String mode) {
         if (!MODE_SHARED.equals(mode) && !MODE_INDEPENDENT.equals(mode)) {
             throw new IllegalArgumentException("非法维度模式: " + mode);
         }
-        this.mode = mode;
-        save();
+        return commit(() -> this.mode = mode);
     }
 
     public synchronized boolean redirectOnExhaust() {
         return redirectOnExhaust;
     }
 
-    public synchronized void setRedirectOnExhaust(boolean v) {
-        this.redirectOnExhaust = v;
-        save();
+    public synchronized boolean setRedirectOnExhaust(boolean v) {
+        return commit(() -> this.redirectOnExhaust = v);
     }
 
     /** 重定向槽位快照（3 项，元素可为 null = 未配置，只读）。
@@ -165,6 +163,7 @@ public final class DimensionStore {
             }
             newDims.put(key, copyDim(d));
         }
+        State before = snapshotState();
         mode = policy.mode();
         redirectOnExhaust = policy.redirectOnExhaust();
         List<String> order = policy.redirectOrder();
@@ -173,8 +172,11 @@ public final class DimensionStore {
         }
         dims.clear();
         dims.putAll(newDims);
-        save();
-        return true;
+        if (save()) {
+            return true;
+        }
+        restoreState(before);
+        return false;
     }
 
     public synchronized long revision() {
@@ -192,11 +194,11 @@ public final class DimensionStore {
             throw new IllegalArgumentException("非法重定向槽位: " + slot);
         }
         if (dim == null || dim.isEmpty()) {
-            for (int i = slot; i < redirectOrder.size(); i++) {
-                redirectOrder.set(i, null);
-            }
-            save();
-            return RedirectResult.OK;
+            return commit(() -> {
+                for (int i = slot; i < redirectOrder.size(); i++) {
+                    redirectOrder.set(i, null);
+                }
+            }) ? RedirectResult.OK : RedirectResult.SAVE_FAILED;
         }
         // DUPLICATE 先于 GAP：若两态同时成立，真实冲突是重复，先报 GAP 会误导管理员。
         // 当前不变量下（前缀连续 + 清空级联 + load 归一）两态实际互斥，此处为防御性加固
@@ -208,9 +210,9 @@ public final class DimensionStore {
         if (slot > 0 && redirectOrder.get(slot - 1) == null) {
             return RedirectResult.GAP;
         }
-        redirectOrder.set(slot, dim);
-        save();
-        return RedirectResult.OK;
+        return commit(() -> redirectOrder.set(slot, dim))
+                ? RedirectResult.OK
+                : RedirectResult.SAVE_FAILED;
     }
 
     /** 该维度是否计费（无条目默认计费=true，两种模式同语义） */
@@ -236,14 +238,15 @@ public final class DimensionStore {
     }
 
     /** 设置维度计费开关（条目不存在则创建：billing 默认外的首个字段） */
-    public synchronized void setBilling(String dimKey, boolean billing) {
-        DimConfig d = dims.get(dimKey);
-        if (d == null) {
-            dims.put(dimKey, new DimConfig(billing, null, null));
-        } else {
-            dims.put(dimKey, new DimConfig(billing, d.spawn(), d.tiers()));
-        }
-        save();
+    public synchronized boolean setBilling(String dimKey, boolean billing) {
+        return commit(() -> {
+            DimConfig d = dims.get(dimKey);
+            if (d == null) {
+                dims.put(dimKey, new DimConfig(billing, null, null));
+            } else {
+                dims.put(dimKey, new DimConfig(billing, d.spawn(), d.tiers()));
+            }
+        });
     }
 
     /** 设置落地坐标；非法（/tp 规范）返回 false 不落盘 */
@@ -253,24 +256,23 @@ public final class DimensionStore {
         }
         DimConfig d = dims.get(dimKey);
         SpawnPoint spawn = new SpawnPoint(x, y, z);
-        if (d == null) {
-            dims.put(dimKey, new DimConfig(true, spawn, null));
-        } else {
-            dims.put(dimKey, new DimConfig(d.billing(), spawn, d.tiers()));
-        }
-        save();
-        return true;
+        return commit(() -> {
+            if (d == null) {
+                dims.put(dimKey, new DimConfig(true, spawn, null));
+            } else {
+                dims.put(dimKey, new DimConfig(d.billing(), spawn, d.tiers()));
+            }
+        });
     }
 
     /** 清空落地坐标（条目保留计费开关与额度线快照）。坐标不清空会导致配置改不掉——
      *  GUI 留空曾被 saveDimCoords 的"非法即跳过"吞掉，玩家无法把已配坐标改回未配置 */
-    public synchronized void clearSpawn(String dimKey) {
+    public synchronized boolean clearSpawn(String dimKey) {
         DimConfig d = dims.get(dimKey);
         if (d == null || d.spawn() == null) {
-            return;
+            return true;
         }
-        dims.put(dimKey, new DimConfig(d.billing(), null, d.tiers()));
-        save();
+        return commit(() -> dims.put(dimKey, new DimConfig(d.billing(), null, d.tiers())));
     }
 
     /**
@@ -293,28 +295,29 @@ public final class DimensionStore {
         }
         DimConfig d = dims.get(dimKey);
         List<QuotaTiers.Tier> copy = List.copyOf(tiers);
-        if (d == null) {
-            dims.put(dimKey, new DimConfig(true, null, copy));
-        } else {
-            dims.put(dimKey, new DimConfig(d.billing(), d.spawn(), copy));
-        }
-        save();
-        return true;
+        return commit(() -> {
+            if (d == null) {
+                dims.put(dimKey, new DimConfig(true, null, copy));
+            } else {
+                dims.put(dimKey, new DimConfig(d.billing(), d.spawn(), copy));
+            }
+        });
     }
 
     /** 仅当该维度缺失或未初始化快照时写入 tiers（模式切换/未知维度首次进入时的快照初始化） */
-    public synchronized void ensureTiers(String dimKey, List<QuotaTiers.Tier> tiers) {
+    public synchronized boolean ensureTiers(String dimKey, List<QuotaTiers.Tier> tiers) {
         DimConfig d = dims.get(dimKey);
         if (d != null && d.tiers() != null) {
-            return;
+            return true;
         }
         List<QuotaTiers.Tier> copy = List.copyOf(tiers);
-        if (d == null) {
-            dims.put(dimKey, new DimConfig(true, null, copy));
-        } else {
-            dims.put(dimKey, new DimConfig(d.billing(), d.spawn(), copy));
-        }
-        save();
+        return commit(() -> {
+            if (d == null) {
+                dims.put(dimKey, new DimConfig(true, null, copy));
+            } else {
+                dims.put(dimKey, new DimConfig(d.billing(), d.spawn(), copy));
+            }
+        });
     }
 
     /**
@@ -434,8 +437,7 @@ public final class DimensionStore {
         }
     }
 
-    private void save() {
-        revision++;
+    private boolean save() {
         try {
             if (file.getParent() != null) {
                 Files.createDirectories(file.getParent());
@@ -457,8 +459,50 @@ public final class DimensionStore {
                 dto.dimensions.put(e.getKey(), d);
             }
             AtomicFile.write(file, GsonHolder.GSON.toJson(dto));
+            revision++;
+            return true;
         } catch (IOException e) {
             LOG.error("写入维度配置库 {} 失败", file, e);
+            return false;
+        }
+    }
+
+    /** 写入成功才算提交；失败时恢复快照，调用方不会看到半生效内存状态。 */
+    private boolean commit(Runnable mutation) {
+        State before = snapshotState();
+        mutation.run();
+        if (save()) {
+            return true;
+        }
+        restoreState(before);
+        return false;
+    }
+
+    private State snapshotState() {
+        return new State(mode, redirectOnExhaust, new ArrayList<>(redirectOrder), snapshotDimensions());
+    }
+
+    private void restoreState(State state) {
+        mode = state.mode;
+        redirectOnExhaust = state.redirectOnExhaust;
+        redirectOrder.clear();
+        redirectOrder.addAll(state.redirectOrder);
+        dims.clear();
+        dims.putAll(state.dims);
+    }
+
+    private static final class State {
+        final String mode;
+        final boolean redirectOnExhaust;
+        final List<String> redirectOrder;
+        final Map<String, DimConfig> dims;
+
+        State(String mode, boolean redirectOnExhaust, List<String> redirectOrder,
+              Map<String, DimConfig> dims) {
+            this.mode = mode;
+            this.redirectOnExhaust = redirectOnExhaust;
+            this.redirectOrder = redirectOrder;
+            this.dims = dims;
         }
     }
 

@@ -5,6 +5,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -96,6 +97,24 @@ public final class QuotaEngine {
                               String presetName) {
     }
 
+    /**
+     * 维度模式切换结果：missingDims 非空 = 坐标校验未通过；saveFailed = 校验通过但写盘失败
+     * （内存已回滚，调用方不应继续后续步骤）。
+     */
+    public record DimensionModeResult(boolean success, List<String> missingDims, boolean saveFailed) {
+        public static DimensionModeResult ok() {
+            return new DimensionModeResult(true, List.of(), false);
+        }
+
+        public static DimensionModeResult missing(List<String> dims) {
+            return new DimensionModeResult(false, dims, false);
+        }
+
+        public static DimensionModeResult saveFailure() {
+            return new DimensionModeResult(false, List.of(), true);
+        }
+    }
+
     /** 提示状态键（issue #3 维度独立）：共享模式 dim 为 null（状态跟随玩家跨维度）；
      * 独立模式按（玩家, 维度）隔离——各维度额度线互不相同 */
     private record AlertKey(UUID uuid, String dim) {
@@ -118,6 +137,11 @@ public final class QuotaEngine {
 
     /** 触发档位表（严格按用户要求）：达到即触发；15~30 低、50~75 中、80~98 高 */
     private static final int[] ALERT_PERCENTS = {15, 30, 50, 65, 75, 80, 85, 90, 95, 98};
+
+    /** deletePreset：预设不存在。 */
+    public static final int DELETE_NOT_FOUND = PresetStore.DELETE_NOT_FOUND;
+    /** deletePreset：分配已保留、但删除预设落盘失败。 */
+    public static final int DELETE_SAVE_FAILED = PresetStore.DELETE_SAVE_FAILED;
 
     private final Path dataDir;
     private final Path playerDataDir;
@@ -148,6 +172,18 @@ public final class QuotaEngine {
      */
     public QuotaEngine(Path dataDir, QuotaConfig config, FeeLogger feeLogger, ManagedBanStore banStore) {
         this(dataDir, config, feeLogger, banStore, System::currentTimeMillis);
+    }
+
+    /**
+     * 推荐构造入口：同时接收壳层 readRawTiers 的全局四档原始值（禁用档保留）。
+     * 旧构造保留兼容；新壳层应使用本重载，避免 default 四档反推。
+     */
+    public QuotaEngine(Path dataDir, QuotaConfig config, List<QuotaTiers.Tier> rawTiers,
+                       FeeLogger feeLogger, ManagedBanStore banStore) {
+        this(dataDir, config, feeLogger, banStore);
+        if (!setDefaultTiers(rawTiers)) {
+            LOG.warn("构造 QuotaEngine 时全局四档原始值非法，default 将回退 active lines 反推");
+        }
     }
 
     /** 包内可见：注入时钟，供单元测试模拟时间流逝 */
@@ -337,11 +373,14 @@ public final class QuotaEngine {
         return true;
     }
 
-    /** 清除玩家覆盖（回落全局 default 预设） */
-    public void clearPlayerPreset(UUID uuid) {
-        presetStore.assign(uuid, null);
+    /** 清除玩家覆盖（回落全局 default 预设）；分配落盘失败时返回 false 且保留内存覆盖。 */
+    public boolean clearPlayerPreset(UUID uuid) {
+        if (!presetStore.assign(uuid, null)) {
+            return false;
+        }
         playerPolicies.remove(uuid);
         removeAlertStates(uuid);
+        return true;
     }
 
     /** 玩家当前预设名；null = 跟随全局 default */
@@ -433,9 +472,6 @@ public final class QuotaEngine {
                 return false;
             }
         }
-        if (!dimStore.applyPolicy(policy) || !setDefaultTiers(policy.sharedTiers())) {
-            return false;
-        }
         List<String> lineWarnings = new ArrayList<>();
         List<QuotaConfig.Line> lines = QuotaTiers.toLines(policy.sharedTiers(), lineWarnings);
         if (!lineWarnings.isEmpty()) {
@@ -443,7 +479,7 @@ public final class QuotaEngine {
             return false;
         }
         QuotaConfig g = config;
-        this.config = QuotaConfig.builder()
+        QuotaConfig newConfig = QuotaConfig.builder()
                 .lines(lines)
                 .firstEntryFee(g.firstEntryFee())
                 .familiarEntryFee(g.familiarEntryFee())
@@ -455,12 +491,31 @@ public final class QuotaEngine {
                 .banScanIntervalSec(g.banScanIntervalSec())
                 .logFeeEvents(g.logFeeEvents())
                 .build(null);
+        // 先完成纯内存校验/构建，再写维度库；写盘失败时只回滚 default 四档缓存，config 尚未切换。
+        List<QuotaTiers.Tier> oldDefaultTiers = defaultTiers;
+        BillingPolicy oldCachedPolicy = cachedDefaultPolicy;
+        long oldCachedRevision = cachedDefaultRevision;
+        List<QuotaTiers.Tier> oldCachedTiers = cachedDefaultTiers;
+        if (!setDefaultTiers(policy.sharedTiers())) {
+            return false;
+        }
+        if (!dimStore.applyPolicy(policy)) {
+            defaultTiers = oldDefaultTiers;
+            cachedDefaultPolicy = oldCachedPolicy;
+            cachedDefaultRevision = oldCachedRevision;
+            cachedDefaultTiers = oldCachedTiers;
+            return false;
+        }
+        this.config = newConfig;
         cachedDefaultPolicy = null;
         alertStates.clear();
         return true;
     }
 
-    /** 删除预设并解除相关分配；返回解除的分配数，预设不存在返回 -1 */
+    /**
+     * 删除预设并解除相关分配；返回解除的分配数，预设不存在返回 {@link #DELETE_NOT_FOUND}，
+     * 删除落盘失败返回 {@link #DELETE_SAVE_FAILED}，此时内存分配不变。
+     */
     public int deletePreset(String name) {
         List<UUID> affected = new ArrayList<>();
         for (Map.Entry<UUID, String> e : presetStore.assignments().entrySet()) {
@@ -469,8 +524,11 @@ public final class QuotaEngine {
             }
         }
         int unassigned = presetStore.delete(name);
-        if (unassigned < 0) {
-            return -1;
+        if (unassigned == PresetStore.DELETE_SAVE_FAILED) {
+            return DELETE_SAVE_FAILED;
+        }
+        if (unassigned == PresetStore.DELETE_NOT_FOUND) {
+            return DELETE_NOT_FOUND;
         }
         for (UUID uuid : affected) {
             playerPolicies.remove(uuid);
@@ -546,32 +604,56 @@ public final class QuotaEngine {
      * 用当前全局 12 值初始化（快照，issue #3 拍板）。切回 shared 直接生效（维度配置保留）。
      * 成功返回空列表。共享模式全局线/预设语义不变。
      */
-    public List<String> setDimensionMode(String mode, List<String> liveDims) {
+    public DimensionModeResult setDimensionModeWithResult(String mode, List<String> liveDims) {
         if (!DimensionStore.MODE_INDEPENDENT.equals(mode)) {
-            dimStore.setMode(DimensionStore.MODE_SHARED);
+            if (!dimStore.setMode(DimensionStore.MODE_SHARED)) {
+                return DimensionModeResult.saveFailure();
+            }
             cachedDefaultPolicy = null;
-            return List.of();
+            return DimensionModeResult.ok();
         }
         List<String> missing = dimStore.validateIndependentReady(liveDims);
         if (!missing.isEmpty()) {
-            return missing;
+            return DimensionModeResult.missing(missing);
         }
         List<QuotaTiers.Tier> snapshot = rawDefaultTiers();
+        Map<String, DimensionStore.DimConfig> dims = new LinkedHashMap<>(dimStore.snapshotDimensions());
         for (String dim : liveDims) {
-            dimStore.ensureTiers(dim, snapshot);
+            DimensionStore.DimConfig d = dims.get(dim);
+            if (d == null) {
+                dims.put(dim, new DimensionStore.DimConfig(true, null, snapshot));
+            } else if (d.tiers() == null) {
+                dims.put(dim, new DimensionStore.DimConfig(d.billing(), d.spawn(), snapshot));
+            }
         }
-        dimStore.setMode(DimensionStore.MODE_INDEPENDENT);
+        BillingPolicy policy = new BillingPolicy(
+                BillingPolicy.MODE_INDEPENDENT,
+                snapshot,
+                dims,
+                dimStore.redirectOnExhaust(),
+                dimStore.redirectOrder());
+        if (!policy.validate().isEmpty() || !dimStore.applyPolicy(policy)) {
+            return DimensionModeResult.saveFailure();
+        }
         // 线结构整体切换（全局线 -> 各维度线）：提示状态全部重置，防 lastLevels 下标错位（坑 #30 同因）
         alertStates.clear();
         cachedDefaultPolicy = null;
-        return List.of();
+        return DimensionModeResult.ok();
+    }
+
+    /** 兼容旧签名；新壳层应使用 {@link #setDimensionModeWithResult(String, List)} 区分写盘失败。 */
+    public List<String> setDimensionMode(String mode, List<String> liveDims) {
+        return setDimensionModeWithResult(mode, liveDims).missingDims();
     }
 
     /** 设置维度计费开关（两种模式都生效；关闭后该维度不计费、可自由进入，仍记已探索集合） */
-    public void setDimensionBilling(String dimKey, boolean billing) {
-        dimStore.setBilling(dimKey, billing);
+    public boolean setDimensionBilling(String dimKey, boolean billing) {
+        if (!dimStore.setBilling(dimKey, billing)) {
+            return false;
+        }
         cachedDefaultPolicy = null;
         removeAlertStatesForDim(dimKey);
+        return true;
     }
 
     /** 设置维度落地坐标；非法（/tp 规范）返回 false 不落盘 */
@@ -584,9 +666,12 @@ public final class QuotaEngine {
     }
 
     /** 清空维度落地坐标（该维度转为"未配置"；独立模式下须重新配置才可作为重定向落点） */
-    public void clearDimensionSpawn(String dimKey) {
-        dimStore.clearSpawn(dimKey);
+    public boolean clearDimensionSpawn(String dimKey) {
+        if (!dimStore.clearSpawn(dimKey)) {
+            return false;
+        }
         cachedDefaultPolicy = null;
+        return true;
     }
 
     /** 设置维度四档额度线（独立模式）；校验失败返回 false；变更后清该维度提示状态 */
@@ -599,9 +684,12 @@ public final class QuotaEngine {
         return true;
     }
 
-    public void setRedirectOnExhaust(boolean v) {
-        dimStore.setRedirectOnExhaust(v);
+    public boolean setRedirectOnExhaust(boolean v) {
+        if (!dimStore.setRedirectOnExhaust(v)) {
+            return false;
+        }
         cachedDefaultPolicy = null;
+        return true;
     }
 
     /** 设置重定向槽位；返回 {@link DimensionStore.RedirectResult}，非 OK 时槽位不变（命令层据此报错） */
