@@ -181,9 +181,7 @@ public final class QuotaEngine {
     public QuotaEngine(Path dataDir, QuotaConfig config, List<QuotaTiers.Tier> rawTiers,
                        FeeLogger feeLogger, ManagedBanStore banStore) {
         this(dataDir, config, feeLogger, banStore);
-        if (!setDefaultTiers(rawTiers)) {
-            LOG.warn("构造 QuotaEngine 时全局四档原始值非法，default 将回退 active lines 反推");
-        }
+        setConfig(config, rawTiers);
     }
 
     /** 包内可见：注入时钟，供单元测试模拟时间流逝 */
@@ -248,12 +246,12 @@ public final class QuotaEngine {
         cachedDefaultPolicy = null;
     }
 
-    /** 推荐热更新入口：同时接收壳层 readRawTiers 的全局四档原始值（禁用档原值保留）。 */
+    /** 推荐热更新入口：启用档以规范化 config 为准，合法禁用档保留原值，非法档独立回退。 */
     public void setConfig(QuotaConfig config, List<QuotaTiers.Tier> rawTiers) {
+        List<QuotaTiers.Tier> normalized = snapshotGlobalTiersFromLines(config, rawTiers);
         setConfig(config);
-        if (!setDefaultTiers(rawTiers)) {
-            LOG.warn("全局四档原始值非法，已保留上一份 defaultTiers");
-        }
+        defaultTiers = normalized;
+        cachedDefaultPolicy = null;
     }
 
     /** 壳层 readRawTiers 设置默认四档；返回 false 表示参数非法且未改变。 */
@@ -309,7 +307,7 @@ public final class QuotaEngine {
             return tiers;
         }
         // 兼容旧壳层未调用 setDefaultTiers 的过渡路径；B 接入后不应依赖此反推。
-        return snapshotGlobalTiersFromLines();
+        return snapshotGlobalTiersFromLines(config, null);
     }
 
     private void rebuildPlayerPolicies() {
@@ -554,12 +552,9 @@ public final class QuotaEngine {
         return new AlertKey(uuid, independent ? dimKey : null);
     }
 
-    /**
-     * 由当前全局激活线推导四档原始 12 值快照（issue #3 模式切换/未知维度初始化用）：
-     * 引擎只持有激活线（无原始 12 值），启用档反查窗口写法还原；禁用档取该档默认
-     * （重新启用时反正要走 windowTime/windowLimit 设置）。
-     */
-    private List<QuotaTiers.Tier> snapshotGlobalTiersFromLines() {
+    /** 启用状态和额度取规范化配置；禁用档保留合法原值，否则按 QuotaTiers 规则整档回退。 */
+    private static List<QuotaTiers.Tier> snapshotGlobalTiersFromLines(
+            QuotaConfig config, List<QuotaTiers.Tier> rawTiers) {
         List<QuotaConfig.Line> lines = config.lines();
         List<QuotaTiers.Tier> out = new ArrayList<>(4);
         for (int tier = 1; tier <= 4; tier++) {
@@ -571,17 +566,33 @@ public final class QuotaEngine {
                 }
             }
             if (line == null) {
+                QuotaTiers.Tier raw = rawTiers != null && tier <= rawTiers.size()
+                        ? rawTiers.get(tier - 1) : null;
+                if (raw != null && !raw.enabled()) {
+                    long seconds;
+                    try {
+                        seconds = DurationParser.parseSeconds(raw.window());
+                    } catch (IllegalArgumentException e) {
+                        seconds = -1;
+                    }
+                    if (QuotaTiers.presetNameForWindow(tier, seconds) != null
+                            && Double.isFinite(raw.limit()) && raw.limit() > 0) {
+                        out.add(raw);
+                        continue;
+                    }
+                    LOG.warn("第 {} 档禁用额度配置非法，已回退该档默认窗口和上限", tier);
+                }
                 QuotaTiers.TierDefault def = QuotaTiers.defaultOf(tier);
                 out.add(new QuotaTiers.Tier(false, def.window(), def.limit()));
             } else {
                 String window = QuotaTiers.presetNameForWindow(tier, line.windowSeconds());
                 if (window == null) {
-                    window = QuotaTiers.defaultOf(tier).window();
+                    window = Long.toString(line.windowSeconds());
                 }
                 out.add(new QuotaTiers.Tier(true, window, line.limit()));
             }
         }
-        return out;
+        return List.copyOf(out);
     }
 
     /** 该玩家在该维度的有效额度线（独立模式按 policy 维度，共享模式即 policy 共享语义）；bucketDim 返回记账桶维度 */
