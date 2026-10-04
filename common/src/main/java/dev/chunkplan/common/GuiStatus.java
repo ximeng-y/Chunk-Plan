@@ -7,7 +7,9 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 客户端 GUI 状态数据（纯 Java DTO，零 Minecraft/加载器依赖）。
@@ -139,6 +141,37 @@ public record GuiStatus(
 
         public boolean independent() {
             return MODE_INDEPENDENT.equals(mode);
+        }
+
+        /** 由引擎 core policy 生成 GUI wire 快照（协议层不直接暴露 core 类型）。 */
+        public static PresetPolicy fromBillingPolicy(BillingPolicy policy) {
+            if (policy == null) {
+                return null;
+            }
+            List<PresetDim> dims = new ArrayList<>();
+            for (Map.Entry<String, DimensionStore.DimConfig> e : policy.dimensions().entrySet()) {
+                DimensionStore.DimConfig d = e.getValue();
+                DimensionStore.SpawnPoint spawn = d == null ? null : d.spawn();
+                dims.add(new PresetDim(e.getKey(), d == null || d.billing(), spawn != null,
+                        spawn == null ? 0 : spawn.x(), spawn == null ? 0 : spawn.y(), spawn == null ? 0 : spawn.z(),
+                        // shared policy 的维度条目可能只有 billing/spawn；wire 仍保持四档结构可回读，
+                        // 避免 readPolicy 对空 tiers 整包拒绝。独立 policy 的维度四档由 A 核心负责校验。
+                        d == null || d.tiers() == null ? policy.sharedTiers() : d.tiers()));
+            }
+            return new PresetPolicy(policy.mode(), policy.sharedTiers(), policy.redirectOnExhaust(),
+                    policy.redirectOrder(), dims);
+        }
+
+        /** 将客户端草稿还原为 core policy；结构校验由 BillingPolicy/引擎业务入口负责。 */
+        public BillingPolicy toBillingPolicy() {
+            Map<String, DimensionStore.DimConfig> map = new LinkedHashMap<>();
+            for (PresetDim d : dims) {
+                DimensionStore.SpawnPoint spawn = d.hasSpawn()
+                        ? new DimensionStore.SpawnPoint(d.x(), d.y(), d.z())
+                        : null;
+                map.put(d.dim(), new DimensionStore.DimConfig(d.billing(), spawn, d.tiers()));
+            }
+            return new BillingPolicy(mode, tiers, map, redirectOnExhaust, redirectOrder);
         }
 
         private static List<String> normalizeOrder(List<String> order) {

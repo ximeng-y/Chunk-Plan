@@ -1,6 +1,8 @@
 package dev.chunkplan.fabric;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -18,9 +20,11 @@ import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.suggestion.Suggestions;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 
+import dev.chunkplan.common.BillingPolicy;
 import dev.chunkplan.common.DurationParser;
 import dev.chunkplan.common.FeeLogFile;
 import dev.chunkplan.common.DimensionStore;
+import dev.chunkplan.common.GuiStatus;
 import dev.chunkplan.common.NumericParser;
 import dev.chunkplan.common.PresetStore;
 import dev.chunkplan.common.QuotaConfig;
@@ -33,6 +37,7 @@ import com.mojang.brigadier.arguments.BoolArgumentType;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.storage.LevelResource;
 
 /**
  * /chunkplan 命令族：check、rules、reset <target> [tier]、confirm、config
@@ -221,6 +226,11 @@ public final class QuotaCommands {
                                                 .suggests(QuotaCommands::suggestRedirectTargetValues)
                                                 .executes(ctx -> configRedirectTarget(ctx))))))
                 .then(Commands.literal("preset")
+                        .then(Commands.literal("info")
+                                .requires(s -> DevCommands.hasPermission(s, 2))
+                                .then(Commands.argument("name", StringArgumentType.greedyString())
+                                        .suggests(QuotaCommands::suggestPresetNamesWithDefault)
+                                        .executes(ctx -> presetInfo(ctx))))
                         .then(Commands.literal("list")
                                 .requires(s -> DevCommands.hasPermission(s, 2))
                                 .executes(ctx -> presetList(ctx)))
@@ -260,7 +270,8 @@ public final class QuotaCommands {
                     "Specify a player from console: /chunkplan check <player>")));
             return 0;
         }
-        String dimKey = ChunkPlanFabric.engine != null && ChunkPlanFabric.engine.isIndependentMode()
+        String dimKey = ChunkPlanFabric.engine != null
+                && ChunkPlanFabric.engine.isIndependentMode(player.getUUID())
                 ? player.level().dimension().identifier().toString() : null;
         sendStatus(ctx, player.getUUID(), player.getGameProfile().name(), true, DevCommands.hasPermission(player, 2), dimKey);
         return 1;
@@ -277,7 +288,7 @@ public final class QuotaCommands {
         ServerPlayer online = DevCommands.findByUuid(ctx.getSource().getServer(), profile.id());
         // 独立模式（issue #3）：仅展示目标玩家当前维度用量；离线玩家取最后在线维度
         String dimKey = null;
-        if (eng != null && eng.isIndependentMode()) {
+        if (eng != null && eng.isIndependentMode(profile.id())) {
             dimKey = online != null
                     ? online.level().dimension().identifier().toString()
                     : eng.lastDimOf(profile.id());
@@ -361,12 +372,6 @@ public final class QuotaCommands {
                             "Unknown tier: " + tierArg + " (tier1~tier4 or all)")));
                     return 0;
                 }
-                if (!eng.isIndependentMode() && findLine(eng, tier) == null) {
-                    ctx.getSource().sendFailure(Component.literal(t(ctx,
-                            "该窗口未启用（tier" + tier + "），无需重置",
-                            "This window is not enabled (tier" + tier + "), nothing to reset")));
-                    return 0;
-                }
                 tiers = Set.of(tier);
             }
         }
@@ -379,6 +384,18 @@ public final class QuotaCommands {
         for (GameProfile gp : targets) {
             uuids.add(gp.id());
         }
+        if (tiers != null) {
+            int tier = tiers.iterator().next();
+            for (GameProfile gp : targets) {
+                if (!effectiveTierEnabled(eng, gp.id(), tier)) {
+                    ctx.getSource().sendFailure(Component.literal(t(ctx,
+                            "玩家 " + profileName(gp) + " 的有效方案未启用 tier" + tier + "，无需重置",
+                            "Tier" + tier + " is not enabled in " + profileName(gp)
+                                    + "'s effective policy; nothing to reset")));
+                    return 0;
+                }
+            }
+        }
         putPending(new PendingAction.Reset(uuids, tiers, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx)));
         boolean zh = isZh(ctx);
         String zhScope;
@@ -386,12 +403,12 @@ public final class QuotaCommands {
         if (tiers == null) {
             zhScope = "全部";
             enScope = "all windows";
-        } else if (eng.isIndependentMode()) {
+        } else if (targets.stream().anyMatch(gp -> eng.isIndependentMode(gp.id()))) {
             // 独立模式各维度窗口互不相同：范围以档位身份表述（tierN）
             zhScope = "tier" + tiers.iterator().next();
             enScope = "tier" + tiers.iterator().next();
         } else {
-            long winSec = findLine(eng, tiers.iterator().next()).windowSeconds();
+            long winSec = effectiveWindowSeconds(eng, targets.get(0).id(), tiers.iterator().next());
             zhScope = ChunkPlanMessages.windowName(winSec, true);
             enScope = ChunkPlanMessages.windowName(winSec, false).toLowerCase();
         }
@@ -443,15 +460,17 @@ public final class QuotaCommands {
             if (r.tiers() == null) {
                 zhScope = "全部";
                 enScope = "all windows";
-            } else if (eng.isIndependentMode()) {
+            } else if (r.targets().stream().anyMatch(uuid -> eng.isIndependentMode(uuid))) {
                 // 独立模式各维度窗口互不相同：范围以档位身份表述（issue #3）
                 zhScope = "tier" + r.tiers().iterator().next();
                 enScope = "tier" + r.tiers().iterator().next();
             } else {
                 int t = r.tiers().iterator().next();
-                QuotaConfig.Line ln = findLine(eng, t);
-                zhScope = ln == null ? "tier" + t : ChunkPlanMessages.windowName(ln.windowSeconds(), true);
-                enScope = ln == null ? "tier" + t : ChunkPlanMessages.windowName(ln.windowSeconds(), false).toLowerCase();
+                long winSec = r.targets().isEmpty()
+                        ? -1
+                        : effectiveWindowSeconds(eng, r.targets().get(0), t);
+                zhScope = winSec < 0 ? "tier" + t : ChunkPlanMessages.windowName(winSec, true);
+                enScope = winSec < 0 ? "tier" + t : ChunkPlanMessages.windowName(winSec, false).toLowerCase();
             }
             for (UUID uuid : r.targets()) {
                 eng.resetSpend(uuid, r.tiers());
@@ -486,10 +505,10 @@ public final class QuotaCommands {
             try {
                 if (d.tier() == 0) {
                     for (int tier = 1; tier <= 4; tier++) {
-                        FabricConfig.writeTierEnabled(ChunkPlanFabric.configFile, tier, false);
+                        FabricConfig.writeTierEnabled(resolveConfigFile(ctx), tier, false);
                     }
                 } else {
-                    FabricConfig.writeTierEnabled(ChunkPlanFabric.configFile, d.tier(), false);
+                    FabricConfig.writeTierEnabled(resolveConfigFile(ctx), d.tier(), false);
                 }
                 List<String> warnings = loadAndApplyConfig(ctx);
                 // 关闭即清空该窗口所有玩家记录：重新开启时从 0 起（坑 #30）
@@ -524,7 +543,7 @@ public final class QuotaCommands {
         }
         if (req instanceof PendingAction.LowerLimit l) {
             try {
-                FabricConfig.writeTierLimit(ChunkPlanFabric.configFile, l.tier(), Double.parseDouble(l.rawValue()));
+                FabricConfig.writeTierLimit(resolveConfigFile(ctx), l.tier(), Double.parseDouble(l.rawValue()));
                 List<String> warnings = loadAndApplyConfig(ctx);
                 String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
                 ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
@@ -585,44 +604,9 @@ public final class QuotaCommands {
             return 1;
         }
         if (req instanceof PendingAction.ApplyPreset a) {
-            // 应用预设到全体（issue #1）：把预设 12 值写回配置文件 + loadAndApplyConfig 热生效
-            PresetStore.Preset p = eng.getPresetStore().get(a.name());
-            if (p == null) {
-                ctx.getSource().sendFailure(Component.literal(t(ctx,
-                        "预设 " + a.name() + " 已不存在",
-                        "Preset " + a.name() + " no longer exists")));
-                return 0;
-            }
-            try {
-                // 仅写 12 值到全局配置（坑 #58）：不再对被关闭的档位 clearTierSpendForAll——
-                // 固定周期账本与档位开关解耦（周期存 tiers[档位]/dimTiers[维度][档位]，读路径按
-                // 当前窗口长现算、过期自然从 0 起），关档保留记录后重新开启，周期未过即继承原有
-                // 消费（用户要的"试做预设不改现状"）。"关掉并从 0 重来"是显式动作：
-                // config window <tier|all> off（PendingAction.DisableWindow）及其维度版
-                for (int tier = 1; tier <= 4; tier++) {
-                    QuotaTiers.Tier t = p.tiers().get(tier - 1);
-                    FabricConfig.writeTierEnabled(ChunkPlanFabric.configFile, tier, t.enabled());
-                    FabricConfig.writeTierWindow(ChunkPlanFabric.configFile, tier, t.window());
-                    FabricConfig.writeTierLimit(ChunkPlanFabric.configFile, tier, t.limit());
-                }
-                List<String> warnings = loadAndApplyConfig(ctx);
-                // 零线（坑 #31）：立即解除 ChunkPlan 来源临时封禁
-                if (eng.getConfig().lines().isEmpty()) {
-                    ChunkPlanFabric.scanBans(ctx.getSource().getServer());
-                }
-                String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
-                ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
-                        "§a已应用预设 §b" + a.name() + "§a：写入全局配置，对全体玩家生效",
-                        "§aApplied preset §b" + a.name() + "§a: written to the global config, effective for all players")
-                        + warning), true);
-                return 1;
-            } catch (IOException e) {
-                org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("confirm 应用预设失败", e);
-                ctx.getSource().sendFailure(Component.literal(t(ctx,
-                        "§c写入配置失败，详见服务端日志",
-                        "§cFailed to write config; see server log for details")));
-                return 0;
-            }
+            // 与 GUI typed 路径共用同一业务入口；失败反馈由入口统一发送。
+            return handlePresetPolicyAction(ctx.getSource(), GuiStatus.POLICY_ACTION_APPLY_DEFAULT,
+                    a.name(), "", null);
         }
         return 1;
     }
@@ -662,10 +646,10 @@ public final class QuotaCommands {
             try {
                 if (all) {
                     for (int i = 1; i <= 4; i++) {
-                        FabricConfig.writeTierEnabled(ChunkPlanFabric.configFile, i, true);
+                        FabricConfig.writeTierEnabled(resolveConfigFile(ctx), i, true);
                     }
                 } else {
-                    FabricConfig.writeTierEnabled(ChunkPlanFabric.configFile, tier, true);
+                    FabricConfig.writeTierEnabled(resolveConfigFile(ctx), tier, true);
                 }
                 List<String> warnings = loadAndApplyConfig(ctx);
                 String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
@@ -743,7 +727,7 @@ public final class QuotaCommands {
             return 0;
         }
         try {
-            FabricConfig.writeTierWindow(ChunkPlanFabric.configFile, tier, windowArg);
+            FabricConfig.writeTierWindow(resolveConfigFile(ctx), tier, windowArg);
             List<String> warnings = loadAndApplyConfig(ctx);
             String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
             long secs = DurationParser.parseSeconds(windowArg); // 预置值，解析必成功
@@ -779,7 +763,7 @@ public final class QuotaCommands {
             return 0;
         }
         try {
-            FabricConfig.writeHighSpeedMultiplier(ChunkPlanFabric.configFile, p.value());
+            FabricConfig.writeHighSpeedMultiplier(resolveConfigFile(ctx), p.value());
             List<String> warnings = loadAndApplyConfig(ctx);
             String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
             ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
@@ -811,7 +795,7 @@ public final class QuotaCommands {
             return 0;
         }
         try {
-            FabricConfig.writeFirstEntryFee(ChunkPlanFabric.configFile, p.value());
+            FabricConfig.writeFirstEntryFee(resolveConfigFile(ctx), p.value());
             List<String> warnings = loadAndApplyConfig(ctx);
             String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
             ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
@@ -843,7 +827,7 @@ public final class QuotaCommands {
             return 0;
         }
         try {
-            FabricConfig.writeFamiliarEntryFee(ChunkPlanFabric.configFile, p.value());
+            FabricConfig.writeFamiliarEntryFee(resolveConfigFile(ctx), p.value());
             List<String> warnings = loadAndApplyConfig(ctx);
             String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
             ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
@@ -915,7 +899,7 @@ public final class QuotaCommands {
             return 1;
         }
         try {
-            FabricConfig.writeTierLimit(ChunkPlanFabric.configFile, tier, p.value());
+            FabricConfig.writeTierLimit(resolveConfigFile(ctx), tier, p.value());
             List<String> warnings = loadAndApplyConfig(ctx);
             String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
             ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
@@ -1413,13 +1397,46 @@ public final class QuotaCommands {
             return 0;
         }
         boolean zh = isZh(ctx);
+        BillingPolicy defaultPolicy = eng.defaultPolicy();
         StringBuilder sb = new StringBuilder(zh ? "§e--- ChunkPlan 预设列表 ---" : "§e--- ChunkPlan Presets ---");
         sb.append("\n§bdefault§7（").append(zh ? "全局配置，对未被覆盖的玩家生效" : "global config, applies to players without an override")
-                .append("）§f: ").append(linesSummary(eng.getConfig().lines(), zh));
+                .append("，").append(defaultPolicy.isIndependent()
+                        ? (zh ? "维度独立" : "independent")
+                        : (zh ? "全维度共享" : "shared"))
+                .append("）§f: ").append(tiersSummary(defaultPolicy.sharedTiers(), zh));
         for (PresetStore.Preset p : eng.getPresetStore().all()) {
-            sb.append("\n§b").append(p.name()).append("§f: ").append(tiersSummary(p.tiers(), zh));
+            sb.append("\n§b").append(p.name()).append("§7（")
+                    .append(p.policy().isIndependent() ? (zh ? "维度独立" : "independent")
+                            : (zh ? "全维度共享" : "shared"))
+                    .append("）§f: ").append(tiersSummary(p.tiers(), zh));
         }
         ctx.getSource().sendSuccess(() -> Component.literal(sb.toString()), false);
+        return 1;
+    }
+
+    /** /chunkplan preset info &lt;名称&gt;：显示实际模式与完整 policy；default 为动态全局别名。 */
+    private static int presetInfo(CommandContext<CommandSourceStack> ctx) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        if (eng == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "ChunkPlan 未初始化", "ChunkPlan not initialized")));
+            return 0;
+        }
+        String raw = ctx.getArgument("name", String.class).trim();
+        if (raw.isEmpty()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx, "预设名不能为空", "Preset name cannot be empty")));
+            return 0;
+        }
+        boolean isDefault = raw.equalsIgnoreCase(PresetStore.RESERVED_NAME);
+        String name = isDefault ? PresetStore.RESERVED_NAME : raw;
+        BillingPolicy policy = isDefault ? eng.defaultPolicy() : eng.presetPolicy(name);
+        if (policy == null) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "预设 " + name + " 不存在", "Preset " + name + " does not exist")));
+            return 0;
+        }
+        GuiStatus.PresetPolicy view = GuiStatus.PresetPolicy.fromBillingPolicy(policy);
+        ctx.getSource().sendSuccess(() -> Component.literal(
+                ChunkPlanMessages.presetInfoText(name, view, isZh(ctx))), false);
         return 1;
     }
 
@@ -1449,7 +1466,7 @@ public final class QuotaCommands {
                     "§cPreset names are 1-32 characters (any script); no spaces, quotes, backslashes or control characters, and \"default\" is reserved")));
             return 0;
         }
-        List<QuotaTiers.Tier> raw = parts.length == 1 ? FabricConfig.readRawTiers(ChunkPlanFabric.configFile) : null;
+        List<QuotaTiers.Tier> raw = parts.length == 1 ? FabricConfig.readRawTiers(resolveConfigFile(ctx)) : null;
         if (parts.length == 13) {
             // 显式 12 值：字段级校验（错误信息精确到"第 N 档哪个字段非法"），只写预设文件
             List<QuotaTiers.Tier> explicit = parseExplicitTiers(ctx, parts);
@@ -1475,7 +1492,11 @@ public final class QuotaCommands {
                     "§cFailed to save preset (tier validation failed; see server log)")));
             return 0;
         }
-        String tail = existed ? t(ctx, "，已覆盖同名预设", ", overwriting the existing preset") : "";
+        String tail = existed
+                ? t(ctx,
+                "，已覆盖同名预设；正在使用该预设的玩家已立即采用新配置",
+                ", overwriting the existing preset; players already assigned to it now use the new policy")
+                : "";
         ctx.getSource().sendSuccess(() -> Component.literal(explicitValues
                 ? t(ctx,
                         "§a已保存预设 §b" + name + "§a（来自指定 12 值，未改动全局配置）" + tail,
@@ -1484,6 +1505,129 @@ public final class QuotaCommands {
                         "§a已保存预设 §b" + name + "§a（基于当前全局配置）" + tail,
                         "§aSaved preset §b" + name + "§a (from the current global config)" + tail)), true);
         return 1;
+    }
+
+    /**
+     * GUI typed 预设入口与命令 confirm 共用。action=save 保存整套 policy；apply_default 只改
+     * default 跟随者；assign 按目标分配 preset。输入在此处做服务端权威权限/名称/落点/结构校验。
+     */
+    public static int handlePresetPolicyAction(CommandSourceStack source, String action, String name,
+                                               String target, byte[] policyBytes) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        boolean zh = source.getEntity() instanceof ServerPlayer sp
+                ? ChunkPlanMessages.isChinese(sp.clientInformation().language()) : false;
+        if (eng == null) {
+            source.sendFailure(Component.literal(zh ? "ChunkPlan 未初始化" : "ChunkPlan not initialized"));
+            return 0;
+        }
+        if (!DevCommands.hasPermission(source, 2)) {
+            source.sendFailure(Component.literal(zh
+                    ? "§c需要权限等级 2" : "§cPermission level 2 is required"));
+            return 0;
+        }
+        if (action == null) {
+            source.sendFailure(Component.literal(zh ? "§c未知 GUI 预设操作" : "§cUnknown GUI preset action"));
+            return 0;
+        }
+        String cleanName = name == null ? "" : name.trim();
+        if (GuiStatus.POLICY_ACTION_SAVE.equals(action)) {
+            if (!PresetStore.isValidName(cleanName)) {
+                source.sendFailure(Component.literal(zh
+                        ? "§c预设名非法（1~32 字符，不可含空格/引号/反斜杠，default 为保留名）"
+                        : "§cInvalid preset name (1-32 chars, no spaces/quotes/backslashes; default is reserved)"));
+                return 0;
+            }
+            GuiStatus.PresetPolicy wire = GuiStatus.decodePolicy(policyBytes);
+            if (wire == null) {
+                source.sendFailure(Component.literal(zh
+                        ? "§c预设草稿数据无效或过大" : "§cPreset draft data is invalid or too large"));
+                return 0;
+            }
+            BillingPolicy policy;
+            try {
+                policy = wire.toBillingPolicy();
+            } catch (RuntimeException e) {
+                source.sendFailure(Component.literal(zh
+                        ? "§c预设草稿结构非法" : "§cPreset draft structure is invalid"));
+                return 0;
+            }
+            boolean existed = eng.getPresetStore().exists(cleanName);
+            long assigned = eng.getPresetStore().assignments().entrySet().stream()
+                    .filter(e -> cleanName.equals(e.getValue())).count();
+            if (!eng.savePresetPolicy(cleanName, policy, liveDims(source))) {
+                source.sendFailure(Component.literal(zh
+                        ? "§c预设保存失败（模式/档位/落点校验未通过，详见服务端日志）"
+                        : "§cFailed to save preset (mode/tier/spawn validation failed; see server log)"));
+                return 0;
+            }
+            String tail = existed
+                    ? (zh ? "；已覆盖同名预设，正在使用该预设的 " + assigned + " 名玩家已立即采用新配置"
+                    : "; overwrote the existing preset; " + assigned
+                    + " assigned player(s) now use the new policy")
+                    : "";
+            source.sendSuccess(() -> Component.literal(zh
+                    ? "§a已保存预设 §b" + cleanName + "§a（仅保存，未应用）" + tail
+                    : "§aSaved preset §b" + cleanName + "§a (saved only; not applied)" + tail), true);
+            return 1;
+        }
+        if (GuiStatus.POLICY_ACTION_APPLY_DEFAULT.equals(action)) {
+            if (!PresetStore.isValidName(cleanName)) {
+                source.sendFailure(Component.literal(zh
+                        ? "§cdefault 是当前全局配置本身，不能作为命名预设应用"
+                        : "§cdefault is the current global config itself and cannot be applied as a named preset"));
+                return 0;
+            }
+            BillingPolicy policy = eng.presetPolicy(cleanName);
+            if (policy == null) {
+                source.sendFailure(Component.literal(zh
+                        ? "§c预设 " + cleanName + " 不存在"
+                        : "§cPreset " + cleanName + " does not exist"));
+                return 0;
+            }
+            return applyPolicyToDefault(source, eng, policy, zh);
+        }
+        if (GuiStatus.POLICY_ACTION_ASSIGN.equals(action)) {
+            if (!PresetStore.isValidName(cleanName)) {
+                source.sendFailure(Component.literal(zh
+                        ? "§c预设名非法" : "§cInvalid preset name"));
+                return 0;
+            }
+            String targetArg = target == null ? "" : target.trim();
+            List<GameProfile> targets = resolveTargets(source, targetArg);
+            if (targets.isEmpty()) {
+                source.sendFailure(Component.literal(zh ? "§c未找到玩家" : "§cPlayer not found"));
+                return 0;
+            }
+            BillingPolicy policy = eng.presetPolicy(cleanName);
+            if (policy == null) {
+                source.sendFailure(Component.literal(zh
+                        ? "§c预设 " + cleanName + " 不存在"
+                        : "§cPreset " + cleanName + " does not exist"));
+                return 0;
+            }
+            List<String> liveDims = liveDims(source);
+            if (policy.isIndependent() && !policy.missingSpawns(liveDims).isEmpty()) {
+                source.sendFailure(Component.literal(zh
+                        ? "§c预设缺少 live 维度落地坐标，无法分配；请先补全"
+                        : "§cPreset is missing spawn coordinates for live dimensions; cannot assign"));
+                return 0;
+            }
+            for (GameProfile gp : targets) {
+                if (!eng.setPlayerPreset(gp.id(), cleanName, liveDims)) {
+                    source.sendFailure(Component.literal(zh
+                            ? "§c为 " + profileName(gp) + " 应用预设失败"
+                            : "§cFailed to assign preset to " + profileName(gp)));
+                    return 0;
+                }
+            }
+            notifyPresetTargets(source, targets, cleanName, zh);
+            source.sendSuccess(() -> Component.literal(zh
+                    ? "§a已为 " + targets.size() + " 名玩家应用预设 §b" + cleanName
+                    : "§aApplied preset §b" + cleanName + "§a to " + targets.size() + " player(s)"), true);
+            return 1;
+        }
+        source.sendFailure(Component.literal(zh ? "§c未知 GUI 预设操作" : "§cUnknown GUI preset action"));
+        return 0;
     }
 
     /** preset save 用法（命令参数与解析错误共用文案） */
@@ -1590,7 +1734,7 @@ public final class QuotaCommands {
         return 1;
     }
 
-    /** /chunkplan preset apply <名称>：应用预设到全体（写回全局配置，需 confirm） */
+    /** /chunkplan preset apply <名称>：应用到服务器默认方案（只影响 default 跟随者，需 confirm） */
     private static int presetApply(CommandContext<CommandSourceStack> ctx) {
         QuotaEngine eng = ChunkPlanFabric.engine;
         if (eng == null) {
@@ -1598,13 +1742,6 @@ public final class QuotaCommands {
             return 0;
         }
         String name = StringArgumentType.getString(ctx, "name").trim();
-        if (eng.isIndependentMode()) {
-            // 维度独立模式（issue #3，用户拍板）：预设仅保留玩家分配，apply 到全局被阻止（先于 default 别名检查）
-            ctx.getSource().sendFailure(Component.literal(t(ctx,
-                    "§c维度独立模式下全局额度线不生效，preset apply 不可用；请用 /chunkplan preset player 按玩家分配，或 /chunkplan config dimension 按维度配置",
-                    "§cGlobal quota lines are inactive in per-dimension mode; preset apply is unavailable. Use /chunkplan preset player for per-player presets or /chunkplan config dimension for per-dimension config")));
-            return 0;
-        }
         if (name.equalsIgnoreCase("default")) {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
                     "default 即当前全局配置，无需应用",
@@ -1619,12 +1756,19 @@ public final class QuotaCommands {
         }
         boolean zh = isZh(ctx);
         putPending(new PendingAction.ApplyPreset(name, System.currentTimeMillis() + CONFIRM_WINDOW_MILLIS, ownerOf(ctx)));
+        GuiStatus.PresetPolicy view = GuiStatus.PresetPolicy.fromBillingPolicy(p.policy());
         Component msg = Component.literal(t(ctx,
-                "§a将把预设 §b" + name + "§a（" + tiersSummary(p.tiers(), zh) + "）写入全局配置，对全体玩家生效；"
+                "§a将把预设 §b" + name + "§a（"
+                        + (view != null && view.independent() ? (zh ? "维度独立" : "independent")
+                        : (zh ? "全维度共享" : "shared")) + "，"
+                        + tiersSummary(p.tiers(), zh) + "）设为服务器默认方案，只对 default 跟随者生效，"
+                        + "不覆盖已有个人预设分配；"
                         + "被关闭的档位不会清空玩家已消费记录，重新开启后若仍在窗口内将继承原有消费；"
                         + "调整后可能在下一 tick 使超限玩家被当场踢出/传送，",
-                "§aThis will write preset §b" + name + "§a (" + tiersSummary(p.tiers(), zh) + ") to the global config, "
-                        + "effective for all players; disabling a tier does NOT clear players' spent records, and "
+                "§aThis will make preset §b" + name + "§a ("
+                        + (view != null && view.independent() ? "independent" : "shared") + ", "
+                        + tiersSummary(p.tiers(), zh) + ") the server default; only default followers are affected, "
+                        + "existing personal assignments are kept; disabling a tier does NOT clear players' spent records, and "
                         + "re-enabling it inherits the spend while the cycle is still inside its window; players over "
                         + "the limit may be kicked/teleported on the next tick, "))
                 .append(ChunkPlanMessages.confirmLink(zh));
@@ -1681,13 +1825,26 @@ public final class QuotaCommands {
                     "§aRestored " + who + " to the global config (default)")), true);
             return 1;
         }
-        if (!eng.getPresetStore().exists(presetArg)) {
+        BillingPolicy policy = eng.presetPolicy(presetArg);
+        if (policy == null) {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
                     "预设 " + presetArg + " 不存在", "Preset " + presetArg + " does not exist")));
             return 0;
         }
+        List<String> liveDims = liveDims(ctx.getSource());
+        if (policy.isIndependent() && !policy.missingSpawns(liveDims).isEmpty()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c预设缺少 live 维度落地坐标，无法分配；请先补全",
+                    "§cPreset is missing spawn coordinates for live dimensions; cannot assign")));
+            return 0;
+        }
         for (GameProfile gp : targets) {
-            eng.setPlayerPreset(gp.id(), presetArg);
+            if (!eng.setPlayerPreset(gp.id(), presetArg, liveDims)) {
+                ctx.getSource().sendFailure(Component.literal(t(ctx,
+                        "§c为 " + profileName(gp) + " 应用预设失败",
+                        "§cFailed to assign preset to " + profileName(gp))));
+                return 0;
+            }
         }
         notifyPresetTargets(ctx, targets, presetArg, zh);
         ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
@@ -1699,8 +1856,13 @@ public final class QuotaCommands {
     /** 预设分配变更后通知在线目标（离线/mock 发送为 no-op 或跳过，坑 #9） */
     private static void notifyPresetTargets(CommandContext<CommandSourceStack> ctx, List<GameProfile> targets,
                                             String presetName, boolean zh) {
+        notifyPresetTargets(ctx.getSource(), targets, presetName, zh);
+    }
+
+    private static void notifyPresetTargets(CommandSourceStack source, List<GameProfile> targets,
+                                            String presetName, boolean zh) {
         for (GameProfile gp : targets) {
-            ServerPlayer target = DevCommands.findByUuid(ctx.getSource().getServer(), gp.id());
+            ServerPlayer target = DevCommands.findByUuid(source.getServer(), gp.id());
             if (target != null) {
                 boolean tzh = ChunkPlanMessages.isChinese(target.clientInformation().language());
                 target.sendSystemMessage(Component.literal(tzh
@@ -1750,6 +1912,113 @@ public final class QuotaCommands {
         return sb.toString();
     }
 
+    private static List<String> liveDims(CommandSourceStack source) {
+        return ChunkPlanFabric.liveDims(source.getServer());
+    }
+
+    private static boolean effectiveTierEnabled(QuotaEngine eng, UUID uuid, int tier) {
+        BillingPolicy policy = eng.effectivePolicy(uuid);
+        if (!policy.isIndependent()) {
+            return tierEnabled(policy.sharedTiers(), tier);
+        }
+        for (DimensionStore.DimConfig dim : policy.dimensions().values()) {
+            if (dim != null && tierEnabled(dim.tiers(), tier)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean tierEnabled(List<QuotaTiers.Tier> tiers, int tier) {
+        return tiers != null && tier >= 1 && tier <= tiers.size()
+                && tiers.get(tier - 1) != null && tiers.get(tier - 1).enabled();
+    }
+
+    private static long effectiveWindowSeconds(QuotaEngine eng, UUID uuid, int tier) {
+        BillingPolicy policy = eng.effectivePolicy(uuid);
+        List<String> warnings = new ArrayList<>();
+        for (QuotaConfig.Line line : QuotaTiers.toLines(policy.sharedTiers(), warnings)) {
+            if (line.tier() == tier) {
+                return line.windowSeconds();
+            }
+        }
+        return -1;
+    }
+
+    /** default 应用：先完整持久化主配置，再发布维度 policy；任一步失败都不让新模式先热生效。 */
+    private static int applyPolicyToDefault(CommandSourceStack source, QuotaEngine eng,
+                                            BillingPolicy policy, boolean zh) {
+        List<String> validation = policy.validate();
+        if (!validation.isEmpty()) {
+            org.slf4j.LoggerFactory.getLogger("ChunkPlan").warn(
+                    "应用到 default 的 policy 非法：{}", String.join("；", validation));
+            source.sendFailure(Component.literal(zh
+                    ? "§c默认方案校验失败，详见服务端日志"
+                    : "§cDefault policy validation failed; see server log"));
+            return 0;
+        }
+        List<String> liveDims = liveDims(source);
+        if (policy.isIndependent() && !policy.missingSpawns(liveDims).isEmpty()) {
+            source.sendFailure(Component.literal(zh
+                    ? "§c默认方案缺少 live 维度落地坐标，未应用"
+                    : "§cDefault policy is missing spawn coordinates for live dimensions; not applied"));
+            return 0;
+        }
+        Path configFile = resolveConfigFile(source);
+        List<QuotaTiers.Tier> oldRaw = FabricConfig.readRawTiers(configFile);
+        try {
+            writeRawTiers(configFile, policy.sharedTiers());
+        } catch (IOException e) {
+            org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("写入默认方案主配置失败", e);
+            rollbackRawTiers(configFile, oldRaw);
+            source.sendFailure(Component.literal(zh
+                    ? "§c写入配置失败，默认方案未应用；详见服务端日志"
+                    : "§cFailed to write config; default policy was not applied; see server log"));
+            return 0;
+        }
+        if (!eng.applyPolicyToDefault(policy, liveDims)) {
+            // 核心失败时回滚主配置，并让内存配置重新以回滚文件为准（维度库失败由 common 保证事务性）
+            rollbackRawTiers(configFile, oldRaw);
+            loadAndApplyConfig(source);
+            source.sendFailure(Component.literal(zh
+                    ? "§c默认方案应用失败，配置未变更；详见服务端日志"
+                    : "§cFailed to apply default policy; config unchanged; see server log"));
+            return 0;
+        }
+        if (eng.getConfig().lines().isEmpty()) {
+            ChunkPlanFabric.scanBans(source.getServer());
+        }
+        String mode = policy.isIndependent()
+                ? (zh ? "维度独立" : "independent") : (zh ? "全维度共享" : "shared");
+        source.sendSuccess(() -> Component.literal(zh
+                ? "§a已应用默认方案（" + mode + "）；只影响 default 跟随者，已有个人分配未变"
+                : "§aApplied default policy (" + mode + "); only default followers changed"), true);
+        return 1;
+    }
+
+    private static void writeRawTiers(Path file, List<QuotaTiers.Tier> tiers) throws IOException {
+        if (tiers == null || tiers.size() != 4) {
+            throw new IOException("原始四档必须恰为 4 项");
+        }
+        for (int tier = 1; tier <= 4; tier++) {
+            QuotaTiers.Tier t = tiers.get(tier - 1);
+            if (t == null) {
+                throw new IOException("第 " + tier + " 档为空");
+            }
+            FabricConfig.writeTierEnabled(file, tier, t.enabled());
+            FabricConfig.writeTierWindow(file, tier, t.window());
+            FabricConfig.writeTierLimit(file, tier, t.limit());
+        }
+    }
+
+    private static void rollbackRawTiers(Path file, List<QuotaTiers.Tier> tiers) {
+        try {
+            writeRawTiers(file, tiers);
+        } catch (IOException | RuntimeException e) {
+            org.slf4j.LoggerFactory.getLogger("ChunkPlan").error("回滚默认方案主配置失败", e);
+        }
+    }
+
     /** /chunkplan help（仅管理员）：config 与 reset 用法教学 */
     private static int help(CommandContext<CommandSourceStack> ctx) {
         QuotaEngine eng = ChunkPlanFabric.engine;
@@ -1777,11 +2046,21 @@ public final class QuotaCommands {
 
     /** 读文件并应用到引擎（reload 与 config 设置共用）；返回配置告警（路径不对外展示） */
     private static List<String> loadAndApplyConfig(CommandContext<CommandSourceStack> ctx) {
+        return loadAndApplyConfig(ctx.getSource());
+    }
+
+    /** 命令与 GUI typed 操作共用的配置热加载入口。 */
+    private static List<String> loadAndApplyConfig(CommandSourceStack source) {
         QuotaEngine eng = ChunkPlanFabric.engine;
+        Path configFile = resolveConfigFile(source);
         List<String> warnings = new ArrayList<>();
-        QuotaConfig config = FabricConfig.load(ChunkPlanFabric.configFile, warnings);
+        QuotaConfig config = FabricConfig.load(configFile, warnings);
         for (String w : warnings) {
             org.slf4j.LoggerFactory.getLogger("ChunkPlan").warn("配置告警: {}", w);
+        }
+        List<QuotaTiers.Tier> rawTiers = FabricConfig.readRawTiers(configFile);
+        if (!eng.setDefaultTiers(rawTiers)) {
+            warnings.add("读取全局四档原始值失败，保留上一份 defaultTiers");
         }
         eng.setConfig(config);
         // logFeeEvents 开关热切换：按新配置重建/清空扣费日志
@@ -1795,6 +2074,14 @@ public final class QuotaCommands {
             eng.setFeeLogger(null);
         }
         return warnings;
+    }
+
+    private static Path resolveConfigFile(CommandContext<CommandSourceStack> ctx) {
+        return resolveConfigFile(ctx.getSource());
+    }
+
+    private static Path resolveConfigFile(CommandSourceStack source) {
+        return ChunkPlanFabric.configFile;
     }
 
     /** /chunkplan config exemptByDefault：查询当前值（gamerule 风格，无权限要求） */
@@ -1820,7 +2107,7 @@ public final class QuotaCommands {
         }
         boolean value = BoolArgumentType.getBool(ctx, "value");
         try {
-            FabricConfig.writeExemptByDefault(ChunkPlanFabric.configFile, value);
+            FabricConfig.writeExemptByDefault(resolveConfigFile(ctx), value);
             List<String> warnings = loadAndApplyConfig(ctx);
             String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
             ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
@@ -1902,6 +2189,18 @@ public final class QuotaCommands {
         QuotaEngine eng = ChunkPlanFabric.engine;
         List<String> names = eng == null ? List.of()
                 : eng.getPresetStore().all().stream().map(PresetStore.Preset::name).toList();
+        return suggestFromList(builder, names);
+    }
+
+    /** preset info：default 动态别名也在补全中。 */
+    private static CompletableFuture<Suggestions> suggestPresetNamesWithDefault(
+            CommandContext<CommandSourceStack> ctx, SuggestionsBuilder builder) {
+        QuotaEngine eng = ChunkPlanFabric.engine;
+        List<String> names = new ArrayList<>();
+        names.add(PresetStore.RESERVED_NAME);
+        if (eng != null) {
+            eng.getPresetStore().all().stream().map(PresetStore.Preset::name).forEach(names::add);
+        }
         return suggestFromList(builder, names);
     }
 
@@ -2031,7 +2330,11 @@ public final class QuotaCommands {
      * 名字/UUID 走 resolvePlayerArg（离线可用）。返回去重后的 GameProfile 列表。
      */
     private static List<GameProfile> resolveTargets(CommandContext<CommandSourceStack> ctx, String arg) {
-        MinecraftServer server = ctx.getSource().getServer();
+        return resolveTargets(ctx.getSource(), arg);
+    }
+
+    private static List<GameProfile> resolveTargets(CommandSourceStack source, String arg) {
+        MinecraftServer server = source.getServer();
         List<ServerPlayer> online = new ArrayList<>(server.getPlayerList().getPlayers());
         for (ServerPlayer p : DevCommands.MOCK_PLAYERS) {
             if (!p.isRemoved()) {
@@ -2042,11 +2345,11 @@ public final class QuotaCommands {
             return switch (arg) {
                 case "@a", "@e" -> online.stream().map(ServerPlayer::getGameProfile).toList();
                 case "@s" -> {
-                    ServerPlayer self = ctx.getSource().getPlayer();
+                    ServerPlayer self = source.getPlayer();
                     yield self == null ? List.of() : List.of(self.getGameProfile());
                 }
                 case "@p" -> {
-                    ServerPlayer self = ctx.getSource().getPlayer();
+                    ServerPlayer self = source.getPlayer();
                     if (self == null) {
                         yield online.isEmpty() ? List.of() : List.of(online.get(0).getGameProfile());
                     }
@@ -2080,7 +2383,7 @@ public final class QuotaCommands {
         return resolvePlayerArg(ctx.getSource().getServer(), ctx.getArgument("player", String.class));
     }
 
-    /** 名字/UUID 解析（check 与 reset 目标共用；离线名走 profileResolver） */
+    /** 名字/UUID 解析（check 与 reset 目标共用；离线名走 profile cache） */
     private static GameProfile resolvePlayerArg(MinecraftServer server, String arg) {
         ServerPlayer online = DevCommands.findByName(server, arg);
         if (online != null) {
@@ -2125,7 +2428,7 @@ public final class QuotaCommands {
         };
     }
 
-    /** 由 UUID 反查显示名：在线/mock 优先，其次 profileResolver，最后 UUID 串 */
+    /** 由 UUID 反查显示名：在线/mock 优先，其次 profile cache，最后 UUID 串 */
     private static String nameOf(MinecraftServer server, UUID uuid) {
         ServerPlayer p = DevCommands.findByUuid(server, uuid);
         if (p != null) {
