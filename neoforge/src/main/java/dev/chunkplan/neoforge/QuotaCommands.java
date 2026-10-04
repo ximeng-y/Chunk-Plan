@@ -934,21 +934,27 @@ public final class QuotaCommands {
             return 0;
         }
         List<String> liveDims = ChunkPlanNeoForge.GameEvents.liveDims(ctx.getSource().getServer());
-        List<String> missing = eng.setDimensionMode(mode, liveDims);
-        if (!missing.isEmpty()) {
+        QuotaEngine.DimensionModeResult result = eng.setDimensionModeWithResult(mode, liveDims);
+        if (result.saveFailed()) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c写入维度配置失败，模式未切换；详见服务端日志",
+                    "§cFailed to persist dimension config; mode was not changed; see server log")));
+            return 0;
+        }
+        if (!result.missingDims().isEmpty()) {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
                     "§c无法启用维度独立计费，以下维度缺少合法落地坐标（先用 /chunkplan config dimension <维度> spawn <x> <y> <z> 配置）：§f"
-                            + String.join("、", missing),
+                            + String.join("、", result.missingDims()),
                     "§cCannot enable per-dimension billing; these dimensions lack valid landing coordinates (set with /chunkplan config dimension <dim> spawn <x> <y> <z>): §f"
-                            + String.join(", ", missing))));
+                            + String.join(", ", result.missingDims()))));
             return 0;
         }
         ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
                 mode.equals("independent")
-                        ? "§a已切换到维度独立计费（各维度额度线已用当前全局配置初始化；全局 window/preset apply 已停用）"
+                        ? "§a已切换到维度独立计费（各维度额度线已用当前全局配置初始化；全局 window 命令保留为默认配置含义）"
                         : "§a已切换到共享计费（全局额度线与预设恢复生效；维度配置保留）",
                 mode.equals("independent")
-                        ? "§aSwitched to per-dimension billing (each dimension initialized from the current global config; global window/preset apply are now inactive)"
+                        ? "§aSwitched to per-dimension billing (each dimension initialized from the current global config; global window commands still target the default policy)"
                         : "§aSwitched to shared billing (global quota lines and presets are back; dimension configs kept)")), true);
         return 1;
     }
@@ -981,7 +987,12 @@ public final class QuotaCommands {
             return 0;
         }
         boolean enable = stateArg.equals("on");
-        eng.setDimensionBilling(dim, enable);
+        if (!eng.setDimensionBilling(dim, enable)) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c写入维度配置失败，计费开关未变更；详见服务端日志",
+                    "§cFailed to persist dimension config; billing state unchanged; see server log")));
+            return 0;
+        }
         ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
                 enable ? "§a已开启维度 " + dim + " 的计费" : "§a已关闭维度 " + dim + " 的计费（该维度不计费、可自由进入）",
                 enable ? "§aEnabled billing for dimension " + dim
@@ -1036,7 +1047,12 @@ public final class QuotaCommands {
         if (dim == null) {
             return 0;
         }
-        eng.clearDimensionSpawn(dim);
+        if (!eng.clearDimensionSpawn(dim)) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c写入维度配置失败，落地坐标未清空；详见服务端日志",
+                    "§cFailed to persist dimension config; landing coordinates were not cleared; see server log")));
+            return 0;
+        }
         ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
                 "§a已清空维度 " + dim + " 的默认落地坐标（独立模式需重新配置才能作为重定向落点）",
                 "§aCleared the landing coordinates of dimension " + dim
@@ -1275,7 +1291,12 @@ public final class QuotaCommands {
             return 0;
         }
         boolean enable = stateArg.equals("on");
-        eng.setRedirectOnExhaust(enable);
+        if (!eng.setRedirectOnExhaust(enable)) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c写入维度配置失败，重定向开关未变更；详见服务端日志",
+                    "§cFailed to persist dimension config; redirect state unchanged; see server log")));
+            return 0;
+        }
         ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
                 enable ? "§a已开启耗尽传送其它维度（额度耗尽的玩家将被传送到可进维度，全部不可进才封禁）"
                        : "§a已关闭耗尽传送其它维度（额度耗尽的玩家将被封禁）",
@@ -1321,11 +1342,18 @@ public final class QuotaCommands {
         DimensionStore.RedirectResult result = eng.setRedirectTarget(slot, dim);
         String[] slotNames = {t(ctx, "首选", "primary"), t(ctx, "次选", "secondary"), t(ctx, "备选", "tertiary")};
         if (result != DimensionStore.RedirectResult.OK) {
-            ctx.getSource().sendFailure(Component.literal(result == DimensionStore.RedirectResult.DUPLICATE
-                    ? t(ctx, "§c维度 " + dim + " 已占用其它槽位（首选/次选/备选不可重复）",
-                            "§cDimension " + dim + " already occupies another slot (primary/secondary/tertiary must differ)")
-                    : t(ctx, "§c请先填写前置槽位（首选为空时不能填次选/备选）",
-                            "§cFill the preceding slot first (secondary needs primary, tertiary needs secondary)")));
+            String message;
+            if (result == DimensionStore.RedirectResult.SAVE_FAILED) {
+                message = t(ctx, "§c写入维度配置失败，槽位未变更；详见服务端日志",
+                        "§cFailed to persist dimension config; slot unchanged; see server log");
+            } else if (result == DimensionStore.RedirectResult.DUPLICATE) {
+                message = t(ctx, "§c维度 " + dim + " 已占用其它槽位（首选/次选/备选不可重复）",
+                        "§cDimension " + dim + " already occupies another slot (primary/secondary/tertiary must differ)");
+            } else {
+                message = t(ctx, "§c请先填写前置槽位（首选为空时不能填次选/备选）",
+                        "§cFill the preceding slot first (secondary needs primary, tertiary needs secondary)");
+            }
+            ctx.getSource().sendFailure(Component.literal(message));
             return 0;
         }
         final String dimFinal = dim;
@@ -1719,7 +1747,13 @@ public final class QuotaCommands {
             return 0;
         }
         int unassigned = eng.deletePreset(name);
-        if (unassigned < 0) {
+        if (unassigned == QuotaEngine.DELETE_SAVE_FAILED) {
+            ctx.getSource().sendFailure(Component.literal(t(ctx,
+                    "§c写入预设库失败，预设与分配均未删除；详见服务端日志",
+                    "§cFailed to persist preset store; preset and assignments were not deleted; see server log")));
+            return 0;
+        }
+        if (unassigned == QuotaEngine.DELETE_NOT_FOUND) {
             ctx.getSource().sendFailure(Component.literal(t(ctx,
                     "预设 " + name + " 不存在", "Preset " + name + " does not exist")));
             return 0;
@@ -1817,7 +1851,12 @@ public final class QuotaCommands {
         String presetArg = parts[1];
         if (presetArg.equalsIgnoreCase("default")) {
             for (GameProfile gp : targets) {
-                eng.clearPlayerPreset(gp.getId());
+                if (!eng.clearPlayerPreset(gp.getId())) {
+                    ctx.getSource().sendFailure(Component.literal(t(ctx,
+                            "§c写入预设库失败，分配未变更；详见服务端日志",
+                            "§cFailed to persist preset store; assignment unchanged; see server log")));
+                    return 0;
+                }
             }
             notifyPresetTargets(ctx, targets, null, zh);
             ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
