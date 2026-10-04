@@ -208,6 +208,9 @@ public final class ChunkPlanGuiScreen extends Screen {
      * 否则 dirty 门禁会把「应用预设」这条正常路径堵死。
      */
     private String presetPreview;
+    private String adminPresetPreview;
+    private String adminPreviewDim;
+    private int previewScroll;
     /** 预览浮层的「返回当前配置」/「应用此预设」命中区（渲染时算出） */
     private int previewBackX, previewBackY, previewBackW, previewBackH;
     private int previewApplyX, previewApplyY, previewApplyW, previewApplyH;
@@ -237,7 +240,7 @@ public final class ChunkPlanGuiScreen extends Screen {
     private final boolean[] policySlotClickable = new boolean[3];
     private final EditBox[] policyTierLimit = new EditBox[4];
     private final Map<String, EditBox[]> policyCoordEdits = new HashMap<>();
-    /** 待确认脚本：确认后先保存草稿、再对同名预设发 apply（避免半截应用） */
+    /** 非 null 表示待确认的草稿应用；空名称也合法，不隐式写命名预设。 */
     private String policyApplyPendingName;
 
     /**
@@ -397,9 +400,35 @@ public final class ChunkPlanGuiScreen extends Screen {
         // 维度独立模式下全局额度线不生效：档位区隐藏（issue #3，与命令层 config window* 阻止同步）；
         // 费率/倍率/豁免/重置/预设(按玩家)保持可用，档位配置由维度页接管
         // issue #14：管理页看「服务器默认方案」的模式，而不是请求玩家实际生效模式（两者可不同）
-        boolean independent = status != null && status.defaultDimensionMode() == 1;
+        GuiStatus.PresetInfo preview = presetInfoOf(adminPresetPreview);
+        boolean independent = status != null && status.defaultDimensionMode() == 1 && preview == null;
         int gy;
-        if (independent) {
+        if (preview != null) {
+            java.util.Arrays.fill(tierLimit, null);
+            java.util.Arrays.fill(tierWindowClickable, false);
+            adminSaveButton = null;
+            addButton(left + 96, adminSaveY(), 242, 20,
+                    Component.translatable("gui.chunkplan.preview.back"), b -> {
+                        adminPresetPreview = null;
+                        rebuild();
+                    });
+            addButton(left + 96, adminAllRowY(), 116, 20,
+                    Component.translatable("gui.chunkplan.policy.preview"), b -> {
+                        presetPreview = adminPresetPreview;
+                        previewScroll = 0;
+                        setFocused(null);
+                    });
+            if (preview.policy().independent() && !preview.policy().dims().isEmpty()) {
+                addButton(left + 218, adminAllRowY(), 120, 20,
+                        Component.literal(shortDim(adminPreviewDimension(preview.policy()).dim())), b -> {
+                            List<GuiStatus.PresetDim> dims = preview.policy().dims();
+                            int index = dims.indexOf(adminPreviewDimension(preview.policy()));
+                            adminPreviewDim = dims.get((index + 1) % dims.size()).dim();
+                            rebuild();
+                        });
+            }
+            gy = adminFeeTop();
+        } else if (independent) {
             // 档位行不建：清掉旧引用，防 savePreset 读到上一模式的残留输入（null = 回落服务端值）
             java.util.Arrays.fill(tierLimit, null);
             adminSaveButton = null;
@@ -505,10 +534,8 @@ public final class ChunkPlanGuiScreen extends Screen {
         // 行 1：选择预设（手绘下拉条 + 真下拉）→ 应用到全体（写全局配置，需确认；独立模式下全局额度线
         // 不生效，按钮隐藏）/ 删除（本地确认，无服务端 confirm 流）
         setRect(presetSelectRect, ADMIN_COL2_X + 96, pgy, 84, 20);
-        if (!independent) {
-            presetApplyBtn = addButton(ADMIN_COL2_X + 186, pgy, 66, 20, Component.translatable("gui.chunkplan.preset_apply"),
-                    b -> applyPresetAll());
-        }
+        presetApplyBtn = addButton(ADMIN_COL2_X + 186, pgy, 66, 20, Component.translatable("gui.chunkplan.preset_apply"),
+                b -> applyPresetAll());
         presetDeleteBtn = addButton(ADMIN_COL2_X + 258, pgy, 52, 20, Component.translatable("gui.chunkplan.preset_delete"),
                 b -> deletePreset());
         pgy += ADMIN_TIER_ROW_H;
@@ -554,6 +581,12 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         if (discardButton != null) {
             discardButton.active = blocked;
+        }
+        if (presetApplyBtn != null && adminPresetPreview != null) {
+            presetApplyBtn.active = true;
+        }
+        if (presetSaveBtn != null) {
+            presetSaveBtn.active = adminPresetPreview == null;
         }
     }
 
@@ -1207,7 +1240,10 @@ public final class ChunkPlanGuiScreen extends Screen {
     private String presetSummaryOf(String name) {
         for (GuiStatus.PresetInfo pi : presetInfos()) {
             if (pi.name().equals(name)) {
-                return presetSummary(pi.tiers());
+                return pi.policy().independent()
+                        ? Component.translatable("gui.chunkplan.dim.independent").getString()
+                                + " · " + pi.policy().dims().size()
+                        : presetSummary(pi.tiers());
             }
         }
         return "";
@@ -1254,6 +1290,15 @@ public final class ChunkPlanGuiScreen extends Screen {
             }
         }
         return null;
+    }
+
+    private GuiStatus.PresetDim adminPreviewDimension(GuiStatus.PresetPolicy policy) {
+        for (GuiStatus.PresetDim dim : policy.dims()) {
+            if (dim.dim().equals(adminPreviewDim)) {
+                return dim;
+            }
+        }
+        return policy.dims().isEmpty() ? null : policy.dims().get(0);
     }
 
     /** 删除当前选中预设：服务端无 confirm 流，本地弹窗确认后直接派发（needsConfirm=false） */
@@ -2432,7 +2477,7 @@ public final class ChunkPlanGuiScreen extends Screen {
      * 而"为什么点不动"恰恰最需要这段解释。置顶同下拉浮层（旧管线 z=350 / 新管线 nextStratum，坑 #51/#52）。
      */
     private void renderRedirectTooltip(GuiGraphics g, int mouseX, int mouseY) {
-        if (page != 2 || status == null || status.dimConfig() == null || redirectButton == null
+        if (page != 2 || policyOpen || status == null || status.dimConfig() == null || redirectButton == null
                 || !inRect(mouseX, mouseY, redirectButton.getX(), redirectButton.getY(),
                         redirectButton.getWidth(), redirectButton.getHeight())) {
             return;
@@ -2497,9 +2542,11 @@ public final class ChunkPlanGuiScreen extends Screen {
                 rebuild();
             }
             case 6 -> {
-                // issue #12：选中预设即进入只读预览（弹浮层），不改全局草稿；「应用预设」仍在浮层内触发
+                // 左栏只读展示所选预设，原全局编辑草稿仍保存在独立字段中。
                 selectedPreset = value;
-                presetPreview = value;
+                adminPresetPreview = value;
+                adminPreviewDim = null;
+                rebuild();
             }
             case 7 -> assignPreset = value;
             case 8 -> resetTier = value == null ? 0 : Integer.parseInt(value); // 条为手绘控件，无需重建
@@ -2509,9 +2556,7 @@ public final class ChunkPlanGuiScreen extends Screen {
                 GuiStatus.PresetInfo pi = presetInfoOf(value);
                 if (pi != null) {
                     policyDraft = newDraftFromPreset(pi);
-                    if (savedPolicyName == null || savedPolicyName.isBlank()) {
-                        savedPolicyName = pi.name();
-                    }
+                    savedPolicyName = pi.name();
                 }
                 policyScroll = 0;
                 rebuild();
@@ -2521,10 +2566,14 @@ public final class ChunkPlanGuiScreen extends Screen {
                 rebuild();
             }
             case 11 -> {
-                if (row >= 0 && selectedDim != null) {
-                    PolicyDimDraft dd = policyDraft == null ? null : policyDraft.dims.get(selectedDim);
-                    if (dd != null) {
-                        dd.tierWindow[row] = value;
+                if (row >= 0 && policyDraft != null) {
+                    if (!policyDraft.independent) {
+                        policyDraft.tierWindow[row] = value;
+                    } else {
+                        PolicyDimDraft dd = draftDim(selectedDim);
+                        if (dd != null) {
+                            dd.tierWindow[row] = value;
+                        }
                     }
                 }
                 rebuild();
@@ -2532,6 +2581,11 @@ public final class ChunkPlanGuiScreen extends Screen {
             case 12 -> {
                 if (slot >= 0 && policyDraft != null) {
                     policyDraft.redirectOrder[slot] = value;
+                    if (value == null) {
+                        for (int i = slot + 1; i < 3; i++) {
+                            policyDraft.redirectOrder[i] = null;
+                        }
+                    }
                 }
                 rebuild();
             }
@@ -2653,10 +2707,10 @@ public final class ChunkPlanGuiScreen extends Screen {
     // ---------- 维度页「计费方案」面板（issue #13、#14） ----------
 
     /** 方案面板列表首行 y（模式行 36 / 方案行 60 / 名称行 84 / 列表头 104） */
-    private static final int POLICY_LIST_TOP = 116;
+    private static final int POLICY_LIST_TOP = 140;
     private static final int POLICY_ROW_H = 24;
     /** 方案面板底部档位编辑器占高（与维度页底部编辑器同量级） */
-    private static final int POLICY_EDITOR_H = 152;
+    private static final int POLICY_EDITOR_H = 120;
 
     private int policyVisibleRows() {
         return Math.max(1, (height - POLICY_LIST_TOP - 32 - POLICY_EDITOR_H - 6) / POLICY_ROW_H);
@@ -2698,17 +2752,18 @@ public final class ChunkPlanGuiScreen extends Screen {
     /** 进入方案面板：以当前运行中的默认方案为草稿起点（不写入任何东西） */
     private void openPolicyPanel() {
         policyOpen = true;
-        selectedPolicy = null;
-        policyDraft = newDraftFromDefault();
-        policyScroll = 0;
+        if (policyDraft == null) {
+            selectedPolicy = null;
+            policyDraft = newDraftFromDefault();
+            policyScroll = 0;
+        }
         policyCoordEdits.clear();
         rebuild();
     }
 
-    /** 退出方案面板：丢弃草稿，回到原维度管理页（不影响运行中的方案） */
+    /** 返回维度管理页时保留本地草稿，再次进入可继续编辑。 */
     private void closePolicyPanel() {
         policyOpen = false;
-        policyDraft = null;
         policyCoordEdits.clear();
         java.util.Arrays.fill(policyTierLimit, null);
         policyScroll = 0;
@@ -2716,6 +2771,10 @@ public final class ChunkPlanGuiScreen extends Screen {
     }
 
     private PolicyDraft newDraftFromDefault() {
+        GuiStatus.PresetInfo current = presetInfoOf("default");
+        if (current != null) {
+            return newDraftFromPreset(current);
+        }
         PolicyDraft d = new PolicyDraft();
         d.independent = status != null && status.defaultDimensionMode() == 1;
         List<QuotaTiers.Tier> tiers = status == null || status.tiers() == null ? List.of() : status.tiers();
@@ -2763,8 +2822,14 @@ public final class ChunkPlanGuiScreen extends Screen {
         for (int s = 0; s < 3; s++) {
             d.redirectOrder[s] = order != null && s < order.size() ? order.get(s) : null;
         }
-        // 以服务端 live 维度为全集：预设未覆盖的维度补默认值，避免保存时漏掉滚动出屏/未选中维度
-        for (String dim : dimensionKeys()) {
+        // 保留预设中暂未加载的维度，并补入当前 live 维度。
+        List<String> allDims = new ArrayList<>(dimensionKeys());
+        for (GuiStatus.PresetDim pd : p.dims()) {
+            if (!allDims.contains(pd.dim())) {
+                allDims.add(pd.dim());
+            }
+        }
+        for (String dim : allDims) {
             PolicyDimDraft dd = new PolicyDimDraft();
             GuiStatus.PresetDim pd = null;
             for (GuiStatus.PresetDim x : p.dims()) {
@@ -2776,9 +2841,9 @@ public final class ChunkPlanGuiScreen extends Screen {
             if (pd != null) {
                 dd.billing = pd.billing();
                 if (pd.hasSpawn()) {
-                    dd.coord[0] = fmtCoord(pd.x());
-                    dd.coord[1] = fmtCoord(pd.y());
-                    dd.coord[2] = fmtCoord(pd.z());
+                    dd.coord[0] = Double.toString(pd.x());
+                    dd.coord[1] = Double.toString(pd.y());
+                    dd.coord[2] = Double.toString(pd.z());
                 }
                 copyTiersInto(pd.tiers(), dd.tierEnabled, dd.tierWindow, dd.tierLimit);
             }
@@ -2829,6 +2894,13 @@ public final class ChunkPlanGuiScreen extends Screen {
                 return null;
             }
             boolean hasSpawn = hasDraftSpawn(dd);
+            boolean anyCoordinate = java.util.Arrays.stream(dd.coord)
+                    .anyMatch(c -> c != null && !c.isBlank());
+            if (anyCoordinate && !hasSpawn) {
+                setFeedback(Component.translatable("gui.chunkplan.feedback.policy_spawn_invalid", shortDim(e.getKey())),
+                        false);
+                return null;
+            }
             double x = 0;
             double y = 0;
             double z = 0;
@@ -2917,7 +2989,8 @@ public final class ChunkPlanGuiScreen extends Screen {
                     rebuild();
                 });
         for (int s = 0; s < 3; s++) {
-            setRect(policySlotRect[s], left + 292 + s * 106, 36, 100, 20);
+            int slotWidth = Math.min(200, (width - 36) / 3);
+            setRect(policySlotRect[s], left + s * (slotWidth + 6), 60, slotWidth, 20);
             policySlotClickable[s] = policyDraft.independent
                     && (s == 0 || policyDraft.redirectOrder[s - 1] != null);
         }
@@ -2925,8 +2998,8 @@ public final class ChunkPlanGuiScreen extends Screen {
                 b -> closePolicyPanel());
 
         // 行 2：方案选择条 + 新建方案 + 只读预览
-        setRect(policySelectRect, left + 60, 60, 180, 20);
-        addButton(left + 246, 60, 84, 20, Component.translatable("gui.chunkplan.policy.new"),
+        setRect(policySelectRect, left + 60, 84, 180, 20);
+        addButton(left + 246, 84, 84, 20, Component.translatable("gui.chunkplan.policy.new"),
                 b -> {
                     policyDraft = newDraftFromDefault();
                     selectedPolicy = null;
@@ -2934,17 +3007,19 @@ public final class ChunkPlanGuiScreen extends Screen {
                     policyScroll = 0;
                     rebuild();
                 });
-        addButton(left + 334, 60, 84, 20, Component.translatable("gui.chunkplan.policy.preview"),
+        addButton(left + 334, 84, 84, 20, Component.translatable("gui.chunkplan.policy.preview"),
                 b -> {
                     if (selectedPolicy != null) {
                         presetPreview = selectedPolicy; // 复用只读预览浮层，不写任何草稿
+                        previewScroll = 0;
+                        setFocused(null);
                     } else {
                         setFeedback(Component.translatable("gui.chunkplan.feedback.no_preset"), false);
                     }
                 });
 
         // 行 3：方案名称
-        policyNameEdit = new EditBox(font, left + 84, 84, 160, 20, Component.empty());
+        policyNameEdit = new EditBox(font, left + 84, 108, 160, 20, Component.empty());
         policyNameEdit.setValue(savedPolicyName != null ? savedPolicyName : "");
         policyNameEdit.setResponder(v -> savedPolicyName = v);
         policyNameEdit.setMaxLength(32);
@@ -2989,25 +3064,27 @@ public final class ChunkPlanGuiScreen extends Screen {
         policyApplyBtn = addButton(left + 156, policySaveY(), 170, 20,
                 Component.translatable("gui.chunkplan.policy.apply_global"), b -> savePolicyDraft(true));
 
-        // 底部档位编辑器（选中维度；草稿内该维度四档）
+        // 共享模式编辑共享四档；独立模式编辑所选维度四档，切换模式保留双方草稿。
         int et = policyEditorTop();
         setRect(policyDimRect, left, et, 150, 18);
         PolicyDimDraft sd = draftDim(selectedDim);
-        if (sd != null) {
+        if (!policyDraft.independent || sd != null) {
+            boolean[] enabled = policyDraft.independent ? sd.tierEnabled : policyDraft.tierEnabled;
+            String[] limits = policyDraft.independent ? sd.tierLimit : policyDraft.tierLimit;
             for (int i = 0; i < 4; i++) {
                 final int idx = i;
                 int ry = et + 24 + i * 22;
                 addButton(left, ry, 52, 20,
-                        Component.translatable(sd.tierEnabled[i] ? "gui.chunkplan.enabled" : "gui.chunkplan.disabled"),
+                        Component.translatable(enabled[i] ? "gui.chunkplan.enabled" : "gui.chunkplan.disabled"),
                         b -> {
-                            sd.tierEnabled[idx] = !sd.tierEnabled[idx];
+                            enabled[idx] = !enabled[idx];
                             rebuild();
                         });
                 setRect(policyTierWindowRect[i], left + 58, ry, 74, 20);
                 policyTierLimit[i] = new EditBox(font, left + 138, ry, 104, 20, Component.empty());
-                policyTierLimit[i].setValue(sd.tierLimit[i] == null ? "" : sd.tierLimit[i]);
-                policyTierLimit[i].setResponder(v -> sd.tierLimit[idx] = v);
-                policyTierLimit[i].active = sd.tierEnabled[i];
+                policyTierLimit[i].setValue(limits[i] == null ? "" : limits[i]);
+                policyTierLimit[i].setResponder(v -> limits[idx] = v);
+                policyTierLimit[i].active = enabled[i];
                 addRenderableWidget(policyTierLimit[i]);
             }
         }
@@ -3024,7 +3101,6 @@ public final class ChunkPlanGuiScreen extends Screen {
             return;
         }
         int x = 12;
-        g.drawString(font, Component.translatable("gui.chunkplan.policy.title"), x, 20, COL_ACCENT);
         // 模式行槽位文字（手绘下拉条）
         if (policyDraft != null) {
             for (int s = 0; s < 3; s++) {
@@ -3036,12 +3112,14 @@ public final class ChunkPlanGuiScreen extends Screen {
                         !policySlotClickable[s]);
             }
         }
-        g.drawString(font, Component.translatable("gui.chunkplan.policy.select"), x, 66, COL_TEXT);
+        g.drawString(font, Component.translatable("gui.chunkplan.policy.select"), x, 90, COL_TEXT);
         drawSelectBar(g, policySelectRect[0], policySelectRect[1], policySelectRect[2], policySelectRect[3],
                 Component.literal(selectedPolicy == null
                         ? Component.translatable("gui.chunkplan.policy.current").getString() : selectedPolicy), false);
-        g.drawString(font, Component.translatable("gui.chunkplan.policy.name_label"), x, 90, COL_TEXT);
-        g.drawString(font, Component.translatable("gui.chunkplan.policy.overwrite_hint"), x + 252, 90, COL_GRAY);
+        g.drawString(font, Component.translatable("gui.chunkplan.policy.name_label"), x, 114, COL_TEXT);
+        g.drawString(font, Component.literal(font.plainSubstrByWidth(
+                Component.translatable("gui.chunkplan.policy.overwrite_hint").getString(),
+                Math.max(40, width - x - 260))), x + 252, 114, COL_GRAY);
 
         List<String> dims = draftDimKeys();
         int visibleRows = policyVisibleRows();
@@ -3060,27 +3138,29 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         // 底部档位编辑器
         drawSelectBar(g, policyDimRect[0], policyDimRect[1], policyDimRect[2], policyDimRect[3],
-                Component.literal(selectedDim == null ? "—" : shortDim(selectedDim)), false);
+                policyDraft.independent
+                        ? Component.literal(selectedDim == null ? "—" : shortDim(selectedDim))
+                        : Component.translatable("gui.chunkplan.dim.shared"), !policyDraft.independent);
         PolicyDimDraft sd = draftDim(selectedDim);
-        if (sd != null) {
+        if (!policyDraft.independent || sd != null) {
+            boolean[] enabled = policyDraft.independent ? sd.tierEnabled : policyDraft.tierEnabled;
+            String[] windows = policyDraft.independent ? sd.tierWindow : policyDraft.tierWindow;
             for (int i = 0; i < 4; i++) {
-                String win = sd.tierWindow[i] == null ? "" : sd.tierWindow[i];
+                String win = windows[i] == null ? "" : windows[i];
                 drawSelectBar(g, policyTierWindowRect[i][0], policyTierWindowRect[i][1],
                         policyTierWindowRect[i][2], policyTierWindowRect[i][3],
-                        Component.literal(win.isEmpty() ? "—" : win), !sd.tierEnabled[i]);
+                        Component.literal(win.isEmpty() ? "—" : win), !enabled[i]);
             }
         }
     }
 
     /**
-     * 保存方案草稿：{@code thenApply=false} 只写预设库（不改运行中的方案）；
-     * {@code thenApply=true} 先弹确认，确认后把同一份草稿按 {@code apply_default} 交给服务端，
-     * 由服务端在同一入口内落盘并应用到全局默认（只影响跟随 default 的玩家）。
+     * 保存与应用分离：保存写命名预设（覆盖会更新其分配玩家），应用只修改全局默认。
      * 校验失败时草稿原样保留，管理员可就地修正重试。
      */
     private void savePolicyDraft(boolean thenApply) {
         String name = policyNameEdit == null ? "" : policyNameEdit.getValue().trim();
-        if (!name.matches(PRESET_NAME_PATTERN) || name.equalsIgnoreCase(PRESET_NAME_RESERVED)) {
+        if (!thenApply && (!name.matches(PRESET_NAME_PATTERN) || name.equalsIgnoreCase(PRESET_NAME_RESERVED))) {
             setFeedback(Component.translatable("gui.chunkplan.feedback.preset_name_invalid"), false);
             return;
         }
@@ -3090,11 +3170,9 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         if (!thenApply) {
             ChunkPlanClient.sendPresetPolicy("save", name, null, policy);
-            selectedPolicy = name;
-            setFeedback(Component.translatable("gui.chunkplan.feedback.policy_saved", name), true);
             return;
         }
-        showConfirm(Component.translatable("gui.chunkplan.confirm.apply_policy_global", name));
+        showConfirm(Component.translatable("gui.chunkplan.confirm.apply_policy_global"));
         this.policyApplyPendingName = name; // showConfirm 会清槽位，必须在其后挂载
     }
 
@@ -3145,6 +3223,9 @@ public final class ChunkPlanGuiScreen extends Screen {
         // 预设只读预览失效（被删除/改名）：退出预览，避免左列停留在不存在的方案上
         if (presetPreview != null && !presetNames().contains(presetPreview)) {
             presetPreview = null;
+        }
+        if (adminPresetPreview != null && !presetNames().contains(adminPresetPreview)) {
+            adminPresetPreview = null;
         }
         // 方案面板引用的预设失效：不强行退出（草稿是本地状态，仍可继续编辑/另存），只清失效的选中名
         if (selectedPolicy != null && !presetNames().contains(selectedPolicy)) {
@@ -3377,9 +3458,25 @@ public final class ChunkPlanGuiScreen extends Screen {
             g.drawString(font, Component.translatable("gui.chunkplan.no_permission"), x, 44, COL_RED);
             return;
         }
-        boolean independent = status != null && status.defaultDimensionMode() == 1;
+        GuiStatus.PresetInfo preview = presetInfoOf(adminPresetPreview);
+        boolean independent = status != null && status.defaultDimensionMode() == 1 && preview == null;
         int gy;
-        if (independent) {
+        if (preview != null) {
+            GuiStatus.PresetDim dim = adminPreviewDimension(preview.policy());
+            List<QuotaTiers.Tier> tiers = preview.policy().independent()
+                    ? (dim == null ? List.of() : dim.tiers()) : preview.tiers();
+            for (int i = 0; i < 4; i++) {
+                int ry = ADMIN_TIER_TOP + i * ADMIN_TIER_ROW_H;
+                g.drawString(font, Component.literal("tier" + (i + 1)), x, ry + 6, COL_TEXT);
+                String text = i < tiers.size() ? tierText(tiers.get(i)) : "—";
+                g.drawString(font, Component.literal(text), x + 96, ry + 6, COL_TEXT);
+            }
+            g.drawString(font, Component.literal(font.plainSubstrByWidth(
+                    Component.translatable("gui.chunkplan.preview.not_applied").getString(),
+                    ADMIN_COL2_X - x - 8)), x, adminHintY(), COL_YELLOW);
+            g.fill(0, adminDividerY(), ADMIN_COL2_X, adminDividerY() + 1, COL_DIVIDER);
+            gy = adminFeeTop();
+        } else if (independent) {
             // 提示串贴左列排，右列标签自 ADMIN_COL2_X 起——英文串更长，须按左列宽度截断防压到右列
             g.drawString(font, Component.literal(font.plainSubstrByWidth(
                             Component.translatable("gui.chunkplan.admin_independent_hint").getString(),
@@ -3461,7 +3558,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         pcgy += ADMIN_TIER_ROW_H;
         // 脏状态门禁说明：有未保存档位更改时，预设的应用/删除/分配置灰（原因可悬停查看）；
         // 紧跟「放弃未保存更改」按钮右侧（该行右侧是唯一空位），不压任何控件；串偏长，按剩余宽截断
-        if (tiersDirty()) {
+        if (tiersDirty() && preview == null) {
             g.drawString(font, Component.literal(font.plainSubstrByWidth(
                             Component.translatable("gui.chunkplan.preset_gate_hint").getString(),
                             Math.max(60, width - (ADMIN_COL2_X + 204) - 8))),
@@ -3469,7 +3566,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         // 「保存为预设」所见即所存的对照说明（仅档位区可见——独立模式下档位行不显示，界面值无从谈起）：
         // 第一行说明存的是界面值，第二行把全局配置的 12 值摘要摆出来供比对（右列最底部，截断防出屏）
-        if (!independent) {
+        if (!independent && preview == null) {
             int noteW = Math.max(60, width - c2x - 8);
             g.drawString(font, Component.literal(font.plainSubstrByWidth(
                             Component.translatable("gui.chunkplan.preset_from_ui").getString(), noteW)),
@@ -3487,13 +3584,13 @@ public final class ChunkPlanGuiScreen extends Screen {
      */
     private void renderControlHoverHint(GuiGraphics g, int mouseX, int mouseY) {
         Component hint = null;
-        if (page == 1 && tiersDirty()) {
+        if (page == 1 && tiersDirty() && adminPresetPreview == null) {
             // 预设三动作置灰原因（setTooltip 在灰显按钮上不触发，故手绘）；「保存为预设」不受门禁
             if (hoverButton(presetApplyBtn, mouseX, mouseY) || hoverButton(presetDeleteBtn, mouseX, mouseY)
                     || hoverButton(presetAssignBtn, mouseX, mouseY)) {
                 hint = Component.translatable("gui.chunkplan.preset_gate_reason");
             }
-        } else if (page == 2 && status != null && status.dimConfig() != null) {
+        } else if (page == 2 && !policyOpen && status != null && status.dimConfig() != null) {
             if (hoverButton(dimModeButton, mouseX, mouseY)) {
                 hint = Component.translatable("gui.chunkplan.dim.mode_hint");
             } else {
@@ -3594,12 +3691,16 @@ public final class ChunkPlanGuiScreen extends Screen {
             return;
         }
         List<String> body = policyPreviewLines(pi.policy());
-        int w = Math.min(width - 16, 380);
+        int w = Math.min(width - 16, 480);
         int lineH = font.lineHeight + 1;
         int shown = Math.min(body.size(), Math.max(1, (height - 140) / lineH));
         int h = 76 + shown * lineH + 24;
         int bx = (width - w) / 2;
         int by = Math.max(34, (height - h) / 2);
+        previewScroll = Math.max(0, Math.min(previewScroll, body.size() - shown));
+        g.flush(); // 提交此前内容：浮层与页面内容分开成批，不被合批 mod 混排
+        g.pose().pushPose();
+        g.pose().translate(0.0F, 0.0F, 350.0F);
         g.fill(0, 0, width, height, 0x80000000);
         g.fill(bx, by, bx + w, by + h, COL_PANEL);
         g.fill(bx, by, bx + w, by + 1, 0xFFFFFFFF);
@@ -3612,7 +3713,7 @@ public final class ChunkPlanGuiScreen extends Screen {
                 bx + 8, by + 20, COL_YELLOW);
         int ty = by + 34;
         for (int i = 0; i < shown; i++) {
-            g.drawString(font, Component.literal(font.plainSubstrByWidth(body.get(i), w - 16)),
+            g.drawString(font, Component.literal(font.plainSubstrByWidth(body.get(i + previewScroll), w - 16)),
                     bx + 8, ty, COL_TEXT);
             ty += lineH;
         }
@@ -3629,6 +3730,12 @@ public final class ChunkPlanGuiScreen extends Screen {
                 Component.translatable("gui.chunkplan.preview.back"), 0xFF555555);
         drawDialogButton(g, previewApplyX, previewApplyY, previewApplyW, previewApplyH,
                 Component.translatable("gui.chunkplan.preset_apply"), 0xFF2E7D32);
+        if (body.size() > shown) {
+            g.drawString(font, Component.literal((previewScroll + 1) + "–"
+                    + (previewScroll + shown) + " / " + body.size()), bx + 8, btnY - 12, COL_GRAY);
+        }
+        g.pose().popPose();
+        g.flush(); // 提交浮层内容
     }
 
     /** 预设内容的只读展示行：共享=四档；独立=四档（若有）+ 重定向三槽 + 每维度摘要与四档 */
@@ -3637,11 +3744,11 @@ public final class ChunkPlanGuiScreen extends Screen {
         boolean indep = p.independent();
         out.add(Component.translatable(indep ? "gui.chunkplan.dim.independent"
                 : "gui.chunkplan.dim.shared").getString());
-        List<QuotaTiers.Tier> tiers = p.tiers();
-        for (int i = 0; i < tiers.size() && i < 4; i++) {
-            out.add("tier" + (i + 1) + ": " + tierText(tiers.get(i)));
-        }
         if (!indep) {
+            List<QuotaTiers.Tier> tiers = p.tiers();
+            for (int i = 0; i < tiers.size() && i < 4; i++) {
+                out.add("tier" + (i + 1) + ": " + tierText(tiers.get(i)));
+            }
             return out;
         }
         out.add(Component.translatable("gui.chunkplan.dim.redirect").getString() + ": "
@@ -3671,7 +3778,7 @@ public final class ChunkPlanGuiScreen extends Screen {
         if (t == null) {
             return "—";
         }
-        return t.enabled() ? (t.window() + " / " + fmtLimit(t.limit())) : "off";
+        return (t.enabled() ? "" : "off · ") + t.window() + " / " + fmtLimit(t.limit());
     }
 
     private String slotLabel(int s) {
@@ -3705,14 +3812,14 @@ public final class ChunkPlanGuiScreen extends Screen {
                 presetPreview = null; // 返回或点浮层外：仅退出预览，草稿与其他意图原样保留
                 return true;
             }
-            presetPreview = null; // 应用前先关预览，让确认弹窗与结果反馈可见（applyPresetAll 会弹确认）
+            selectedPreset = presetPreview;
+            presetPreview = null; // 应用前先关预览，让确认弹窗与结果反馈可见
             applyPresetAll();
             return true;
         }
         if (pendingConfirm) {
             if (inRect(mouseX, mouseY, yesX, yesY, yesW, yesH)) {
-                // 方案「应用到全局默认」：确认后一次性把草稿交给服务端（action=apply_default）——
-                // 服务端在同一入口内先落盘预设、再应用到全局默认，不存在半截旧内容被应用的窗口
+                // 应用草稿只修改 default，不隐式保存或覆盖命名预设。
                 if (policyApplyPendingName != null) {
                     GuiStatus.PresetPolicy policy = buildPolicyFromDraft();
                     if (policy != null) {
@@ -3787,12 +3894,23 @@ public final class ChunkPlanGuiScreen extends Screen {
         }
         // 维度页：重定向槽位 / 维度选择条 / 档位窗口（开关是 Button 自管点击）
         if (page == 2 && policyOpen && policyDraft != null) {
+            if (policyDraft.independent) {
+                List<String> dims = draftDimKeys();
+                for (int i = policyScroll; i < Math.min(dims.size(), policyScroll + policyVisibleRows()); i++) {
+                    int ry = POLICY_LIST_TOP + (i - policyScroll) * POLICY_ROW_H;
+                    if (inRect(mouseX, mouseY, 12, ry, 144, 20)) {
+                        selectedDim = dims.get(i);
+                        rebuild();
+                        return true;
+                    }
+                }
+            }
             // 方案面板的手绘控件：方案选择条 / 维度选择条 / 重定向槽位 / 档位窗口
             if (inRect(mouseX, mouseY, policySelectRect)) {
                 openDimDropdown(9, policySelectRect);
                 return true;
             }
-            if (inRect(mouseX, mouseY, policyDimRect)) {
+            if (policyDraft.independent && inRect(mouseX, mouseY, policyDimRect)) {
                 openDimDropdown(10, policyDimRect);
                 return true;
             }
@@ -3804,7 +3922,10 @@ public final class ChunkPlanGuiScreen extends Screen {
                 }
             }
             for (int i = 0; i < 4; i++) {
-                if (inRect(mouseX, mouseY, policyTierWindowRect[i])) {
+                PolicyDimDraft dim = draftDim(selectedDim);
+                boolean enabled = policyDraft.independent
+                        ? dim != null && dim.tierEnabled[i] : policyDraft.tierEnabled[i];
+                if (enabled && inRect(mouseX, mouseY, policyTierWindowRect[i])) {
                     toggleTierRow = i;
                     openDimDropdown(11, policyTierWindowRect[i]);
                     return true;
@@ -3881,6 +4002,9 @@ public final class ChunkPlanGuiScreen extends Screen {
             presetPreview = null;
             return true;
         }
+        if (presetPreview != null) {
+            return true;
+        }
         if (pendingConfirm && keyCode == 256) { // ESC 取消确认而非关闭界面
             pendingConfirm = false;
             pendingBatch = null;
@@ -3950,6 +4074,10 @@ public final class ChunkPlanGuiScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double deltaX, double deltaY) {
+        if (presetPreview != null) {
+            previewScroll = Math.max(0, previewScroll + (deltaY < 0 ? 1 : deltaY > 0 ? -1 : 0));
+            return true;
+        }
         // 维度页列表滚轮滚动（1.21.1 为 4 参签名；forge 1.20.1 为 3 参，移植时注意）
         if (page == 2 && !pendingConfirm) {
             if (policyOpen) {
