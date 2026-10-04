@@ -6,7 +6,10 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 客户端 GUI 状态数据（纯 Java DTO，零 Minecraft/加载器依赖）。
@@ -61,17 +64,42 @@ public record GuiStatus(
         GuiFeedback feedback,
         List<PresetInfo> presetInfos,
         String serverModVersion,
-        boolean versionMismatch) {
+        boolean versionMismatch,
+        int defaultDimensionMode) {
+
+    /** v5 及以前的构造入口：默认方案视图回落为玩家模式，避免旧壳层调用点编译中断。 */
+    public GuiStatus(
+            double firstEntryFee, double familiarEntryFee, double highSpeedThreshold, double highSpeedMultiplier,
+            boolean exemptByDefault, boolean isExempt, boolean inExemptList, boolean isAdmin,
+            List<QuotaTiers.Tier> tiers, List<QuotaEngine.LineStatus> lines,
+            boolean allExceeded, long recoveryMillis, int worstPercent,
+            List<String> presets, String playerPreset, int dimensionMode,
+            String currentDim, List<String> dimensions, List<DimLines> dimLines,
+            DimConfigStatus dimConfig, GuiFeedback feedback, List<PresetInfo> presetInfos,
+            String serverModVersion, boolean versionMismatch) {
+        this(firstEntryFee, familiarEntryFee, highSpeedThreshold, highSpeedMultiplier,
+                exemptByDefault, isExempt, inExemptList, isAdmin,
+                tiers, lines, allExceeded, recoveryMillis, worstPercent,
+                presets, playerPreset, dimensionMode, currentDim, dimensions, dimLines,
+                dimConfig, feedback, presetInfos, serverModVersion, versionMismatch, dimensionMode);
+    }
 
     /** 协议版本：两端不一致时 decode 返回版本横幅（versionMismatch=true，兜底页显示两端版本号）；
      *  v3 增加维度字段（issue #3）；v4 在协议头插入 serverModVersion（版本不匹配兜底）；
-     *  v5 追加 feedback（GUI 命令反馈）与 presetInfos（预设内容），两者编在既有字段之后 */
-    public static final int PROTOCOL_VERSION = 5;
+     *  v5 追加 feedback（GUI 命令反馈）与 presetInfos（预设内容），两者编在既有字段之后；
+     *  v6 预设内容升级为完整 BillingPolicy 快照，并追加 defaultDimensionMode（管理页默认方案视图） */
+    public static final int PROTOCOL_VERSION = 6;
 
     /** 编解码防御上限（防损坏数据异常内存分配，与维度实际规模相比极宽松） */
     private static final int MAX_DIMS = 64;
     private static final int MAX_LINES_PER_DIM = 16;
     private static final int MAX_PRESETS = 64;
+    public static final int MAX_POLICY_BYTES = 262144;
+
+    /** C2S 完整 policy 操作的动作名（命令与网络业务入口共用，客户端不得自定义其它值）。 */
+    public static final String POLICY_ACTION_SAVE = "save";
+    public static final String POLICY_ACTION_APPLY_DEFAULT = "apply_default";
+    public static final String POLICY_ACTION_ASSIGN = "assign";
 
     /** 单维度的玩家额度状态（issue #3，用量页维度下拉渲染用） */
     public record DimLines(String dim, List<QuotaEngine.LineStatus> lines, long recoveryMillis, int worstPercent) {
@@ -91,8 +119,109 @@ public record GuiStatus(
     public record GuiFeedback(String text, boolean success) {
     }
 
-    /** 预设名 + 四档内容（v5）：管理页需展示预设内容（而非只有名字），仅管理员下发 */
-    public record PresetInfo(String name, List<QuotaTiers.Tier> tiers) {
+    /**
+     * GUI 使用的完整计费方案快照（v6）：既用于 S2C 预设预览，也用于 C2S 保存整套维度草稿。
+     * 仅承载数据，不在这里做权限/落点业务校验；服务端最终以 {@code BillingPolicy} 为准。
+     */
+    public record PresetPolicy(String mode, List<QuotaTiers.Tier> tiers, boolean redirectOnExhaust,
+                               List<String> redirectOrder, List<PresetDim> dims) {
+        public static final String MODE_SHARED = DimensionStore.MODE_SHARED;
+        public static final String MODE_INDEPENDENT = DimensionStore.MODE_INDEPENDENT;
+
+        public PresetPolicy {
+            mode = mode == null || mode.isEmpty() ? MODE_SHARED : mode;
+            tiers = tiers == null ? List.of() : List.copyOf(tiers);
+            redirectOrder = normalizeOrder(redirectOrder);
+            dims = dims == null ? List.of() : List.copyOf(dims);
+        }
+
+        public static PresetPolicy shared(List<QuotaTiers.Tier> tiers) {
+            return new PresetPolicy(MODE_SHARED, tiers, false, List.of(), List.of());
+        }
+
+        public boolean independent() {
+            return MODE_INDEPENDENT.equals(mode);
+        }
+
+        /** 由引擎 core policy 生成 GUI wire 快照（协议层不直接暴露 core 类型）。 */
+        public static PresetPolicy fromBillingPolicy(BillingPolicy policy) {
+            if (policy == null) {
+                return null;
+            }
+            List<PresetDim> dims = new ArrayList<>();
+            for (Map.Entry<String, DimensionStore.DimConfig> e : policy.dimensions().entrySet()) {
+                DimensionStore.DimConfig d = e.getValue();
+                DimensionStore.SpawnPoint spawn = d == null ? null : d.spawn();
+                dims.add(new PresetDim(e.getKey(), d == null || d.billing(), spawn != null,
+                        spawn == null ? 0 : spawn.x(), spawn == null ? 0 : spawn.y(), spawn == null ? 0 : spawn.z(),
+                        // shared policy 的维度条目可能只有 billing/spawn；wire 仍保持四档结构可回读，
+                        // 避免 readPolicy 对空 tiers 整包拒绝。独立 policy 的维度四档由 A 核心负责校验。
+                        d == null || d.tiers() == null ? policy.sharedTiers() : d.tiers()));
+            }
+            return new PresetPolicy(policy.mode(), policy.sharedTiers(), policy.redirectOnExhaust(),
+                    policy.redirectOrder(), dims);
+        }
+
+        /** 将客户端草稿还原为 core policy；结构校验由 BillingPolicy/引擎业务入口负责。 */
+        public BillingPolicy toBillingPolicy() {
+            Map<String, DimensionStore.DimConfig> map = new LinkedHashMap<>();
+            for (PresetDim d : dims) {
+                DimensionStore.SpawnPoint spawn = d.hasSpawn()
+                        ? new DimensionStore.SpawnPoint(d.x(), d.y(), d.z())
+                        : null;
+                map.put(d.dim(), new DimensionStore.DimConfig(d.billing(), spawn, d.tiers()));
+            }
+            return new BillingPolicy(mode, tiers, map, redirectOnExhaust, redirectOrder);
+        }
+
+        private static List<String> normalizeOrder(List<String> order) {
+            List<String> out = new ArrayList<>(3);
+            for (int i = 0; i < 3; i++) {
+                out.add(order != null && i < order.size() ? order.get(i) : null);
+            }
+            return Collections.unmodifiableList(out);
+        }
+    }
+
+    /** 独立方案内单个维度的完整快照；hasSpawn=false 时 x/y/z 无意义 */
+    public record PresetDim(String dim, boolean billing, boolean hasSpawn, double x, double y, double z,
+                            List<QuotaTiers.Tier> tiers) {
+        public PresetDim {
+            dim = dim == null ? "" : dim;
+            tiers = tiers == null ? List.of() : List.copyOf(tiers);
+        }
+    }
+
+    /** 预设名 + 完整策略；保留由四档构造的兼容入口，旧调用可继续读取 tiers()。 */
+    public record PresetInfo(String name, PresetPolicy policy) {
+        public PresetInfo {
+            name = name == null ? "" : name;
+            policy = policy == null ? PresetPolicy.shared(List.of()) : policy;
+        }
+
+        public PresetInfo(String name, List<QuotaTiers.Tier> tiers) {
+            this(name, PresetPolicy.shared(tiers));
+        }
+
+        public List<QuotaTiers.Tier> tiers() {
+            return policy.tiers();
+        }
+
+        public String mode() {
+            return policy.mode();
+        }
+
+        public boolean redirectOnExhaust() {
+            return policy.redirectOnExhaust();
+        }
+
+        public List<String> redirectOrder() {
+            return policy.redirectOrder();
+        }
+
+        public List<PresetDim> dims() {
+            return policy.dims();
+        }
     }
 
     /**
@@ -104,6 +233,132 @@ public record GuiStatus(
         return new GuiStatus(0, 0, 0, 0, false, false, false, false,
                 List.of(), List.of(), false, -1, -1, List.of(), null,
                 0, null, List.of(), List.of(), null, null, List.of(), serverModVersion, true);
+    }
+
+    /**
+     * C2S 预设草稿编解码：仅承载完整 policy，不做业务校验。客户端发送前调用
+     * {@link #encodePolicy(PresetPolicy)}，服务端解码后必须再交给 common policy 校验和业务入口。
+     */
+    public static byte[] encodePolicy(PresetPolicy policy) {
+        if (policy == null) {
+            return null;
+        }
+        try {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream(256);
+            DataOutputStream out = new DataOutputStream(bos);
+            writePolicy(out, policy);
+            out.flush();
+            byte[] data = bos.toByteArray();
+            return data.length <= MAX_POLICY_BYTES ? data : null;
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    public static PresetPolicy decodePolicy(byte[] data) {
+        if (data == null || data.length == 0 || data.length > MAX_POLICY_BYTES) {
+            return null;
+        }
+        try {
+            return readPolicy(new DataInputStream(new ByteArrayInputStream(data)));
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static void writePolicy(DataOutputStream out, PresetPolicy policy) throws IOException {
+        PresetPolicy p = policy == null ? PresetPolicy.shared(List.of()) : policy;
+        out.writeUTF(p.mode() == null ? PresetPolicy.MODE_SHARED : p.mode());
+        writeTiers(out, p.tiers());
+        out.writeBoolean(p.redirectOnExhaust());
+        List<String> order = p.redirectOrder();
+        out.writeInt(3);
+        for (int i = 0; i < 3; i++) {
+            out.writeUTF(i < order.size() && order.get(i) != null ? order.get(i) : "");
+        }
+        List<PresetDim> dims = p.dims();
+        out.writeInt(dims.size());
+        for (PresetDim dim : dims) {
+            out.writeUTF(dim.dim() == null ? "" : dim.dim());
+            out.writeBoolean(dim.billing());
+            out.writeBoolean(dim.hasSpawn());
+            if (dim.hasSpawn()) {
+                out.writeDouble(dim.x());
+                out.writeDouble(dim.y());
+                out.writeDouble(dim.z());
+            }
+            writeTiers(out, dim.tiers());
+        }
+    }
+
+    private static PresetPolicy readPolicy(DataInputStream in) throws IOException {
+        String mode = in.readUTF();
+        if (!PresetPolicy.MODE_SHARED.equals(mode) && !PresetPolicy.MODE_INDEPENDENT.equals(mode)) {
+            return null;
+        }
+        List<QuotaTiers.Tier> tiers = readTiers(in, 4);
+        if (tiers == null) {
+            return null;
+        }
+        boolean redirectOnExhaust = in.readBoolean();
+        int orderCount = in.readInt();
+        if (orderCount != 3) {
+            return null;
+        }
+        List<String> order = new ArrayList<>(3);
+        for (int i = 0; i < 3; i++) {
+            String value = in.readUTF();
+            order.add(value.isEmpty() ? null : value);
+        }
+        int dimCount = in.readInt();
+        if (dimCount < 0 || dimCount > MAX_DIMS) {
+            return null;
+        }
+        List<PresetDim> dims = new ArrayList<>(dimCount);
+        for (int i = 0; i < dimCount; i++) {
+            String dim = in.readUTF();
+            boolean billing = in.readBoolean();
+            boolean hasSpawn = in.readBoolean();
+            double x = 0;
+            double y = 0;
+            double z = 0;
+            if (hasSpawn) {
+                x = in.readDouble();
+                y = in.readDouble();
+                z = in.readDouble();
+            }
+            List<QuotaTiers.Tier> dimTiers = readTiers(in, 4);
+            if (dimTiers == null) {
+                return null;
+            }
+            dims.add(new PresetDim(dim, billing, hasSpawn, x, y, z, dimTiers));
+        }
+        return new PresetPolicy(mode, tiers, redirectOnExhaust, order, dims);
+    }
+
+    private static void writeTiers(DataOutputStream out, List<QuotaTiers.Tier> tiers) throws IOException {
+        List<QuotaTiers.Tier> list = tiers == null ? List.of() : tiers;
+        out.writeInt(list.size());
+        for (QuotaTiers.Tier t : list) {
+            if (t == null) {
+                throw new IOException("null tier");
+            }
+            out.writeBoolean(t.enabled());
+            out.writeUTF(t.window() == null ? "" : t.window());
+            out.writeDouble(t.limit());
+        }
+    }
+
+    private static List<QuotaTiers.Tier> readTiers(DataInputStream in, int max) throws IOException {
+        int count = in.readInt();
+        if (count < 0 || count > max) {
+            return null;
+        }
+        List<QuotaTiers.Tier> tiers = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            tiers.add(new QuotaTiers.Tier(in.readBoolean(), in.readUTF(), in.readDouble()));
+        }
+        return tiers;
     }
 
     /** 序列化为字节数组（DataOutputStream，纯 Java）。
@@ -210,20 +465,16 @@ public record GuiStatus(
                 out.writeBoolean(feedback.success());
                 out.writeUTF(feedback.text() == null ? "" : feedback.text());
             }
-            // v5：预设内容（仅管理员下发，presetInfos 为空即无）
+            // v5/v6：预设内容（仅管理员下发，presetInfos 为空即无；v6 携带完整 policy）
             out.writeInt(presetInfos == null ? 0 : presetInfos.size());
             if (presetInfos != null) {
                 for (PresetInfo pi : presetInfos) {
                     out.writeUTF(pi.name() == null ? "" : pi.name());
-                    List<QuotaTiers.Tier> pt = pi.tiers() == null ? List.of() : pi.tiers();
-                    out.writeInt(pt.size());
-                    for (QuotaTiers.Tier t : pt) {
-                        out.writeBoolean(t.enabled());
-                        out.writeUTF(t.window() == null ? "" : t.window());
-                        out.writeDouble(t.limit());
-                    }
+                    writePolicy(out, pi.policy());
                 }
             }
+            // v6：管理页默认方案视图；玩家实际模式仍由 dimensionMode 表示
+            out.writeInt(defaultDimensionMode);
             out.flush();
             return bos.toByteArray();
         } catch (IOException e) {
@@ -367,16 +618,13 @@ public record GuiStatus(
             List<PresetInfo> presetInfos = new ArrayList<>(presetInfoCount);
             for (int i = 0; i < presetInfoCount; i++) {
                 String name = in.readUTF();
-                int pc = in.readInt();
-                if (pc < 0 || pc > MAX_LINES_PER_DIM) {
+                PresetPolicy policy = readPolicy(in);
+                if (policy == null) {
                     return null;
                 }
-                List<QuotaTiers.Tier> pt = new ArrayList<>(pc);
-                for (int j = 0; j < pc; j++) {
-                    pt.add(new QuotaTiers.Tier(in.readBoolean(), in.readUTF(), in.readDouble()));
-                }
-                presetInfos.add(new PresetInfo(name, pt));
+                presetInfos.add(new PresetInfo(name, policy));
             }
+            int defaultDimensionMode = in.readInt();
             return new GuiStatus(first, familiar, threshold, multiplier,
                     exemptByDefault, isExempt, inExemptList, isAdmin,
                     List.copyOf(tiers), List.copyOf(lines), allExceeded, recovery, worst,
@@ -384,7 +632,7 @@ public record GuiStatus(
                     dimensionMode, currentDim.isEmpty() ? null : currentDim,
                     List.copyOf(dimensions), List.copyOf(dimLines), dimConfig,
                     feedback, List.copyOf(presetInfos),
-                    serverModVersion.isEmpty() ? null : serverModVersion, false);
+                    serverModVersion.isEmpty() ? null : serverModVersion, false, defaultDimensionMode);
         } catch (IOException | RuntimeException e) {
             return null; // 截断/损坏/版本不符：安全回退
         }

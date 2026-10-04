@@ -7,6 +7,7 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import dev.chunkplan.common.BillingPolicy;
 import dev.chunkplan.common.FeedbackText;
 import dev.chunkplan.common.GuiStatus;
 import dev.chunkplan.common.PresetStore;
@@ -67,6 +68,23 @@ public final class ChunkPlanNetwork {
         }
     }
 
+    /** C2S：完整 policy 草稿操作（save / apply_default / assign）；policy 为 GuiStatus 编码字节。 */
+    public record PresetPolicyPayload(String action, String name, String target, byte[] policy)
+            implements CustomPacketPayload {
+        public static final Type<PresetPolicyPayload> TYPE =
+                new Type<>(ResourceLocation.fromNamespaceAndPath(MODID, "preset_policy"));
+        public static final StreamCodec<RegistryFriendlyByteBuf, PresetPolicyPayload> STREAM_CODEC =
+                StreamCodec.composite(ByteBufCodecs.STRING_UTF8, PresetPolicyPayload::action,
+                        ByteBufCodecs.STRING_UTF8, PresetPolicyPayload::name,
+                        ByteBufCodecs.STRING_UTF8, PresetPolicyPayload::target,
+                        ByteBufCodecs.BYTE_ARRAY, PresetPolicyPayload::policy, PresetPolicyPayload::new);
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
     public record GuiStatusPayload(byte[] status) implements CustomPacketPayload {
         public static final Type<GuiStatusPayload> TYPE =
                 new Type<>(ResourceLocation.fromNamespaceAndPath(MODID, "gui_status"));
@@ -86,6 +104,7 @@ public final class ChunkPlanNetwork {
     public static void registerTypes() {
         PayloadTypeRegistry.playC2S().register(GuiRequestPayload.TYPE, GuiRequestPayload.STREAM_CODEC);
         PayloadTypeRegistry.playC2S().register(GuiCommandPayload.TYPE, GuiCommandPayload.STREAM_CODEC);
+        PayloadTypeRegistry.playC2S().register(PresetPolicyPayload.TYPE, PresetPolicyPayload.STREAM_CODEC);
         PayloadTypeRegistry.playS2C().register(GuiStatusPayload.TYPE, GuiStatusPayload.STREAM_CODEC);
     }
 
@@ -127,6 +146,15 @@ public final class ChunkPlanNetwork {
                     sendStatus(context.player(), null);
                     return;
                 }
+                sendStatus(context.player(), fb.toFeedback(result > 0));
+            });
+        });
+        ServerPlayNetworking.registerGlobalReceiver(PresetPolicyPayload.TYPE, (payload, context) -> {
+            context.server().execute(() -> {
+                CommandSourceStack base = context.player().createCommandSourceStack();
+                FeedbackSource fb = new FeedbackSource(context.player());
+                int result = QuotaCommands.handlePresetPolicyAction(base.withSource(fb), payload.action(),
+                        payload.name(), payload.target(), payload.policy());
                 sendStatus(context.player(), fb.toFeedback(result > 0));
             });
         });
@@ -244,7 +272,7 @@ public final class ChunkPlanNetwork {
     public static GuiStatus buildGuiStatus(QuotaEngine eng, ServerPlayer player, GuiStatus.GuiFeedback feedback) {
         UUID uuid = player.getUUID();
         QuotaConfig cfg = eng.getConfig();
-        boolean independent = eng.isIndependentMode();
+        boolean independent = eng.isIndependentMode(uuid);
         String currentDim = player.level().dimension().location().toString();
         List<String> liveDims = ChunkPlanFabric.liveDims(player.getServer());
         QuotaEngine.QuotaStatus qs = independent ? eng.quotaStatus(uuid, currentDim) : eng.quotaStatus(uuid);
@@ -263,29 +291,33 @@ public final class ChunkPlanNetwork {
             int dworst = ds.worstAlert() == null ? -1 : ds.worstAlert().percent();
             dimLines.add(new GuiStatus.DimLines(dim, ds.lines(), ds.recoveryMillis(), dworst));
         }
-        // v3：维度管理配置仅管理员下发；维度集合 = live 维度 ∪ store 已有条目（键去重排序）
+        // v3/v6：管理页展示服务器 default policy，而不是请求者个人 policy
         GuiStatus.DimConfigStatus dimConfig = null;
+        BillingPolicy defaultPolicy = eng.defaultPolicy();
         if (isAdmin) {
             java.util.TreeSet<String> keys = new java.util.TreeSet<>(liveDims);
-            keys.addAll(eng.getDimensionStore().configuredDimKeys());
+            keys.addAll(defaultPolicy.dimensions().keySet());
             List<GuiStatus.DimEntry> entries = new java.util.ArrayList<>();
             for (String dim : keys) {
-                dev.chunkplan.common.DimensionStore.SpawnPoint sp = eng.getDimensionStore().spawn(dim);
-                List<QuotaTiers.Tier> tiers = eng.getDimensionStore().tiers(dim);
-                entries.add(new GuiStatus.DimEntry(dim, eng.getDimensionStore().isBillingEnabled(dim),
+                dev.chunkplan.common.DimensionStore.SpawnPoint sp = defaultPolicy.spawn(dim);
+                dev.chunkplan.common.DimensionStore.DimConfig dc = defaultPolicy.dimensions().get(dim);
+                List<QuotaTiers.Tier> tiers = dc == null ? List.of() : dc.tiers();
+                entries.add(new GuiStatus.DimEntry(dim, defaultPolicy.isBillingEnabled(dim),
                         sp != null, sp == null ? 0 : sp.x(), sp == null ? 0 : sp.y(), sp == null ? 0 : sp.z(),
                         tiers == null ? List.of() : tiers));
             }
-            dimConfig = new GuiStatus.DimConfigStatus(eng.getDimensionStore().redirectOnExhaust(),
-                    eng.getDimensionStore().redirectOrder(), entries);
+            dimConfig = new GuiStatus.DimConfigStatus(defaultPolicy.redirectOnExhaust(),
+                    defaultPolicy.redirectOrder(), entries);
         }
-        // v5（issue #1、#2）：预设内容（名 + 四档，恒 4 项）仅管理员下发，与 presets 同策略；
-        // tiers() 理论上非 null，仍防御性兜底（坑 #54 的不可变列表 NPE 教训）
-        List<GuiStatus.PresetInfo> presetInfos = isAdmin
-                ? eng.getPresetStore().all().stream()
-                        .map(p -> new GuiStatus.PresetInfo(p.name(), p.tiers() == null ? List.of() : p.tiers()))
-                        .toList()
-                : List.of();
+        // v6：default 动态方案 + 命名预设完整 policy（仅管理员下发）
+        List<GuiStatus.PresetInfo> presetInfos = new java.util.ArrayList<>();
+        if (isAdmin) {
+            presetInfos.add(new GuiStatus.PresetInfo("default", GuiStatus.PresetPolicy.fromBillingPolicy(defaultPolicy)));
+            for (PresetStore.Preset p : eng.getPresetStore().all()) {
+                presetInfos.add(new GuiStatus.PresetInfo(p.name(),
+                        GuiStatus.PresetPolicy.fromBillingPolicy(p.policy())));
+            }
+        }
         return new GuiStatus(
                 cfg.firstEntryFee(), cfg.familiarEntryFee(), cfg.highSpeedThreshold(), cfg.highSpeedMultiplier(),
                 cfg.exemptByDefault(), isExempt, inList, isAdmin,
@@ -294,6 +326,6 @@ public final class ChunkPlanNetwork {
                 presetNames, eng.getPlayerPresetName(uuid),
                 independent ? 1 : 0, currentDim, liveDims, dimLines, dimConfig,
                 feedback, presetInfos,
-                ChunkPlanFabric.MOD_VERSION, false);
+                ChunkPlanFabric.MOD_VERSION, false, defaultPolicy.isIndependent() ? 1 : 0);
     }
 }
