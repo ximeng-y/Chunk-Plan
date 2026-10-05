@@ -612,8 +612,8 @@ public final class QuotaCommands {
                 }
                 String warning = warnings.isEmpty() ? "" : t(ctx, "§c（含告警，详见服务端日志）", "§c(warnings present, see server log)");
                 ctx.getSource().sendSuccess(() -> Component.literal(t(ctx,
-                        "§a已应用预设 §b" + a.name() + "§a：写入全局配置，对全体玩家生效",
-                        "§aApplied preset §b" + a.name() + "§a: written to the global config, effective for all players")
+                        "§a已应用预设 §b" + a.name() + "§a",
+                        "§aApplied preset §b" + a.name() + "§a")
                         + warning), true);
                 return 1;
             } catch (IOException e) {
