@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+import dev.chunkplan.common.BillingPolicy;
 import dev.chunkplan.common.FeedbackText;
 import dev.chunkplan.common.GuiStatus;
 import dev.chunkplan.common.PresetStore;
@@ -80,6 +81,23 @@ public final class ChunkPlanNetwork {
         }
     }
 
+    /** C2S：完整 policy 草稿操作（save / apply_default / assign）；policy 为 GuiStatus 编码字节。 */
+    public record PresetPolicyPayload(String action, String name, String target, byte[] policy)
+            implements CustomPacketPayload {
+        public static final Type<PresetPolicyPayload> TYPE = new Type<>(
+                ResourceLocation.fromNamespaceAndPath(ChunkPlanNeoForge.MODID, "preset_policy"));
+        public static final StreamCodec<RegistryFriendlyByteBuf, PresetPolicyPayload> STREAM_CODEC =
+                StreamCodec.composite(ByteBufCodecs.STRING_UTF8, PresetPolicyPayload::action,
+                        ByteBufCodecs.STRING_UTF8, PresetPolicyPayload::name,
+                        ByteBufCodecs.STRING_UTF8, PresetPolicyPayload::target,
+                        ByteBufCodecs.BYTE_ARRAY, PresetPolicyPayload::policy, PresetPolicyPayload::new);
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+    }
+
     /** S2C：编码后的 {@link GuiStatus} 字节数组 */
     public record GuiStatusPayload(byte[] status) implements CustomPacketPayload {
         public static final Type<GuiStatusPayload> TYPE =
@@ -99,6 +117,8 @@ public final class ChunkPlanNetwork {
         PayloadRegistrar registrar = event.registrar(CHANNEL_VERSION).optional();
         registrar.playToServer(GuiRequestPayload.TYPE, GuiRequestPayload.STREAM_CODEC, ChunkPlanNetwork::handleRequest);
         registrar.playToServer(GuiCommandPayload.TYPE, GuiCommandPayload.STREAM_CODEC, ChunkPlanNetwork::handleCommand);
+        registrar.playToServer(PresetPolicyPayload.TYPE, PresetPolicyPayload.STREAM_CODEC,
+                ChunkPlanNetwork::handlePresetPolicy);
         registrar.playToClient(GuiStatusPayload.TYPE, GuiStatusPayload.STREAM_CODEC, ChunkPlanNetwork::handleStatus);
     }
 
@@ -154,6 +174,20 @@ public final class ChunkPlanNetwork {
                 return;
             }
             // 成功/失败判据用 Brigadier 返回值：本 mod 命令体全部"失败 return 0、成功 return 1"
+            sendStatus(player, fb.toFeedback(result > 0));
+        });
+    }
+
+    private static void handlePresetPolicy(PresetPolicyPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> {
+            ServerPlayer player = asPlayer(context);
+            if (player == null) {
+                return;
+            }
+            CommandSourceStack base = player.createCommandSourceStack();
+            FeedbackSource fb = new FeedbackSource(player);
+            int result = QuotaCommands.handlePresetPolicyAction(
+                    base.withSource(fb), payload.action(), payload.name(), payload.target(), payload.policy());
             sendStatus(player, fb.toFeedback(result > 0));
         });
     }
@@ -271,7 +305,7 @@ public final class ChunkPlanNetwork {
         boolean isAdmin = player.hasPermissions(2);
         boolean isExempt = eng.isExempt(uuid, isAdmin);
         boolean inList = cfg.exemptPlayers().contains(uuid);
-        boolean independent = eng.isIndependentMode();
+        boolean independent = eng.isIndependentMode(uuid);
         String currentDim = player.level().dimension().location().toString();
         List<String> liveDims = ChunkPlanNeoForge.GameEvents.liveDims(player.getServer());
         // 独立模式（issue #3）：主状态为玩家当前维度的额度情况；共享模式同现状
@@ -288,29 +322,33 @@ public final class ChunkPlanNetwork {
             int dworst = ds.worstAlert() == null ? -1 : ds.worstAlert().percent();
             dimLines.add(new GuiStatus.DimLines(dim, ds.lines(), ds.recoveryMillis(), dworst));
         }
-        // v3：维度管理配置仅管理员下发；维度集合 = live 维度 ∪ store 已有条目（键去重排序）
+        // v3/v6：管理页展示服务器 default policy，而不是请求者个人 policy
         GuiStatus.DimConfigStatus dimConfig = null;
+        BillingPolicy defaultPolicy = eng.defaultPolicy();
         if (isAdmin) {
             java.util.TreeSet<String> keys = new java.util.TreeSet<>(liveDims);
-            keys.addAll(eng.getDimensionStore().configuredDimKeys());
+            keys.addAll(defaultPolicy.dimensions().keySet());
             List<GuiStatus.DimEntry> entries = new java.util.ArrayList<>();
             for (String dim : keys) {
-                dev.chunkplan.common.DimensionStore.SpawnPoint sp = eng.getDimensionStore().spawn(dim);
-                List<QuotaTiers.Tier> tiers = eng.getDimensionStore().tiers(dim);
-                entries.add(new GuiStatus.DimEntry(dim, eng.getDimensionStore().isBillingEnabled(dim),
+                dev.chunkplan.common.DimensionStore.SpawnPoint sp = defaultPolicy.spawn(dim);
+                dev.chunkplan.common.DimensionStore.DimConfig dc = defaultPolicy.dimensions().get(dim);
+                List<QuotaTiers.Tier> tiers = dc == null ? List.of() : dc.tiers();
+                entries.add(new GuiStatus.DimEntry(dim, defaultPolicy.isBillingEnabled(dim),
                         sp != null, sp == null ? 0 : sp.x(), sp == null ? 0 : sp.y(), sp == null ? 0 : sp.z(),
                         tiers == null ? List.of() : tiers));
             }
-            dimConfig = new GuiStatus.DimConfigStatus(eng.getDimensionStore().redirectOnExhaust(),
-                    eng.getDimensionStore().redirectOrder(), entries);
+            dimConfig = new GuiStatus.DimConfigStatus(defaultPolicy.redirectOnExhaust(),
+                    defaultPolicy.redirectOrder(), entries);
         }
-        // v5（issue #1、#2）：预设内容（名 + 四档，恒 4 项）仅管理员下发，与 presets 同策略；
-        // tiers() 理论上非 null，仍防御性兜底（坑 #54 的不可变列表 NPE 教训）
-        List<GuiStatus.PresetInfo> presetInfos = isAdmin
-                ? eng.getPresetStore().all().stream()
-                        .map(p -> new GuiStatus.PresetInfo(p.name(), p.tiers() == null ? List.of() : p.tiers()))
-                        .toList()
-                : List.of();
+        // v6：default 动态方案 + 命名预设完整 policy（仅管理员下发）
+        List<GuiStatus.PresetInfo> presetInfos = new java.util.ArrayList<>();
+        if (isAdmin) {
+            presetInfos.add(new GuiStatus.PresetInfo("default", GuiStatus.PresetPolicy.fromBillingPolicy(defaultPolicy)));
+            for (PresetStore.Preset p : eng.getPresetStore().all()) {
+                presetInfos.add(new GuiStatus.PresetInfo(p.name(),
+                        GuiStatus.PresetPolicy.fromBillingPolicy(p.policy())));
+            }
+        }
         return new GuiStatus(
                 cfg.firstEntryFee(), cfg.familiarEntryFee(), cfg.highSpeedThreshold(), cfg.highSpeedMultiplier(),
                 cfg.exemptByDefault(), isExempt, inList, isAdmin,
@@ -319,7 +357,7 @@ public final class ChunkPlanNetwork {
                 presetNames, eng.getPlayerPresetName(uuid),
                 independent ? 1 : 0, currentDim, liveDims, dimLines, dimConfig,
                 feedback, presetInfos,
-                ChunkPlanNeoForge.MOD_VERSION, false);
+                ChunkPlanNeoForge.MOD_VERSION, false, defaultPolicy.isIndependent() ? 1 : 0);
     }
 
     /** 实际生效的配置文件：world/serverconfig/ 覆盖层存在时优先（与启动/命令语义一致） */

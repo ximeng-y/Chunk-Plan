@@ -5,8 +5,10 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 
+import dev.chunkplan.common.GuiStatus;
 import dev.chunkplan.common.QuotaConfig;
 import dev.chunkplan.common.QuotaEngine;
+import dev.chunkplan.common.QuotaTiers;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
@@ -191,6 +193,73 @@ public final class ChunkPlanMessages {
         return RECOVER_FMT.format(Instant.ofEpochMilli(epochMillis).atZone(ZoneId.systemDefault()));
     }
 
+    /** preset info：完整显示预设模式、四档与每维度 billing/spawn/tiers/重定向。 */
+    public static String presetInfoText(String name, GuiStatus.PresetPolicy policy, boolean zh) {
+        if (policy == null) {
+            return zh ? "§c预设不存在或数据不可用" : "§cPreset does not exist or is unavailable";
+        }
+        StringBuilder sb = new StringBuilder(zh ? "§e--- ChunkPlan 预设：" : "§e--- ChunkPlan preset: ");
+        sb.append("§b").append(name).append(" §e---");
+        sb.append(zh ? "\n§f模式：§b" : "\n§fMode: §b")
+                .append(policy.independent() ? (zh ? "维度独立计费" : "independent") : (zh ? "全维度共享计费" : "shared"));
+        sb.append(zh ? "\n§f共享四档：" : "\n§fShared tiers: ").append(tiersText(policy.tiers(), zh));
+        sb.append(zh ? "\n§f耗尽传送：§b" : "\n§fRedirect on exhaust: §b")
+                .append(policy.redirectOnExhaust() ? (zh ? "开启" : "on") : (zh ? "关闭" : "off"));
+        sb.append(zh ? "\n§f传送槽：" : "\n§fRedirect slots: ").append(orderText(policy.redirectOrder(), zh));
+        if (policy.dims().isEmpty()) {
+            sb.append(zh ? "\n§7维度配置：未保存额外维度条目" : "\n§7Dimension config: no extra entries");
+        } else {
+            for (GuiStatus.PresetDim d : policy.dims()) {
+                sb.append(zh ? "\n§f维度 §b" : "\n§fDimension §b").append(d.dim());
+                sb.append(zh ? "§7：计费 " : "§7: billing ")
+                        .append(d.billing() ? (zh ? "§a开" : "§aon") : (zh ? "§c关" : "§coff"));
+                sb.append(zh ? "，落点 " : ", spawn ").append(d.hasSpawn()
+                        ? "§b(" + d.x() + ", " + d.y() + ", " + d.z() + ")"
+                        : (zh ? "§7未配置" : "§7unset"));
+                sb.append(zh ? "，tiers " : ", tiers ").append(tiersText(d.tiers(), zh));
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String tiersText(List<QuotaTiers.Tier> tiers, boolean zh) {
+        if (tiers == null || tiers.isEmpty()) {
+            return zh ? "§7无" : "§7none";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < tiers.size(); i++) {
+            QuotaTiers.Tier t = tiers.get(i);
+            if (i > 0) {
+                sb.append("§7 / ");
+            }
+            sb.append("§b").append(i + 1).append(" ");
+            if (t == null) {
+                sb.append(zh ? "§c非法" : "§cinvalid");
+            } else if (t.enabled()) {
+                sb.append("§a").append(t.window()).append("§7≤").append(t.limit());
+            } else {
+                sb.append(zh ? "§7关（" : "§7off (").append(t.window()).append("§7, ").append(t.limit()).append(")");
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String orderText(List<String> order, boolean zh) {
+        String[] names = zh
+                ? new String[]{"首选", "次选", "备选"}
+                : new String[]{"primary", "secondary", "tertiary"};
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 3; i++) {
+            if (i > 0) {
+                sb.append("§7 / ");
+            }
+            sb.append("§b").append(names[i]).append("§7=");
+            sb.append(order != null && i < order.size() && order.get(i) != null
+                    ? "§f" + order.get(i) : (zh ? "§7未配置" : "§7unset"));
+        }
+        return sb.toString();
+    }
+
     /**
      * check 状态消息：各额度线状态 + 耗尽/未满 + 豁免提示（坑 #21 金色行）。
      * /chunkplan check 与登录欢迎共用此渲染（坑 #22：文案归属壳层）。
@@ -345,15 +414,15 @@ public final class ChunkPlanMessages {
             return "§e--- ChunkPlan 管理员帮助 ---\n"
                     + "§f查询：§a/chunkplan check [玩家]\n"
                     + "§f重置：§a/chunkplan reset <玩家 | @a> [tier1 | tier2 | tier3 | tier4 | all]§f，执行后点击消息中的确认链接（60 秒内有效）\n"
-                    + "§f调整计费窗口开关：§a/chunkplan config window <tier1 | tier2 | tier3 | tier4 | all> <on | off>§f，关闭会清空该窗口所有玩家记录，需确认\n"
+                    + "§f调整计费窗口开关：§a/chunkplan config window <tier1 | tier2 | tier3 | tier4 | all> <on | off>§f，关闭会清空该窗口记录（仅 default 跟随者，已分配个人预设者不受影响），需确认\n"
                     + "§f调整计费窗口刷新时长：§a/chunkplan config windowTime <tier1..tier4> <时长>§f，时长从补全列表选择（如 5h/24h）\n"
                     + "§f调整额度上限：§a/chunkplan config windowLimit <tier1..tier4> <数值>§f，调低可能踢出已超限玩家，需确认\n"
                     + "§f高速移动倍率：§a/chunkplan config highSpeedMultiplier <数值>§f（1.00~1000.00）\n"
                     + "§f新区块费用：§a/chunkplan config firstEntryFee <数值>§f（0.00~999999999.99）\n"
                     + "§f旧区块费用：§a/chunkplan config familiarEntryFee <数值>§f（0.00~999999999.99）\n"
                     + "§f开关管理员豁免：§a/chunkplan config exemptByDefault <true | false>\n"
-                    + "§f预设：§a/chunkplan preset list | save <名称> [12 值] | delete <名称>§f，save 只写名称即把当前配置存为预设；写 13 个词（开关 窗口 上限 × 4 档）则按指定 12 值保存，不影响全局配置（存储在服务端）；名称为 1~32 字符，中文等字符均可用，不可含空格/引号/反斜杠，default 为保留名\n"
-                    + "§f应用预设到全体：§a/chunkplan preset apply <名称>§f，写入全局配置，需确认\n"
+                    + "§f预设：§a/chunkplan preset list | info <名称> | save <名称> [12 值] | delete <名称>§f，info 显示该预设的实际模式与完整配置（default 为动态全局别名）；save 只写名称即把当前配置存为预设；写 13 个词（开关 窗口 上限 × 4 档）则按指定 12 值保存，不影响全局配置（存储在服务端）；名称为 1~32 字符，中文等字符均可用，不可含空格/引号/反斜杠，default 为保留名\n"
+                    + "§f应用预设到默认方案：§a/chunkplan preset apply <名称>§f，写入服务器默认配置（只影响 default 跟随者，不覆盖已有个人分配），需确认\n"
                     + "§f按玩家应用预设：§a/chunkplan preset player <玩家 | @a> [名称 | default]§f，缺省名称时查询当前分配\n"
                     + "§f维度计费模式：§a/chunkplan config dimensionMode <shared | independent>§f，独立模式要求每个维度先配置落地坐标\n"
                     + "§f维度配置：§a/chunkplan config dimension <维度> billing <on | off> | spawn <x> <y> <z>§f（计费开关两种模式通用）\n"
@@ -365,15 +434,15 @@ public final class ChunkPlanMessages {
         return "§e--- ChunkPlan Admin Help ---\n"
                 + "§fQuery: §a/chunkplan check [player]\n"
                 + "§fReset: §a/chunkplan reset <player | @a> [tier1 | tier2 | tier3 | tier4 | all]§f - click the confirm link in the message (valid for 60s)\n"
-                + "§fToggle billing windows: §a/chunkplan config window <tier1 | tier2 | tier3 | tier4 | all> <on | off>§f - disabling clears that window's records for all players (needs confirmation)\n"
+                + "§fToggle billing windows: §a/chunkplan config window <tier1 | tier2 | tier3 | tier4 | all> <on | off>§f - disabling clears that window's records (only default followers; players with a personal preset are unaffected) (needs confirmation)\n"
                 + "§fAdjust billing window refresh: §a/chunkplan config windowTime <tier1..tier4> <duration>§f - pick from the tab-completed presets (e.g. 5h/24h)\n"
                 + "§fAdjust window limit: §a/chunkplan config windowLimit <tier1..tier4> <number>§f - lowering may kick players who now exceed (needs confirmation)\n"
                 + "§fHigh-speed movement multiplier: §a/chunkplan config highSpeedMultiplier <number>§f (1.00~1000.00)\n"
                 + "§fNew chunk fee: §a/chunkplan config firstEntryFee <number>§f (0.00~999999999.99)\n"
                 + "§fExplored chunk fee: §a/chunkplan config familiarEntryFee <number>§f (0.00~999999999.99)\n"
                 + "§fToggle admin exemption: §a/chunkplan config exemptByDefault <true | false>\n"
-                + "§fPresets: §a/chunkplan preset list | save <name> [12 values] | delete <name>§f - save with a name alone stores the current config; with 12 values (enabled window limit x 4 tiers) it stores them without touching the global config (stored server-side). Names are 1-32 characters, any script; no spaces, quotes or backslashes; \"default\" is reserved\n"
-                + "§fApply a preset to everyone: §a/chunkplan preset apply <name>§f - writes the global config (needs confirmation)\n"
+                + "§fPresets: §a/chunkplan preset list | info <name> | save <name> [12 values] | delete <name>§f - info shows the preset's actual mode and full config (\"default\" is the live global alias); save with a name alone stores the current config; with 12 values (enabled window limit x 4 tiers) it stores them without touching the global config (stored server-side). Names are 1-32 characters, any script; no spaces, quotes or backslashes; \"default\" is reserved\n"
+                + "§fApply a preset to the default policy: §a/chunkplan preset apply <name>§f - writes the server default config (only default followers; existing personal assignments are kept) (needs confirmation)\n"
                 + "§fApply a preset per player: §a/chunkplan preset player <player | @a> [name | default]§f - omit the name to query the current assignment\n"
                 + "§fDimension billing mode: §a/chunkplan config dimensionMode <shared | independent>§f - independent mode requires every dimension to have landing coordinates configured first\n"
                 + "§fDimension config: §a/chunkplan config dimension <dim> billing <on | off> | spawn <x> <y> <z>§f (the billing toggle works in both modes)\n"
