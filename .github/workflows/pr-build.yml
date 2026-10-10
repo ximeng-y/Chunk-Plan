@@ -1,0 +1,118 @@
+name: Build
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  root-build:
+    name: Root build (JDK 21 / Gradle 8.14.2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 安装 JDK 21
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: 配置 Gradle
+        uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          gradle-version: '8.14.2'
+          cache-read-only: ${{ github.event_name == 'pull_request' && 'true' || 'false' }}
+
+      - name: 配置 CI toolchain
+        shell: bash
+        run: |
+          gradle_user_home="${GRADLE_USER_HOME:-$HOME/.gradle}"
+          mkdir -p "$gradle_user_home"
+          printf '%s\n' "org.gradle.java.installations.paths=$JAVA_HOME_17_X64,$JAVA_HOME_21_X64" >> "$gradle_user_home/gradle.properties"
+          sed -i '/^org.gradle.java.installations.paths=/d' gradle.properties fabric-multi/gradle.properties
+
+      - name: 编译与测试
+        shell: bash
+        run: gradle --no-daemon --console=plain --stacktrace :common:test build
+
+      - name: 校验根构建产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          mod_version="$(sed -n 's/^mod_version=//p' gradle.properties | tr -d '\r')"
+          test -f "neoforge/build/libs/chunkplan-${mod_version}-neoforge-1.21.1.jar"
+          test -f "fabric/build/libs/chunkplan-${mod_version}-fabric-1.21.1.jar"
+          test -f "forge/build/libs/chunkplan-${mod_version}-forge-1.20.1.jar"
+          find neoforge/build/libs fabric/build/libs forge/build/libs -maxdepth 1 -type f -name "chunkplan-${mod_version}-*.jar" -print
+
+  fabric-multi-build:
+    name: Fabric multi build (JDK 25 / Gradle 9.5.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: 安装 JDK 21
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: 安装 JDK 25
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: 配置 Gradle
+        uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          gradle-version: '9.5.1'
+          cache-read-only: ${{ github.event_name == 'pull_request' && 'true' || 'false' }}
+
+      - name: 配置 CI toolchain
+        shell: bash
+        run: |
+          gradle_user_home="${GRADLE_USER_HOME:-$HOME/.gradle}"
+          mkdir -p "$gradle_user_home"
+          printf '%s\n' "org.gradle.java.installations.paths=$JAVA_HOME_21_X64,$JAVA_HOME_25_X64" >> "$gradle_user_home/gradle.properties"
+          sed -i '/^org.gradle.java.installations.paths=/d' gradle.properties fabric-multi/gradle.properties
+
+      - name: 编译与打包
+        shell: bash
+        run: gradle --no-daemon --console=plain --stacktrace -p fabric-multi build
+
+      - name: 校验 Fabric 多版本产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          mod_version="$(sed -n 's/^mod_version=//p' fabric-multi/gradle.properties | tr -d '\r')"
+          for mc_version in 1.21.11 26.1.2 26.2; do
+            test -f "fabric-multi/fabric-${mc_version}/build/libs/chunkplan-${mod_version}-fabric-${mc_version}.jar"
+            find "fabric-multi/fabric-${mc_version}/build/libs" -maxdepth 1 -type f -name "chunkplan-${mod_version}-fabric-${mc_version}.jar" -print
+          done
