@@ -10,7 +10,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.UUID;
@@ -44,15 +43,21 @@ class FeeLogFileTest {
 
     private static final UUID PLAYER = UUID.randomUUID();
 
-    /** 基准时间：2026-08-13 12:00（本地时区） */
+    /** 基准时刻：2026-08-13T04:00:00Z（格式化结果随系统时区变化） */
     private static final long BASE = Instant.parse("2026-08-13T04:00:00Z").toEpochMilli();
+
+    private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+    private static final DateTimeFormatter TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     @TempDir
     Path tmp;
 
     private static String dateStr(long millis) {
-        return LocalDate.from(Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()))
-                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+        return Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDate().format(DATE_FORMAT);
+    }
+
+    private static String timestampStr(long millis) {
+        return Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).format(TIMESTAMP_FORMAT);
     }
 
     private static String gunzip(Path gz) throws IOException {
@@ -62,7 +67,7 @@ class FeeLogFileTest {
     }
 
     private static String line(long millis) {
-        return dateStr(millis) + " 12:00:00 | uuid=" + PLAYER + " | dim=minecraft:overworld"
+        return timestampStr(millis) + " | uuid=" + PLAYER + " | dim=minecraft:overworld"
                 + " | chunk=(1,2) | speed=1.00 | fee=1.00 | total=1.00";
     }
 
